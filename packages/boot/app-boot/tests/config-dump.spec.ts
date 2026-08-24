@@ -9,11 +9,11 @@
 
 import { mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 import { describe, expect, it, vi } from 'vitest'
 import * as yaml from 'js-yaml'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
-import { loadOverlayPatches, renderConfigDump } from '../src/index.ts'
+import { composeEntries, loadOverlayPatches, renderConfigDump } from '../src/index.ts'
 
 const NAME = 'dsh-test-bin'
 
@@ -35,6 +35,23 @@ function writeBase(dir: string): string {
 }
 
 describe('renderConfigDump', () => {
+  it('patches the shipped web runtime once when the Alibaba Cloud overlay enables invite auth', () => {
+    const root = resolve(import.meta.dirname, '../../../..')
+    const load = (file: string) => {
+      const path = resolve(root, file)
+      return loadOverlayPatches(NAME, path)
+    }
+    const entries = composeEntries([
+      load('packages/bundle/base/cordis.patch.yml'),
+      load('packages/bundle/web-app/cordis.patch.yml'),
+      load('deploy/alibaba-cloud/invite-auth.cordis.yml'),
+    ])
+    const runtime = entries.filter(entry => entry.id === 'web-runtime')
+    expect(runtime).toHaveLength(1)
+    expect(runtime[0]!.inject).toEqual(['webStartup', 'inviteAuthReadiness'])
+    expect(entries.filter(entry => entry.id === 'invite-auth')).toHaveLength(1)
+  })
+
   it('composes overlay layers in order, prints !!js verbatim, and labels each section with its source and patches', () => {
     const dir = tmp()
     const base = writeBase(dir)
