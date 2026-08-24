@@ -20,7 +20,7 @@ Activation fails loudly before publishing readiness when either environment refe
 
 ## HTTP routes
 
-| Method | Path | Success | Purpose |
+| Method | Path | Status | Purpose |
 |---|---|---|---|
 | `GET` | `/__invite/login` | `200` or `303` | Render the Chinese login page, or redirect an already authenticated browser to a safe local `next` path. |
 | `POST` | `/__invite/login` | `303` | Check same-origin proxy headers, rate limits, form bounds, and the invite code; then set the session cookie and redirect to a safe local `next` path. |
