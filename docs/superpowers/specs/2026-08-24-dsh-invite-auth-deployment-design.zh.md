@@ -46,17 +46,17 @@ Only Caddy listens on public interfaces.
 
 Caddy 是唯一公网入口。DSH 保持官方默认的 `127.0.0.1:3080` 绑定，阿里云安全组只开放 SSH、HTTP 和 HTTPS，不开放 3080。Web 启动命令通过 `--trusted-host` 接受唯一的公网子域名。
 
-`packages/host/invite-auth` 拥有鉴权行为，并注入 `webServer` 服务。Web profile 在 `webserver` 行之后挂载插件。插件只注册 `/__invite/` 下的 HTTP route，不修改 agent loop、模型请求、会话日志或前端应用。
+`packages/host/invite-auth` 拥有鉴权行为，并注入 `webServer` 服务。发布的 Web 组合包保持不变；阿里云部署通过显式 patch 覆盖层在既有 `webserver` 配置项后插入插件。插件只注册 `/__invite/` 下的 HTTP route，不修改 agent loop、模型请求、会话日志或前端应用。
 
 Caddy 对 `/__invite/*` 直接反向代理，以便未登录浏览器加载登录页和提交邀请码。其余请求先执行 `forward_auth`；验证成功后，Caddy 再把原请求代理到同一 DSH upstream。Caddy 原生反向代理负责 WebSocket upgrade。
 
 ## 插件配置与秘密
 
-插件配置只保存环境变量名称和非秘密策略值，不保存邀请码或签名密钥本身。默认配置引用 `DSH_INVITE_CODE` 与 `DSH_INVITE_SESSION_SECRET`，并提供以下可验证参数：会话有效期 2,592,000 秒、失败窗口 900 秒、每个来源地址最多失败 10 次、请求体上限 4,096 字节。
+插件配置只保存环境变量名称和非秘密策略值，不保存邀请码或签名密钥本身。默认配置引用 `DSH_INVITE_CODE_SECRET` 与 `DSH_INVITE_SESSION_SECRET`；两者的名称都包含 `SECRET`，因此 DSH 的子进程环境清洗会移除它们。插件提供以下可验证参数：会话有效期 2,592,000 秒、失败窗口 900 秒、每个来源地址最多失败 10 次、最多跟踪 10,000 个来源地址、请求体上限 4,096 字节。
 
 插件通过 `dsh-launch-environment` 的冻结启动快照读取秘密，从而保留 DSH 对启动来源的统一语义，并避免 `--dump-config` 输出秘密。邀请码至少包含 12 个字符；会话密钥至少包含 32 个字节。任一值缺失或不满足长度要求时，插件激活失败，Loader 随即释放已启动的 Web server。
 
-服务器把秘密放在 `/etc/mydsh/mydsh.env`，属主为运行 DSH 的专用用户且权限为 `0600`。部署过程在服务器上生成随机会话密钥，不把密钥打印到终端、日志或对话。Kimi 凭据由 DSH 的凭据存储单独管理。
+服务器把秘密放在 root 所有且权限为 `0600` 的 `/etc/mydsh/mydsh.env`。系统服务管理器先读取该文件，再以 DSH 专用用户启动进程。部署过程在服务器上生成初始邀请码和会话密钥，不把任一值打印到终端、日志或对话。Kimi 凭据由 DSH 的凭据存储单独管理。
 
 ## HTTP 与会话行为
 
@@ -71,7 +71,7 @@ Caddy 对 `/__invite/*` 直接反向代理，以便未登录浏览器加载登�
 
 Caddy 为登录与鉴权请求设置一个专用的客户端地址 header。插件仅在 TCP peer 为回环地址时信任该 header，否则使用 socket peer 地址，避免公网客户端伪造限流身份。
 
-邀请码比较对等长摘要执行恒定时间比较。错误邀请码只返回统一错误，不暴露长度、部分匹配或比较阶段。失败计数保存在进程内存中，按来源地址和固定窗口记录；成功登录清除该地址的失败计数，进程重启会清空限流状态。
+邀请码比较对等长摘要执行恒定时间比较。错误邀请码只返回统一错误，不暴露长度、部分匹配或比较阶段。失败计数保存在进程内存中，按来源地址和固定窗口记录；成功登录清除该地址的失败计数，进程重启会清空限流状态。限流器会清理过期条目，并在超过配置容量前淘汰最旧条目，从而限制分布式尝试造成的内存占用。
 
 成功登录签发一个带版本、过期时间和随机 nonce 的无状态 token，并使用 HMAC-SHA-256 覆盖完整 payload。Cookie 名为 `__Host-dsh_invite`，属性固定为 `Secure`、`HttpOnly`、`SameSite=Lax`、`Path=/`，且不设置 `Domain`。过期、格式错误、签名错误或版本未知的 token 一律视为未登录。
 
@@ -81,7 +81,7 @@ Caddy 为登录与鉴权请求设置一个专用的客户端地址 header。插�
 
 ## 失败行为
 
-格式错误的表单返回 `400`，错误邀请码返回 `401`，来源验证失败返回 `403`，请求体超限返回 `413`，触发限流返回 `429`。未授权的 API、SSE 与 WebSocket 请求返回 `401`，不会转发到 DSH。页面导航通过 `303` 进入登录页。
+格式错误的表单返回 `400`，错误邀请码返回 `401`，来源验证失败返回 `403`，请求体超限返回 `413`，不支持的媒体类型返回 `415`，触发限流返回 `429`。未授权的 API、SSE 与 WebSocket 请求返回 `401`，不会转发到 DSH。页面导航通过 `303` 进入登录页。
 
 DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复服务。鉴权检查自身失败时采用拒绝访问的关闭式失败，不允许请求绕过 Caddy 进入 DSH。
 
@@ -91,9 +91,10 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/opt/mydsh/current` 指向当前 release。
 - `/var/lib/mydsh` 是持久化 `DSH_HOME`，独立于 release。
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
-- `/etc/mydsh/mydsh.env` 保存仅启动进程可读的秘密与路径设置。
+- `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
+- `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。每个 release 运行 `pnpm install --frozen-lockfile` 与 `pnpm run build`。`/etc/mydsh/mydsh.env` 的 `DSH_PUBLIC_HOST` 保存实际子域名；systemd 以不可登录的低权限 `mydsh` 用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --no-open --trusted-host ${DSH_PUBLIC_HOST}`，因此源码路径不成为默认 workspace。
+服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。每个 release 运行 `pnpm install --frozen-lockfile` 与 `pnpm run build`。systemd 读取 `/etc/mydsh/public.env` 和私密环境文件，然后以不可登录的低权限 `mydsh` 用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.overlay.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}`，因此源码路径不成为默认 workspace。Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 
@@ -107,7 +108,7 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 插件单元测试覆盖邀请码比较、token 签发、有效期、篡改、未知版本、跳转路径清洗、来源地址选择、限流窗口和请求体限制。
 
-使用 `dsh-host-webserver` 的临时回环端口运行插件集成测试，覆盖登录页面、错误和正确邀请码、Cookie 属性、鉴权端点、退出、来源拒绝、大小拒绝、限流和安全响应 header。Web profile 组合测试证明插件在 `webserver` 后挂载且发布所需依赖完整。
+使用 `dsh-host-webserver` 的临时回环端口运行插件集成测试，覆盖登录页面、错误和正确邀请码、Cookie 属性、鉴权端点、退出、来源拒绝、大小拒绝、限流和安全响应 header。Web profile 组合测试应用部署覆盖层，证明插件在 `webserver` 后挂载，并证明发布的 Web 组合包在没有鉴权秘密时仍可正常使用。
 
 实现按仓库规则增加对应包 README、中文配对文档与 Agent Note，并运行相关单元/集成测试、类型检查、构建、配置检查、文档同步检查和 `git diff --check`。登录页面属于产品可见行为，因此增加一个无需模型密钥的真实 Web 组合快照。
 
@@ -117,4 +118,4 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 ## 部署所需输入
 
-实施可以在不持有生产秘密的情况下完成本地插件、测试、文档和部署模板。实际部署开始前，管理员提供公网子域名、ECS 公网地址、SSH 用户与认证方式，并确保该子域名的 DNS A/AAAA 记录指向 ECS。管理员另行选择共享邀请码；部署过程生成会话密钥。
+实施可以在不持有生产秘密的情况下完成本地插件、测试、文档和部署模板。实际部署开始前，管理员提供公网子域名、ECS 公网地址、SSH 用户与认证方式，并确保该子域名的 DNS A/AAAA 记录指向 ECS。部署过程生成初始共享邀请码和会话密钥；管理员直接通过 SSH 获取或轮换邀请码，不把它发送到实施对话中。

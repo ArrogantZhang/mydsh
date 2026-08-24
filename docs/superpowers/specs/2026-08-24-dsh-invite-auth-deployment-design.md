@@ -46,17 +46,17 @@ Only Caddy listens on public interfaces.
 
 Caddy is the only public entry point. DSH retains its official `127.0.0.1:3080` default binding, and the Alibaba Cloud security group permits only SSH, HTTP, and HTTPS, not port 3080. The Web startup command accepts exactly one public subdomain through `--trusted-host`.
 
-`packages/host/invite-auth` owns the authentication behavior and injects the `webServer` service. The Web profile mounts the plugin after the `webserver` entry. The plugin registers only HTTP routes under `/__invite/`; it does not modify the agent loop, model requests, session logs, or frontend application.
+`packages/host/invite-auth` owns the authentication behavior and injects the `webServer` service. The shipped Web bundle remains unchanged; the Alibaba Cloud deployment passes an explicit patch overlay that inserts the plugin after the existing `webserver` entry. The plugin registers only HTTP routes under `/__invite/`; it does not modify the agent loop, model requests, session logs, or frontend application.
 
 Caddy proxies `/__invite/*` directly so an unauthenticated browser can load the login page and submit an invite code. Every other request first passes through `forward_auth`; after a successful check, Caddy proxies the original request to the same DSH upstream. Caddy's native reverse proxy handles WebSocket upgrades.
 
 ## Plugin configuration and secrets
 
-Plugin configuration stores only environment-variable names and non-secret policy values, never the invite code or signing secret. Its default configuration refers to `DSH_INVITE_CODE` and `DSH_INVITE_SESSION_SECRET` and exposes these validated parameters: a 2,592,000-second session lifetime, a 900-second failure window, 10 failures per source address, and a 4,096-byte request-body limit.
+Plugin configuration stores only environment-variable names and non-secret policy values, never the invite code or signing secret. Its default configuration refers to `DSH_INVITE_CODE_SECRET` and `DSH_INVITE_SESSION_SECRET`; both names include `SECRET` so DSH's subprocess environment scrubber removes them. The plugin exposes these validated parameters: a 2,592,000-second session lifetime, a 900-second failure window, 10 failures per source address, at most 10,000 tracked source addresses, and a 4,096-byte request-body limit.
 
 The plugin reads secrets from the frozen `dsh-launch-environment` startup snapshot. This preserves DSH's unified startup-source semantics and prevents `--dump-config` from printing secrets. The invite code contains at least 12 characters, and the session secret contains at least 32 bytes. If either value is missing or too short, plugin activation fails and Loader releases the Web server that already started.
 
-The server stores secrets in `/etc/mydsh/mydsh.env`, owned by the dedicated DSH user with mode `0600`. Deployment generates a random session secret on the server without printing it to the terminal, logs, or conversation. DSH's credential store manages Kimi credentials separately.
+The server stores secrets in root-owned `/etc/mydsh/mydsh.env` with mode `0600`. The system service manager reads the file before starting the process as the dedicated DSH user. Deployment generates the initial invite code and session secret on the server without printing either value to the terminal, logs, or conversation. DSH's credential store manages Kimi credentials separately.
 
 ## HTTP and session behavior
 
@@ -71,7 +71,7 @@ The plugin provides these routes:
 
 Caddy sets a dedicated client-address header on login and authorization requests. The plugin trusts that header only when the TCP peer is a loopback address; otherwise it uses the socket peer address, preventing a public client from forging its rate-limit identity.
 
-Invite-code verification performs a constant-time comparison of equal-length digests. An incorrect code returns one generic error that does not reveal length, partial matches, or comparison progress. Failure counts reside in process memory and use a fixed window per source address; successful login clears the address's failure count, and a process restart clears all rate-limit state.
+Invite-code verification performs a constant-time comparison of equal-length digests. An incorrect code returns one generic error that does not reveal length, partial matches, or comparison progress. Failure counts reside in process memory and use a fixed window per source address; successful login clears the address's failure count, and a process restart clears all rate-limit state. The limiter prunes expired entries and evicts the oldest entry before exceeding its configured capacity, which bounds memory under distributed attempts.
 
 Successful login issues a stateless token containing a version, expiration time, and random nonce, with HMAC-SHA-256 covering the complete payload. The cookie is named `__Host-dsh_invite` and always carries `Secure`, `HttpOnly`, `SameSite=Lax`, and `Path=/`, without `Domain`. An expired token, malformed token, invalid signature, or unknown version is always unauthenticated.
 
@@ -81,7 +81,7 @@ The login page and all authentication responses send `Cache-Control: no-store`, 
 
 ## Failure behavior
 
-A malformed form returns `400`, an incorrect invite code returns `401`, failed origin validation returns `403`, an oversized body returns `413`, and rate limiting returns `429`. Unauthorized API, SSE, and WebSocket requests return `401` and never reach DSH. Page navigation uses `303` to reach the login page.
+A malformed form returns `400`, an incorrect invite code returns `401`, failed origin validation returns `403`, an oversized body returns `413`, an unsupported media type returns `415`, and rate limiting returns `429`. Unauthorized API, SSE, and WebSocket requests return `401` and never reach DSH. Page navigation uses `303` to reach the login page.
 
 When DSH is unavailable, Caddy returns `502`, and systemd restores the service according to a bounded restart policy. An authorization-check failure denies access and never lets the request bypass Caddy to reach DSH.
 
@@ -91,9 +91,10 @@ When DSH is unavailable, Caddy returns `502`, and systemd restores the service a
 - `/opt/mydsh/current` points to the active release.
 - `/var/lib/mydsh` is the persistent `DSH_HOME`, independent of releases.
 - `/srv/mydsh/workspace` is the systemd working directory and default DSH workspace.
-- `/etc/mydsh/mydsh.env` stores secrets and path settings readable only by the startup process.
+- `/etc/mydsh/public.env` stores the non-secret `DSH_PUBLIC_HOST` for both systemd services.
+- `/etc/mydsh/mydsh.env` stores root-only secrets and the persistent `DSH_HOME` path.
 
-The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. Each release runs `pnpm install --frozen-lockfile` and `pnpm run build`. `DSH_PUBLIC_HOST` in `/etc/mydsh/mydsh.env` stores the actual subdomain; systemd runs `/opt/mydsh/current/apps/cli/lib/bin.js web --no-open --trusted-host ${DSH_PUBLIC_HOST}` as a dedicated, non-login `mydsh` user from `/srv/mydsh/workspace`, so the source tree does not become the default workspace.
+The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. Each release runs `pnpm install --frozen-lockfile` and `pnpm run build`. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.overlay.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as a dedicated, non-login `mydsh` user from `/srv/mydsh/workspace`, so the source tree does not become the default workspace. Caddy reads only the public environment file.
 
 Caddy listens on ports 80 and 443, obtains and renews certificates automatically, and proxies to `127.0.0.1:3080`. `caddy validate` must pass before configuration reload.
 
@@ -107,7 +108,7 @@ Deployment places a candidate in a new release directory, runs dependency instal
 
 Plugin unit tests cover invite-code comparison, token issuance, lifetime, tampering, unknown versions, redirect-path sanitization, source-address selection, rate-limit windows, and request-body limits.
 
-Plugin integration tests use a temporary loopback port from `dsh-host-webserver` and cover the login page, incorrect and correct invite codes, cookie attributes, the authorization endpoint, logout, origin rejection, size rejection, rate limiting, and security response headers. A Web profile composition test proves that the plugin mounts after `webserver` and that all required dependencies are publishable.
+Plugin integration tests use a temporary loopback port from `dsh-host-webserver` and cover the login page, incorrect and correct invite codes, cookie attributes, the authorization endpoint, logout, origin rejection, size rejection, rate limiting, and security response headers. A Web profile composition test applies the deployment overlay, proves that the plugin mounts after `webserver`, and proves that the shipped Web bundle remains usable without authentication secrets.
 
 Implementation adds the package README, its Chinese counterpart, and an Agent Note as required by the repository. It runs the focused unit and integration tests, typecheck, build, configuration checks, doc-sync, and `git diff --check`. Because the login page is product-visible behavior, implementation also adds a real Web composition snapshot that requires no model credentials.
 
@@ -117,4 +118,4 @@ The administrator finally configures Kimi as a custom OpenAI-compatible provider
 
 ## Deployment inputs
 
-Implementation can complete the local plugin, tests, documentation, and deployment templates without production secrets. Before production deployment begins, the administrator supplies the public subdomain, ECS public address, SSH user, and authentication method, and ensures that the subdomain's DNS A/AAAA record points to the ECS instance. The administrator separately chooses the shared invite code; deployment generates the session secret.
+Implementation can complete the local plugin, tests, documentation, and deployment templates without production secrets. Before production deployment begins, the administrator supplies the public subdomain, ECS public address, SSH user, and authentication method, and ensures that the subdomain's DNS A/AAAA record points to the ECS instance. Deployment generates the initial shared invite code and session secret; the administrator retrieves or rotates the invite code directly over SSH without sending it through the implementation conversation.
