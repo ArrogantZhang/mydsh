@@ -7,17 +7,12 @@ const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
  * Return a local redirect target safe to include in an invite-authentication response.
  * The input is untrusted request data; only a path resolved under the internal base origin is returned.
  * @param raw Requested redirect path, or an absent value when no redirect was supplied.
- * @returns The path, query, and fragment for a same-origin target, or `/` for rejected input.
+ * @returns The path, query, and fragment for a target beginning with one literal slash, or `/` for rejected input.
  */
 export function safeNextPath(raw?: string | null): string {
-  if (!raw || raw.includes('\\')) return '/'
-  try {
-    const target = new URL(raw, NEXT_PATH_BASE)
-    if (target.origin !== NEXT_PATH_BASE) return '/'
-    return `${target.pathname}${target.search}${target.hash}`
-  } catch {
-    return '/'
-  }
+  if (!raw || raw[0] !== '/' || raw.startsWith('//') || raw.includes('\\')) return '/'
+  const target = new URL(raw, NEXT_PATH_BASE)
+  return `${target.pathname}${target.search}${target.hash}`
 }
 
 /**
@@ -55,7 +50,7 @@ export function trustedClientAddress(peer: string | undefined, forwarded: string
 /**
  * Check whether reverse-proxy origin headers describe one HTTPS origin.
  * All values are untrusted request headers; this accepts only the exact HTTPS forwarding mode and an origin containing only
- * scheme and authority.
+ * scheme and authority. Its raw authority, including an explicit default port, must equal the forwarded host.
  * @param origin Forwarded Origin header.
  * @param proto Forwarded protocol header.
  * @param host Forwarded host header.
@@ -66,10 +61,12 @@ export function validForwardedOrigin(
   proto: string | undefined,
   host: string | undefined,
 ): boolean {
-  if (origin === undefined || proto !== 'https' || host === undefined || !/^https:\/\/[^/?#@]+$/i.test(origin)) return false
+  if (origin === undefined || proto !== 'https' || host === undefined) return false
+  const authority = /^https:\/\/([^/?#@\\\s]+)$/i.exec(origin)?.[1]
+  if (authority === undefined) return false
   try {
-    const target = new URL(origin)
-    return target.protocol === 'https:' && target.host.toLowerCase() === host.toLowerCase()
+    new URL(origin)
+    return authority.toLowerCase() === host.toLowerCase()
   } catch {
     return false
   }

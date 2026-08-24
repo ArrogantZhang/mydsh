@@ -13,6 +13,9 @@ describe('safeNextPath', () => {
     expect(safeNextPath('')).toBe('/')
     expect(safeNextPath('https://evil.example/sessions')).toBe('/')
     expect(safeNextPath('//evil.example/sessions')).toBe('/')
+    expect(safeNextPath('https://dsh.invalid/safe')).toBe('/')
+    expect(safeNextPath('//dsh.invalid/safe')).toBe('/')
+    expect(safeNextPath('relative/path')).toBe('/')
     expect(safeNextPath('https://[')).toBe('/')
   })
 
@@ -64,6 +67,7 @@ describe('validForwardedOrigin', () => {
   it('requires an exact HTTPS origin with a matching forwarded host', () => {
     expect(validForwardedOrigin('https://dsh.example', 'https', 'dsh.example')).toBe(true)
     expect(validForwardedOrigin('https://DSH.EXAMPLE:8443', 'https', 'dsh.example:8443')).toBe(true)
+    expect(validForwardedOrigin('https://dsh.example:443', 'https', 'dsh.example:443')).toBe(true)
   })
 
   it('rejects absent, insecure, mismatched, and malformed values', () => {
@@ -82,6 +86,7 @@ describe('validForwardedOrigin', () => {
       'https://dsh.example/path',
       'https://dsh.example/?query=1',
       'https://dsh.example/#fragment',
+      'https://dsh.example\\path',
     ]) {
       expect(validForwardedOrigin(origin, 'https', 'dsh.example')).toBe(false)
     }
