@@ -13,15 +13,20 @@ export class HttpError extends Error {
   /** HTTP status code describing this expected request failure. */
   readonly status: number
 
+  /** Whether the caller must close the connection because the request body may remain unread. */
+  readonly closeConnection: boolean
+
   /**
    * Create an expected HTTP request failure.
    * @param status HTTP status code a route should return.
    * @param message Error message for diagnostics; it is not safe to expose unconditionally to a client.
+   * @param closeConnection Whether a route must write `Connection: close` before ending its response.
    */
-  constructor(status: number, message: string) {
+  constructor(status: number, message: string, closeConnection = false) {
     super(message)
     this.name = 'HttpError'
     this.status = status
+    this.closeConnection = closeConnection
   }
 }
 
@@ -29,22 +34,25 @@ export class HttpError extends Error {
  * Read one URL-encoded request body without retaining more than the configured byte limit.
  * Request stream errors and aborts reject with their original error.
  * Unsupported media types and oversized bodies become HttpError instances.
- * @param req Incoming request whose content-type and body are read once.
+ * @param req Incoming request whose raw body bytes are read once; decoding after the limit check uses UTF-8.
  * @param maxBytes Positive safe maximum number of UTF-8 bytes to accept.
  * @returns Parsed URL-encoded fields after the complete body is received within the limit.
  * @throws {RangeError} If maxBytes is not a positive safe integer.
  * @throws {HttpError} With status 415 for a non-form content type or 413 for a body larger than maxBytes.
+ * Both failures require closing the connection.
  */
 export async function readUrlEncodedForm(req: IncomingMessage, maxBytes: number): Promise<URLSearchParams> {
   if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) throw new RangeError('maxBytes must be a positive safe integer')
-  if (!isUrlEncodedContentType(req.headers['content-type'])) throw new HttpError(415, 'expected application/x-www-form-urlencoded')
+  if (!isUrlEncodedContentType(req.headers['content-type'])) {
+    throw new HttpError(415, 'expected application/x-www-form-urlencoded', true)
+  }
 
   let size = 0
   const chunks: Buffer[] = []
   for await (const chunk of req) {
     const bytes = typeof chunk === 'string' ? Buffer.from(chunk, 'utf8') : chunk as Buffer
     size += bytes.length
-    if (size > maxBytes) throw new HttpError(413, 'form body exceeds maximum size')
+    if (size > maxBytes) throw new HttpError(413, 'form body exceeds maximum size', true)
     chunks.push(bytes)
   }
   return new URLSearchParams(Buffer.concat(chunks).toString('utf8'))
@@ -83,7 +91,7 @@ export function writeHtml(res: ServerResponse, status: number, body: string, hea
  * @param headers Additional non-security headers.
  */
 export function redirect(res: ServerResponse, location: string, headers: OutgoingHttpHeaders = {}): void {
-  res.writeHead(303, mergeHeaders({ Location: location }, headers))
+  res.writeHead(303, mergeHeaders({ location }, headers))
   res.end()
 }
 

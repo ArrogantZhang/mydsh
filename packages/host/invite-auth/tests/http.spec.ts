@@ -1,3 +1,7 @@
+import { once } from 'node:events'
+import { Agent, createServer, request as sendRequest } from 'node:http'
+import type { IncomingHttpHeaders, Server } from 'node:http'
+import type { AddressInfo, Socket } from 'node:net'
 import { Readable } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import { HttpError, readUrlEncodedForm, redirect, writeEmpty, writeHtml } from '../src/http.ts'
@@ -33,6 +37,75 @@ function response(): RecordedResponse {
   return { calls, bodies, response: recorded as unknown as import('node:http').ServerResponse }
 }
 
+interface NetworkResponse {
+  readonly headers: IncomingHttpHeaders
+  readonly socket: Socket
+  readonly status: number | undefined
+}
+
+/** Start a server that writes the parser's requested connection disposition for rejected requests. */
+async function withFormServer(run: (port: number) => Promise<void>): Promise<void> {
+  const server = createServer(async (incoming, outgoing) => {
+    try {
+      await readUrlEncodedForm(incoming, 4_096)
+      writeEmpty(outgoing, 204)
+    } catch (error) {
+      if (error instanceof HttpError) {
+        writeEmpty(outgoing, error.status, error.closeConnection ? { connection: 'close' } : {})
+        return
+      }
+      throw error
+    }
+  })
+  await listen(server)
+  try {
+    await run((server.address() as AddressInfo).port)
+  } finally {
+    await close(server)
+  }
+}
+
+/** Send one request through a caller-provided keep-alive agent and retain its socket for lifecycle assertions. */
+function post(port: number, agent: Agent, headers: Record<string, string>, chunks: readonly Buffer[]): Promise<NetworkResponse> {
+  return new Promise((resolve, reject) => {
+    let socket: Socket | undefined
+    const outgoing = sendRequest({ agent, headers, host: '127.0.0.1', method: 'POST', port }, (incoming) => {
+      incoming.resume()
+      incoming.once('end', () => {
+        if (socket === undefined) {
+          reject(new Error('client request did not receive a socket'))
+          return
+        }
+        resolve({ headers: incoming.headers, socket, status: incoming.statusCode })
+      })
+    })
+    outgoing.once('socket', (assigned) => { socket = assigned })
+    outgoing.once('error', reject)
+    outgoing.setTimeout(2_000, () => outgoing.destroy(new Error('request timed out')))
+    for (const chunk of chunks) outgoing.write(chunk)
+    outgoing.end()
+  })
+}
+
+/** Wait until a rejected request's client socket has closed. */
+async function expectClosed(socket: Socket): Promise<void> {
+  if (!socket.destroyed) await once(socket, 'close')
+  expect(socket.destroyed).toBe(true)
+}
+
+/** Listen on an ephemeral loopback port. */
+function listen(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', () => resolve())
+  })
+}
+
+/** Close a test server after all sockets have been directed to close. */
+function close(server: Server): Promise<void> {
+  return new Promise((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+}
+
 describe('readUrlEncodedForm', () => {
   it('parses URL-encoded fields and accepts a content-type charset', async () => {
     const form = await readUrlEncodedForm(request(['inviteCode=abc'], 'Application/X-WWW-Form-Urlencoded; charset=UTF-8'), 4_096)
@@ -42,13 +115,27 @@ describe('readUrlEncodedForm', () => {
   it('rejects non-form and missing content types', async () => {
     const jsonRequest = readUrlEncodedForm(request(['inviteCode=abc'], 'application/json'), 4_096)
     await expect(jsonRequest).rejects.toBeInstanceOf(HttpError)
-    await expect(jsonRequest).rejects.toMatchObject({ status: 415 })
-    await expect(readUrlEncodedForm(request(['inviteCode=abc']), 4_096)).rejects.toMatchObject({ status: 415 })
+    await expect(jsonRequest).rejects.toMatchObject({ closeConnection: true, status: 415 })
+    await expect(readUrlEncodedForm(request(['inviteCode=abc']), 4_096)).rejects.toMatchObject({ closeConnection: true, status: 415 })
   })
 
   it('rejects form bodies above the byte limit but accepts the exact limit', async () => {
-    await expect(readUrlEncodedForm(request([Buffer.alloc(4_097)], 'application/x-www-form-urlencoded'), 4_096)).rejects.toMatchObject({ status: 413 })
+    await expect(readUrlEncodedForm(request([Buffer.alloc(4_097)], 'application/x-www-form-urlencoded'), 4_096)).rejects.toMatchObject({
+      closeConnection: true,
+      status: 413,
+    })
     await expect(readUrlEncodedForm(request([Buffer.alloc(4_096)], 'application/x-www-form-urlencoded'), 4_096)).resolves.toBeInstanceOf(URLSearchParams)
+  })
+
+  it('applies the byte limit cumulatively across independently valid chunks', async () => {
+    await expect(readUrlEncodedForm(
+      request([Buffer.alloc(2_048), Buffer.alloc(2_048)], 'application/x-www-form-urlencoded'),
+      4_096,
+    )).resolves.toBeInstanceOf(URLSearchParams)
+    await expect(readUrlEncodedForm(
+      request([Buffer.alloc(2_048), Buffer.alloc(2_049)], 'application/x-www-form-urlencoded'),
+      4_096,
+    )).rejects.toMatchObject({ status: 413 })
   })
 
   it('counts multibyte strings by encoded bytes', async () => {
@@ -62,6 +149,10 @@ describe('readUrlEncodedForm', () => {
     }
   })
 
+  it('defaults expected errors to retaining the connection when parsing consumed the body', () => {
+    expect(new HttpError(400, 'bad request').closeConnection).toBe(false)
+  })
+
   it('propagates request stream errors', async () => {
     const failure = new Error('socket failed')
     async function* chunks(): AsyncGenerator<Buffer> {
@@ -71,6 +162,29 @@ describe('readUrlEncodedForm', () => {
       headers: { 'content-type': 'application/x-www-form-urlencoded' },
     }) as import('node:http').IncomingMessage
     await expect(readUrlEncodedForm(broken, 4_096)).rejects.toBe(failure)
+  })
+
+  it('requests connection closure for rejected bodies that a route does not consume', async () => {
+    await withFormServer(async (port) => {
+      const agent = new Agent({ keepAlive: true, maxSockets: 1 })
+      try {
+        const oversized = await post(port, agent, { 'content-type': 'application/x-www-form-urlencoded' }, [Buffer.alloc(4_097)])
+        expect(oversized.status).toBe(413)
+        expect(oversized.headers.connection).toBe('close')
+        await expectClosed(oversized.socket)
+
+        const json = await post(port, agent, {
+          'content-length': '8192',
+          'content-type': 'application/json',
+        }, [Buffer.from('{')])
+        expect(json.status).toBe(415)
+        expect(json.headers.connection).toBe('close')
+        expect(json.socket).not.toBe(oversized.socket)
+        await expectClosed(json.socket)
+      } finally {
+        agent.destroy()
+      }
+    })
   })
 })
 
@@ -86,6 +200,11 @@ describe('renderLoginPage', () => {
     expect(page).toContain('type="password" id="inviteCode" name="inviteCode" autocomplete="current-password" required autofocus')
     expect(page).toContain('<button type="submit">进入</button>')
     expect(page).toContain('<p role="alert">邀请码无效，请重试。</p>')
+    expect(page).toContain('@media (prefers-color-scheme: light)')
+    expect(page).toContain('[role="alert"] { color: #b42318;')
+    expect(page).toContain('@media (prefers-color-scheme: dark)')
+    expect(page).toContain('[role="alert"] { color: #fda4af;')
+    expect(page).toContain('*, *::before, *::after { box-sizing: border-box; }')
     expect(page).not.toContain('<script')
   })
 
@@ -125,26 +244,30 @@ describe('HTTP response helpers', () => {
         'retry-after': '60',
       }),
     }])
+    expect(recorded.calls[0]?.headers).not.toHaveProperty('Cache-Control')
+    expect(recorded.calls[0]?.headers).not.toHaveProperty('Content-Security-Policy')
     expect(recorded.bodies).toEqual([undefined])
   })
 
   it('writes HTML with a fixed UTF-8 content type', () => {
     const recorded = response()
-    writeHtml(recorded.response, 200, '<h1>访问 DSH</h1>', { 'content-type': 'text/plain', connection: 'close' })
+    writeHtml(recorded.response, 200, '<h1>访问 DSH</h1>', { 'Content-Type': 'text/plain', connection: 'close' })
     expect(recorded.calls[0]).toEqual({
       status: 200,
       headers: expect.objectContaining({ 'content-type': 'text/html; charset=utf-8', connection: 'close' }),
     })
+    expect(recorded.calls[0]?.headers).not.toHaveProperty('Content-Type')
     expect(recorded.bodies).toEqual(['<h1>访问 DSH</h1>'])
   })
 
   it('redirects with a 303 location and no response body', () => {
     const recorded = response()
-    redirect(recorded.response, '/sessions', { location: 'https://evil.example', allow: 'POST' })
+    redirect(recorded.response, '/sessions', { Location: 'https://evil.example', allow: 'POST' })
     expect(recorded.calls[0]).toEqual({
       status: 303,
-      headers: expect.objectContaining({ Location: '/sessions', allow: 'POST', 'cache-control': 'no-store' }),
+      headers: expect.objectContaining({ location: '/sessions', allow: 'POST', 'cache-control': 'no-store' }),
     })
+    expect(recorded.calls[0]?.headers).not.toHaveProperty('Location')
     expect(recorded.bodies).toEqual([undefined])
   })
 })

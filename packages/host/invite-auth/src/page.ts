@@ -28,7 +28,7 @@ export function securityHeaders(): Record<string, string> {
 
 /**
  * Render the Chinese invite-code login page.
- * @param next Same-origin redirect path supplied by the request policy.
+ * @param next Policy-approved local redirect path; this function escapes it before inserting it into the hidden input.
  * @param invalid Whether to show the static invalid-invite-code alert.
  * @returns A complete responsive HTML document with no client-side code or external assets.
  */
@@ -42,11 +42,14 @@ export function renderLoginPage(next: string, invalid: boolean): string {
   <title>访问 DSH</title>
   <style>
     :root { color-scheme: light dark; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
-    body { align-items: center; background: Canvas; color: CanvasText; display: flex; justify-content: center; margin: 0; min-height: 100vh; padding: 1.5rem; box-sizing: border-box; }
+    *, *::before, *::after { box-sizing: border-box; }
+    body { align-items: center; background: Canvas; color: CanvasText; display: flex; justify-content: center; margin: 0; min-height: 100vh; padding: 1.5rem; }
     main { border: 1px solid color-mix(in srgb, CanvasText 25%, transparent); border-radius: 0.75rem; max-width: 26rem; padding: 2rem; width: 100%; }
     h1 { font-size: 1.5rem; margin: 0 0 0.75rem; }
     p { line-height: 1.55; }
-    [role="alert"] { color: #b42318; font-weight: 600; }
+    [role="alert"] { font-weight: 600; }
+    @media (prefers-color-scheme: light) { [role="alert"] { color: #b42318; } }
+    @media (prefers-color-scheme: dark) { [role="alert"] { color: #fda4af; } }
     form { display: grid; gap: 0.75rem; margin-top: 1.25rem; }
     input, button { box-sizing: border-box; font: inherit; min-height: 2.75rem; padding: 0.55rem 0.7rem; width: 100%; }
     input { border: 1px solid color-mix(in srgb, CanvasText 35%, transparent); border-radius: 0.4rem; background: Canvas; color: CanvasText; }
