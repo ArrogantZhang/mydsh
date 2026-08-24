@@ -1,5 +1,5 @@
 /**
- * Bound invite-authentication HTTP request parsing and secure response writing.
+ * Bounded invite-authentication HTTP request parsing.
  * Route handlers use these helpers to keep stream limits and response security policy consistent.
  */
 
@@ -22,7 +22,7 @@ export class HttpError extends Error {
    * @param message Error message for diagnostics; it is not safe to expose unconditionally to a client.
    * @param closeConnection Whether a route must write `Connection: close` before ending its response.
    */
-  constructor(status: number, message: string, closeConnection = false) {
+  constructor(status: number, message: string, closeConnection: boolean) {
     super(message)
     this.name = 'HttpError'
     this.status = status
@@ -35,7 +35,7 @@ export class HttpError extends Error {
  * Request stream errors and aborts reject with their original error.
  * Unsupported media types and oversized bodies become HttpError instances.
  * @param req Incoming request whose raw body bytes are read once; decoding after the limit check uses UTF-8.
- * @param maxBytes Positive safe maximum number of UTF-8 bytes to accept.
+ * @param maxBytes Positive safe maximum number of raw request-body bytes to accept.
  * @returns Parsed URL-encoded fields after the complete body is received within the limit.
  * @throws {RangeError} If maxBytes is not a positive safe integer.
  * @throws {HttpError} With status 415 for a non-form content type or 413 for a body larger than maxBytes.
