@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { cookieValue, FailureLimiter, safeNextPath, trustedClientAddress, validForwardedOrigin } from '../src/policy.ts'
 
 describe('safeNextPath', () => {
@@ -22,11 +22,33 @@ describe('safeNextPath', () => {
   it('rejects literal backslashes without decoding encoded-looking path text', () => {
     expect(safeNextPath('/\\evil.example/sessions')).toBe('/')
     expect(safeNextPath('/%2F%2Fevil.example/sessions?next=%5C')).toBe('/%2F%2Fevil.example/sessions?next=%5C')
+    expect(safeNextPath('/sessions%20archive')).toBe('/sessions%20archive')
   })
 
   it('rejects ASCII whitespace that URL parsing normalizes into an authority', () => {
     for (const whitespace of ['\n', '\r', '\t']) {
       expect(safeNextPath(`/${whitespace}/evil.example/safe`)).toBe('/')
+    }
+  })
+
+  it('rejects control characters that normalize into same-origin authorities or userinfo', () => {
+    for (const control of ['\n', '\r', '\t']) {
+      expect(safeNextPath(`/${control}/dsh.invalid/safe`)).toBe('/')
+      expect(safeNextPath(`/${control}/user@dsh.invalid/safe`)).toBe('/')
+    }
+  })
+
+  it('retains the parsed-origin fallback after raw input validation', () => {
+    class ExternalOriginUrl extends URL {
+      get origin(): string {
+        return 'https://evil.example'
+      }
+    }
+    vi.stubGlobal('URL', ExternalOriginUrl)
+    try {
+      expect(safeNextPath('/safe')).toBe('/')
+    } finally {
+      vi.unstubAllGlobals()
     }
   })
 })
