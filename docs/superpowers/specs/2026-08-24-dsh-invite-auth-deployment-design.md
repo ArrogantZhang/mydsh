@@ -54,7 +54,7 @@ Caddy proxies `/__invite/*` directly so an unauthenticated browser can load the 
 
 Plugin configuration stores only environment-variable names and non-secret policy values, never the invite code or signing secret. Its default configuration refers to `DSH_INVITE_CODE_SECRET` and `DSH_INVITE_SESSION_SECRET`; both names include `SECRET` so DSH's subprocess environment scrubber removes them. The plugin exposes these validated parameters: a 2,592,000-second session lifetime, a 900-second failure window, 10 failures per source address, at most 10,000 tracked source addresses, and a 4,096-byte request-body limit.
 
-The plugin reads secrets from the frozen `dsh-launch-environment` startup snapshot. This preserves DSH's unified startup-source semantics and prevents `--dump-config` from printing secrets. The invite code contains at least 12 characters, and the session secret contains at least 32 bytes. If either value is missing or too short, plugin activation fails and Loader releases the Web server that already started.
+The plugin reads secrets only from the inherited-process layer of the frozen `dsh-launch-environment` startup snapshot; project and Harness-home `.env` files cannot set authentication secrets. This preserves DSH's unified startup-source semantics and prevents `--dump-config` from printing secrets. The invite code contains at least 12 characters, and the session secret contains at least 32 bytes. If either value is missing or too short, plugin activation fails and Loader releases the Web server that already started.
 
 The server stores secrets in root-owned `/etc/mydsh/mydsh.env` with mode `0600`. The system service manager reads the file before starting the process as the dedicated DSH user. Deployment generates the initial invite code and session secret on the server without printing either value to the terminal, logs, or conversation. DSH's credential store manages Kimi credentials separately.
 
@@ -94,7 +94,7 @@ When DSH is unavailable, Caddy returns `502`, and systemd restores the service a
 - `/etc/mydsh/public.env` stores the non-secret `DSH_PUBLIC_HOST` for both systemd services.
 - `/etc/mydsh/mydsh.env` stores root-only secrets and the persistent `DSH_HOME` path.
 
-The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. Each release runs `pnpm install --frozen-lockfile` and `pnpm run build`. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.overlay.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as a dedicated, non-login `mydsh` user from `/srv/mydsh/workspace`, so the source tree does not become the default workspace. Caddy reads only the public environment file.
+The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. Each release runs `pnpm install --frozen-lockfile` and `pnpm run build`. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as a dedicated, non-login `mydsh` user from `/srv/mydsh/workspace`, so the source tree does not become the default workspace. Caddy reads only the public environment file.
 
 Caddy listens on ports 80 and 443, obtains and renews certificates automatically, and proxies to `127.0.0.1:3080`. `caddy validate` must pass before configuration reload.
 

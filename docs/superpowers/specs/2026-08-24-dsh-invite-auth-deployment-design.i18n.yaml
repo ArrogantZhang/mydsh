@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/superpowers/specs/2026-08-24-dsh-invite-auth-deployment-design.md
-2026-08-24-dsh-invite-auth-deployment-design.md: e1115393e09fb566dc5f0a6d9016254a0773c22a
-2026-08-24-dsh-invite-auth-deployment-design.zh.md: 2a14d941e4bde99e69a027b1fc6477c13f6367da
+2026-08-24-dsh-invite-auth-deployment-design.md: bf8ff42cb97643b64faf7ae9e6dce5d03788274b
+2026-08-24-dsh-invite-auth-deployment-design.zh.md: 925abde4ca0a3ad946e0dea78285bdec9fad5260

@@ -54,7 +54,7 @@ Caddy 对 `/__invite/*` 直接反向代理，以便未登录浏览器加载登�
 
 插件配置只保存环境变量名称和非秘密策略值，不保存邀请码或签名密钥本身。默认配置引用 `DSH_INVITE_CODE_SECRET` 与 `DSH_INVITE_SESSION_SECRET`；两者的名称都包含 `SECRET`，因此 DSH 的子进程环境清洗会移除它们。插件提供以下可验证参数：会话有效期 2,592,000 秒、失败窗口 900 秒、每个来源地址最多失败 10 次、最多跟踪 10,000 个来源地址、请求体上限 4,096 字节。
 
-插件通过 `dsh-launch-environment` 的冻结启动快照读取秘密，从而保留 DSH 对启动来源的统一语义，并避免 `--dump-config` 输出秘密。邀请码至少包含 12 个字符；会话密钥至少包含 32 个字节。任一值缺失或不满足长度要求时，插件激活失败，Loader 随即释放已启动的 Web server。
+插件只从 `dsh-launch-environment` 冻结启动快照的继承进程层读取秘密；项目与 Harness home 的 `.env` 文件不能设置鉴权秘密。该方式保留 DSH 对启动来源的统一语义，并避免 `--dump-config` 输出秘密。邀请码至少包含 12 个字符；会话密钥至少包含 32 个字节。任一值缺失或不满足长度要求时，插件激活失败，Loader 随即释放已启动的 Web server。
 
 服务器把秘密放在 root 所有且权限为 `0600` 的 `/etc/mydsh/mydsh.env`。系统服务管理器先读取该文件，再以 DSH 专用用户启动进程。部署过程在服务器上生成初始邀请码和会话密钥，不把任一值打印到终端、日志或对话。Kimi 凭据由 DSH 的凭据存储单独管理。
 
@@ -94,7 +94,7 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。每个 release 运行 `pnpm install --frozen-lockfile` 与 `pnpm run build`。systemd 读取 `/etc/mydsh/public.env` 和私密环境文件，然后以不可登录的低权限 `mydsh` 用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.overlay.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}`，因此源码路径不成为默认 workspace。Caddy 只读取公共环境文件。
+服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。每个 release 运行 `pnpm install --frozen-lockfile` 与 `pnpm run build`。systemd 读取 `/etc/mydsh/public.env` 和私密环境文件，然后以不可登录的低权限 `mydsh` 用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}`，因此源码路径不成为默认 workspace。Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 
