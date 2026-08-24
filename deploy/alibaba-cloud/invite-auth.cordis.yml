@@ -1,0 +1,11 @@
+- insert:
+    - id: invite-auth
+      name: '@deepseek-ai/dsh-host-invite-auth'
+      config:
+        inviteCodeEnv: DSH_INVITE_CODE_SECRET
+        sessionSecretEnv: DSH_INVITE_SESSION_SECRET
+        sessionTtlSeconds: 2592000
+        failureWindowSeconds: 900
+        maxFailuresPerWindow: 10
+        maxTrackedAddresses: 10000
+        maxBodyBytes: 4096

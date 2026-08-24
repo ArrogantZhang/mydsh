@@ -42,6 +42,9 @@
       "path": "../../packages/host/frontend-static"
     },
     {
+      "path": "../../packages/host/invite-auth"
+    },
+    {
       "path": "../../packages/core/session"
     },
     {
