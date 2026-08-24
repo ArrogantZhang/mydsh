@@ -243,6 +243,76 @@ function expectSecurityHeaders(result: Result): void {
 }
 
 describe('real Loader invite-auth composition', () => {
+  it('withholds the fallback until the delayed invite route is ready', { timeout: 60_000 }, async () => {
+    const root = await mkdtemp(join(tmpdir(), 'dsh-invite-auth-readiness-'))
+    const configPath = join(root, 'cordis.yml')
+    await writeFile(configPath, [
+      "- name: '@deepseek-ai/dsh-host-webserver'",
+      '  config:',
+      "    host: '127.0.0.1'",
+      '    port: 0',
+      '- id: invite-auth',
+      "  name: '@deepseek-ai/dsh-host-invite-auth'",
+      '- id: fallback',
+      "  name: '@test/fallback'",
+      '',
+    ].join('\n'))
+    const context = new Context()
+    const composition: Composition = { context, logs: [], root, port: 0 }
+    compositions.add(composition)
+    context.baseUrl = pathToFileURL(root).href + '/'
+    context.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot([PROCESS_SECRETS]))
+    let releaseAuth!: () => void
+    const authBlocked = new Promise<void>((resolve) => { releaseAuth = resolve })
+    const fallback = {
+      name: 'test-fallback',
+      inject: ['webServer', 'inviteAuthReadiness'],
+      apply(fallbackCtx: Context): void {
+        fallbackCtx.effect(() => fallbackCtx.webServer.registerFallback((_req, res) => {
+          res.writeHead(200)
+          res.end('FALLBACK')
+        }), 'test fallback')
+      },
+    }
+    await context.plugin(Loader)
+    context.loader.builtins.include = Include
+    context.loader.internal = {
+      version: 'v2',
+      async import(specifier: string) {
+        if (specifier === '@deepseek-ai/dsh-host-webserver') return HttpServer
+        if (specifier === '@test/fallback') return fallback
+        if (specifier === '@deepseek-ai/dsh-host-invite-auth') {
+          await authBlocked
+          return InviteAuth
+        }
+        throw new Error(`unexpected Loader import: ${specifier}`)
+      },
+    } as unknown as NonNullable<typeof context.loader.internal>
+    const creating = context.loader.create({ name: 'cordis:include', config: { path: pathToFileURL(configPath).href } })
+    const deadline = Date.now() + 2_000
+    while (context.webServer?.port === undefined) {
+      if (Date.now() >= deadline) throw new Error('webserver did not listen while invite auth import was blocked')
+      await new Promise(resolve => setTimeout(resolve, 5))
+    }
+    composition.port = context.webServer.port
+    expect((await request(composition, '/__invite/check', { headers: { accept: 'application/json' } })).status).toBe(404)
+    expect((await request(composition, '/sessions')).status).toBe(404)
+
+    releaseAuth()
+    await creating
+    await context.loader.await()
+    expect((await request(composition, '/__invite/check', { headers: { accept: 'application/json' } })).status).toBe(401)
+    const fallbackResponse = await request(composition, '/sessions')
+    expect(fallbackResponse.status).toBe(200)
+    expect(fallbackResponse.body).toBe('FALLBACK')
+
+    const entry = [...context.loader.entries()].find(candidate => candidate.options.id === 'invite-auth')
+    await entry!.fiber?.dispose()
+    await context.loader.await()
+    expect((await request(composition, '/__invite/check', { headers: { accept: 'application/json' } })).status).toBe(404)
+    expect((await request(composition, '/sessions')).status).toBe(404)
+  })
+
   it('serves the login, authorization, session, and logout lifecycle', { timeout: 60_000 }, async () => {
     const composition = await loadComposition()
 
