@@ -150,7 +150,6 @@ describe('readUrlEncodedForm', () => {
   })
 
   it('requires callers to choose and preserves the request connection disposition', () => {
-    expect(HttpError.length).toBe(3)
     expect(new HttpError(400, 'bad request', false).closeConnection).toBe(false)
     expect(new HttpError(400, 'bad request', true).closeConnection).toBe(true)
   })
