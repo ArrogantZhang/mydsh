@@ -24,6 +24,7 @@ import {
 } from '@deepseek-ai/dsh-launch-environment'
 import * as InviteAuth from '../src/index.ts'
 import * as InviteAuthInvariant from '../src/invariant.ts'
+import { verifySessionToken } from '../src/token.ts'
 
 const INVITE_CODE = 'shared-code-123'
 const SESSION_SECRET = '0123456789abcdef0123456789abcdef'
@@ -512,6 +513,8 @@ describe('real Loader invite-auth composition', () => {
   it('keeps each file-only secret out of startup failures and logs', { timeout: 60_000 }, async () => {
     const projectInvite = 'project-invite-secret-value'
     const projectSession = 'project-session-secret-value-0123456789'
+    const userInvite = 'user-invite-secret-value'
+    const userSession = 'user-session-secret-value-0123456789'
     const cases: readonly LaunchEnvironmentLayerInput[][] = [
       [
         { source: 'process', values: { DSH_INVITE_SESSION_SECRET: SESSION_SECRET } },
@@ -520,6 +523,14 @@ describe('real Loader invite-auth composition', () => {
       [
         { source: 'process', values: { DSH_INVITE_CODE_SECRET: INVITE_CODE } },
         { source: 'project-env', path: 'C:/project/.env', values: { DSH_INVITE_SESSION_SECRET: projectSession } },
+      ],
+      [
+        { source: 'process', values: { DSH_INVITE_SESSION_SECRET: SESSION_SECRET } },
+        { source: 'user-env', path: 'C:/user/.dsh/.env', values: { DSH_INVITE_CODE_SECRET: userInvite } },
+      ],
+      [
+        { source: 'process', values: { DSH_INVITE_CODE_SECRET: INVITE_CODE } },
+        { source: 'user-env', path: 'C:/user/.dsh/.env', values: { DSH_INVITE_SESSION_SECRET: userSession } },
       ],
     ]
     for (const layers of cases) {
@@ -532,7 +543,7 @@ describe('real Loader invite-auth composition', () => {
           capturedLogs = logs
         },
       })).rejects.toThrow(/inherited process environment variable/)
-      for (const secret of [projectInvite, projectSession]) {
+      for (const secret of [projectInvite, projectSession, userInvite, userSession]) {
         expect(capturedError).not.toContain(secret)
         expect(JSON.stringify(capturedLogs)).not.toContain(secret)
       }
@@ -547,7 +558,7 @@ describe('real Loader invite-auth composition', () => {
       ['sessionSecretEnv', 'SESSION_SECRET'],
     ] as const) {
       await expect(loadComposition({ config: { [field]: reference } })).rejects.toThrow(
-        new RegExp(`${field}.*uppercase DSH_ environment variable`),
+        new RegExp(field),
       )
     }
   })
@@ -555,13 +566,32 @@ describe('real Loader invite-auth composition', () => {
   it('rejects unsafe numeric configuration during activation', { timeout: 60_000 }, async () => {
     const unsafe = Number.MAX_SAFE_INTEGER + 1
     for (const [field, value, error] of [
-      ['sessionTtlSeconds', Number.MAX_SAFE_INTEGER, /sessionTtlSeconds.*expiry.*safe integer/],
       ['failureWindowSeconds', Number.MAX_SAFE_INTEGER, /failureWindowSeconds.*milliseconds.*safe integer/],
-      ['maxFailuresPerWindow', unsafe, /maxFailuresPerWindow.*safe integer/],
-      ['maxTrackedAddresses', Number.MAX_VALUE, /maxTrackedAddresses.*safe integer/],
+      ['maxFailuresPerWindow', unsafe, /maxFailuresPerWindow/],
+      ['maxTrackedAddresses', Number.MAX_VALUE, /maxTrackedAddresses/],
     ] as const) {
       await expect(loadComposition({ config: { [field]: value } })).rejects.toThrow(error)
     }
+  })
+
+  it('keeps the fixed session lifetime valid across later requests', { timeout: 60_000 }, async () => {
+    const maximumTtl = 31_536_000
+    const composition = await loadComposition({ config: { sessionTtlSeconds: maximumTtl } })
+    const realNow = Date.now
+    const advancedNow = realNow() + 1_000
+    vi.spyOn(Date, 'now').mockReturnValue(advancedNow)
+    try {
+      const accepted = await login(composition, INVITE_CODE)
+      expect(accepted.status).toBe(303)
+      const cookie = requestCookie(accepted.headers.get('set-cookie')!)
+      const token = cookie.slice('__Host-dsh_invite='.length)
+      expect(verifySessionToken(token, SESSION_SECRET, advancedNow)).toBe(true)
+    } finally {
+      vi.restoreAllMocks()
+    }
+    await expect(loadComposition({ config: { sessionTtlSeconds: maximumTtl + 1 } })).rejects.toThrow(
+      /sessionTtlSeconds/,
+    )
   })
 
   it('validates defaults and numeric policy limits', () => {
@@ -577,11 +607,17 @@ describe('real Loader invite-auth composition', () => {
       maxBodyBytes: 4_096,
     })
     for (const invalid of [
+      { inviteCodeEnv: 'INVITE_CODE' },
+      { sessionSecretEnv: 'dsh_session_secret' },
       { sessionTtlSeconds: 59 },
+      { sessionTtlSeconds: 31_536_001 },
       { sessionTtlSeconds: 60.5 },
       { failureWindowSeconds: 0 },
+      { failureWindowSeconds: Number.MAX_SAFE_INTEGER + 1 },
       { maxFailuresPerWindow: 0 },
+      { maxFailuresPerWindow: Number.MAX_VALUE },
       { maxTrackedAddresses: 0 },
+      { maxTrackedAddresses: Number.MAX_SAFE_INTEGER + 1 },
       { maxBodyBytes: 127 },
       { maxBodyBytes: 65_537 },
     ]) expect(() => InviteAuth.Config(invalid)).toThrow()

@@ -32,35 +32,41 @@ export const name = 'invite-auth'
 /** Service required before the authentication route can be registered. */
 export const inject = ['webServer']
 
+/** Public session protocol cap: signed invite sessions last at most 365 days. */
+const MAX_SESSION_TTL_SECONDS = 31_536_000
+
 /** Invite-authentication policy and launch-secret references. */
 export interface Config {
-  /** Inherited process-environment variable containing the invite code. */
+  /** Uppercase `DSH_*` inherited process-environment variable containing the invite code. */
   inviteCodeEnv?: string
-  /** Inherited process-environment variable containing the session signing secret. */
+  /** Uppercase `DSH_*` inherited process-environment variable containing the session signing secret. */
   sessionSecretEnv?: string
-  /** Signed session lifetime in seconds. */
+  /** Signed session lifetime as a safe integer from 60 through 31,536,000 seconds (365 days). */
   sessionTtlSeconds?: number
-  /** Fixed authentication-failure window in seconds. */
+  /** Positive safe-integer failure window in seconds whose millisecond value must remain a safe integer. */
   failureWindowSeconds?: number
-  /** Failed attempts allowed per address during one window. */
+  /** Positive safe-integer failed-attempt allowance per address during one window. */
   maxFailuresPerWindow?: number
-  /** Maximum retained address buckets. */
+  /** Positive safe-integer maximum retained address-bucket count. */
   maxTrackedAddresses?: number
-  /** Maximum URL-encoded login body size in bytes. */
+  /** Safe-integer URL-encoded login body limit from 128 through 65,536 bytes. */
   maxBodyBytes?: number
 }
 
+const ENVIRONMENT_REFERENCE = /^DSH_[A-Z0-9_]+$/
+
 /** Validated invite-authentication configuration with deployment defaults. */
 export const Config: z<Config> = z.object({
-  inviteCodeEnv: z.string().default('DSH_INVITE_CODE_SECRET'),
-  sessionSecretEnv: z.string().default('DSH_INVITE_SESSION_SECRET'),
-  sessionTtlSeconds: z.number().step(1).min(60).default(2_592_000),
-  failureWindowSeconds: z.number().step(1).min(1).default(900),
-  maxFailuresPerWindow: z.number().step(1).min(1).default(10),
-  maxTrackedAddresses: z.number().step(1).min(1).default(10_000),
+  inviteCodeEnv: z.string().pattern(ENVIRONMENT_REFERENCE).default('DSH_INVITE_CODE_SECRET'),
+  sessionSecretEnv: z.string().pattern(ENVIRONMENT_REFERENCE).default('DSH_INVITE_SESSION_SECRET'),
+  sessionTtlSeconds: z.number().step(1).min(60).max(MAX_SESSION_TTL_SECONDS).default(2_592_000),
+  failureWindowSeconds: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(900),
+  maxFailuresPerWindow: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(10),
+  maxTrackedAddresses: z.number().step(1).min(1).max(Number.MAX_SAFE_INTEGER).default(10_000),
   maxBodyBytes: z.number().step(1).min(128).max(65_536).default(4_096),
 })
 
+/** Runtime configuration after schema defaults and the fixed session protocol cap are applied. */
 interface ResolvedConfig {
   inviteCodeEnv: string
   sessionSecretEnv: string
@@ -83,40 +89,13 @@ interface SingleHeader {
   value: string | undefined
 }
 
-const ENVIRONMENT_REFERENCE = /^DSH_[A-Z0-9_]+$/
-const INTEGER_CONFIG_FIELDS = [
-  'sessionTtlSeconds',
-  'failureWindowSeconds',
-  'maxFailuresPerWindow',
-  'maxTrackedAddresses',
-  'maxBodyBytes',
-] as const satisfies readonly (keyof ResolvedConfig)[]
-
-/** Project the optional public input into one fully resolved runtime value. */
+/** Apply schema defaults and the fixed session cap, then enforce the failure-window millisecond representation. */
 function resolveConfig(config: Config): ResolvedConfig {
   const resolved = Config(config) as ResolvedConfig
-  requireEnvironmentReference(resolved.inviteCodeEnv, 'inviteCodeEnv')
-  requireEnvironmentReference(resolved.sessionSecretEnv, 'sessionSecretEnv')
-  for (const field of INTEGER_CONFIG_FIELDS) {
-    if (!Number.isSafeInteger(resolved[field])) {
-      throw new Error(`invite-auth: ${field} must be a safe integer`)
-    }
-  }
   if (!Number.isSafeInteger(resolved.failureWindowSeconds * 1_000)) {
     throw new Error('invite-auth: failureWindowSeconds must produce milliseconds as a safe integer')
   }
-  const currentSeconds = Math.floor(Date.now() / 1_000)
-  if (!Number.isSafeInteger(currentSeconds + resolved.sessionTtlSeconds)) {
-    throw new Error('invite-auth: sessionTtlSeconds must produce an expiry representable as a safe integer')
-  }
   return resolved
-}
-
-/** Require an uppercase DSH namespace reference covered by subprocess scrubbing. */
-function requireEnvironmentReference(value: string, field: 'inviteCodeEnv' | 'sessionSecretEnv'): void {
-  if (!ENVIRONMENT_REFERENCE.test(value)) {
-    throw new Error(`invite-auth: ${field} must name an uppercase DSH_ environment variable`)
-  }
 }
 
 /** Read a security-sensitive header only when it has one unambiguous value. */
@@ -308,9 +287,13 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
 /**
  * Resolve launch secrets and register the invite-authentication HTTP route.
  * Activation fails when either required inherited process variable is absent
- * or too short; disposing the plugin removes the complete route prefix.
+ * or too short, when environment references or numeric policy values are
+ * malformed, or when the failure window cannot be represented in milliseconds.
+ * Disposing the plugin removes the complete route prefix.
  * @param ctx Cordis context carrying the WebServer and launch snapshot.
  * @param config Validated invite-authentication configuration.
+ * @throws {Error} If environment references are malformed, numeric or derived
+ * values are unsafe, or required inherited process secrets are absent or too short.
  */
 export function apply(ctx: Context, config: Config): void {
   const resolved = resolveConfig(config)
