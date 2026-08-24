@@ -23,6 +23,12 @@ describe('safeNextPath', () => {
     expect(safeNextPath('/\\evil.example/sessions')).toBe('/')
     expect(safeNextPath('/%2F%2Fevil.example/sessions?next=%5C')).toBe('/%2F%2Fevil.example/sessions?next=%5C')
   })
+
+  it('rejects ASCII whitespace that URL parsing normalizes into an authority', () => {
+    for (const whitespace of ['\n', '\r', '\t']) {
+      expect(safeNextPath(`/${whitespace}/evil.example/safe`)).toBe('/')
+    }
+  })
 })
 
 describe('cookieValue', () => {

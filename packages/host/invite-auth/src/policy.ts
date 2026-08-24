@@ -12,6 +12,7 @@ const LOOPBACK_PEERS = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 export function safeNextPath(raw?: string | null): string {
   if (!raw || raw[0] !== '/' || raw.startsWith('//') || raw.includes('\\')) return '/'
   const target = new URL(raw, NEXT_PATH_BASE)
+  if (target.origin !== NEXT_PATH_BASE) return '/'
   return `${target.pathname}${target.search}${target.hash}`
 }
 
