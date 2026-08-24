@@ -5,7 +5,9 @@
  */
 
 import { createServer } from 'node:http'
+import { once } from 'node:events'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -43,6 +45,7 @@ const SECURITY_HEADERS = {
 
 interface Composition {
   context: Context
+  logs: string[]
   root: string
   port: number
 }
@@ -51,6 +54,7 @@ interface LoadOptions {
   layers?: readonly LaunchEnvironmentLayerInput[]
   port?: number
   config?: Readonly<Record<string, string | number>>
+  onFailure?: (error: unknown, logs: readonly string[]) => void
 }
 
 interface Result {
@@ -87,10 +91,17 @@ async function loadComposition(options: LoadOptions = {}): Promise<Composition> 
   ].join('\n'))
 
   const context = new Context()
-  const composition: Composition = { context, root, port: 0 }
+  const composition: Composition = { context, logs: [], root, port: 0 }
   compositions.add(composition)
   context.baseUrl = pathToFileURL(root).href + '/'
   context.provide(DSH_LAUNCH_ENVIRONMENT_KEY, createLaunchEnvironmentSnapshot(options.layers ?? [PROCESS_SECRETS]))
+  context.logger.exporter({
+    colors: false,
+    levels: { default: 3 },
+    export(message) {
+      composition.logs.push(message.args.map(value => value instanceof Error ? `${value.name}: ${value.message}` : String(value)).join(' '))
+    },
+  })
   try {
     await context.plugin(Loader)
     context.loader.builtins.include = Include
@@ -113,11 +124,67 @@ async function loadComposition(options: LoadOptions = {}): Promise<Composition> 
     composition.port = context.webServer.port
     return composition
   } catch (error) {
+    options.onFailure?.(error, composition.logs)
     compositions.delete(composition)
     await context.fiber.dispose()
     await rm(root, { recursive: true, force: true })
     throw error
   }
+}
+
+/**
+ * Send one incomplete request, then attempt a second request after the first
+ * response. A request-aware early response must close before processing it.
+ */
+async function incompleteKeepAlive(
+  composition: Composition,
+  requestLine: string,
+  headers: Readonly<Record<string, string>> = {},
+): Promise<string> {
+  const socket = connect(composition.port, '127.0.0.1')
+  const chunks: Buffer[] = []
+  socket.on('error', () => {})
+  socket.on('data', (chunk) => {
+    chunks.push(chunk)
+    if (chunks.length !== 1) return
+    socket.write([
+      'xGET /__invite/unknown HTTP/1.1',
+      'Host: dsh.example',
+      'Connection: close',
+      '',
+      '',
+    ].join('\r\n'))
+  })
+  await once(socket, 'connect')
+  socket.write([
+    `${requestLine} HTTP/1.1`,
+    'Host: dsh.example',
+    'Connection: keep-alive',
+    'Content-Length: 1',
+    ...Object.entries(headers).map(([name, value]) => `${name}: ${value}`),
+    '',
+    '',
+  ].join('\r\n'))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    await Promise.race([
+      new Promise<void>(resolve => socket.once('close', () => { resolve() })),
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`socket did not close after ${requestLine}`)), 2_000)
+      }),
+    ])
+  } finally {
+    if (timer !== undefined) clearTimeout(timer)
+    socket.destroy()
+  }
+  return Buffer.concat(chunks).toString('utf8')
+}
+
+/** Assert one early response closes without processing a pipelined successor. */
+function expectClosedEarly(raw: string, status: number): void {
+  expect(raw).toMatch(new RegExp(`^HTTP/1\\.1 ${String(status)} `))
+  expect(raw).toMatch(/\r\nConnection: close\r\n/i)
+  expect(raw.match(/HTTP\/1\.1 \d{3}/g)).toHaveLength(1)
 }
 
 /** Send one request without automatic redirects or cookie persistence. */
@@ -340,9 +407,54 @@ describe('real Loader invite-auth composition', () => {
     try {
       const response = await login(composition, 'wrong-code-123')
       expect(response.status).toBe(400)
+      expect(composition.logs).toContain('Error: synthetic unexpected failure')
     } finally {
       vi.restoreAllMocks()
     }
+  })
+
+  it('closes incomplete early responses before a second keep-alive request', { timeout: 60_000 }, async () => {
+    const composition = await loadComposition()
+    const accepted = await login(composition, INVITE_CODE)
+    const cookie = requestCookie(accepted.headers.get('set-cookie')!)
+
+    const cases: Array<{ requestLine: string; status: number; headers?: Readonly<Record<string, string>> }> = [
+      { requestLine: 'GET /__invite/login', status: 200 },
+      { requestLine: 'GET /__invite/login?next=%2Fsessions', status: 303, headers: { Cookie: cookie } },
+      { requestLine: 'GET /__invite/check', status: 204, headers: { Cookie: cookie } },
+      { requestLine: 'GET /__invite/check', status: 401 },
+      {
+        requestLine: 'GET /__invite/check',
+        status: 303,
+        headers: { Accept: 'text/html,application/xhtml+xml', 'X-Forwarded-Method': 'GET', 'X-Forwarded-Uri': '/sessions' },
+      },
+      {
+        requestLine: 'POST /__invite/logout',
+        status: 303,
+        headers: { Origin: PUBLIC_ORIGIN, 'X-Forwarded-Proto': 'https', 'X-Forwarded-Host': 'dsh.example' },
+      },
+      { requestLine: 'GET /__invite/unknown', status: 404 },
+      { requestLine: 'DELETE /__invite/check', status: 405 },
+    ]
+    for (const testCase of cases) {
+      expectClosedEarly(
+        await incompleteKeepAlive(composition, testCase.requestLine, testCase.headers),
+        testCase.status,
+      )
+    }
+
+    const blockedAddress = '198.51.100.30'
+    for (let attempt = 0; attempt < 10; attempt++) {
+      expect((await login(composition, 'incorrect-code', { address: blockedAddress })).status).toBe(401)
+    }
+    const blocked = await incompleteKeepAlive(composition, 'POST /__invite/login', {
+      Origin: PUBLIC_ORIGIN,
+      'X-Forwarded-Proto': 'https',
+      'X-Forwarded-Host': 'dsh.example',
+      'X-DSH-Invite-Client-IP': blockedAddress,
+      'Content-Type': 'application/x-www-form-urlencoded',
+    })
+    expectClosedEarly(blocked, 429)
   })
 
   it('limits failures per trusted forwarded address and accepts encoded candidates', { timeout: 60_000 }, async () => {
@@ -394,6 +506,61 @@ describe('real Loader invite-auth composition', () => {
         replacement.listen(port, '127.0.0.1', resolve)
       })
       await new Promise<void>((resolve, reject) => replacement.close(error => error === undefined ? resolve() : reject(error)))
+    }
+  })
+
+  it('keeps each file-only secret out of startup failures and logs', { timeout: 60_000 }, async () => {
+    const projectInvite = 'project-invite-secret-value'
+    const projectSession = 'project-session-secret-value-0123456789'
+    const cases: readonly LaunchEnvironmentLayerInput[][] = [
+      [
+        { source: 'process', values: { DSH_INVITE_SESSION_SECRET: SESSION_SECRET } },
+        { source: 'project-env', path: 'C:/project/.env', values: { DSH_INVITE_CODE_SECRET: projectInvite } },
+      ],
+      [
+        { source: 'process', values: { DSH_INVITE_CODE_SECRET: INVITE_CODE } },
+        { source: 'project-env', path: 'C:/project/.env', values: { DSH_INVITE_SESSION_SECRET: projectSession } },
+      ],
+    ]
+    for (const layers of cases) {
+      let capturedError = ''
+      let capturedLogs: readonly string[] = []
+      await expect(loadComposition({
+        layers,
+        onFailure(error, logs) {
+          capturedError = error instanceof Error ? `${error.name}: ${error.message}` : String(error)
+          capturedLogs = logs
+        },
+      })).rejects.toThrow(/inherited process environment variable/)
+      for (const secret of [projectInvite, projectSession]) {
+        expect(capturedError).not.toContain(secret)
+        expect(JSON.stringify(capturedLogs)).not.toContain(secret)
+      }
+    }
+  })
+
+  it('rejects unsafe environment references before resolving secrets', { timeout: 60_000 }, async () => {
+    for (const [field, reference] of [
+      ['inviteCodeEnv', 'INVITE_CODE'],
+      ['inviteCodeEnv', 'dsh_invite_code'],
+      ['inviteCodeEnv', 'DSH_INVITE-CODE'],
+      ['sessionSecretEnv', 'SESSION_SECRET'],
+    ] as const) {
+      await expect(loadComposition({ config: { [field]: reference } })).rejects.toThrow(
+        new RegExp(`${field}.*uppercase DSH_ environment variable`),
+      )
+    }
+  })
+
+  it('rejects unsafe numeric configuration during activation', { timeout: 60_000 }, async () => {
+    const unsafe = Number.MAX_SAFE_INTEGER + 1
+    for (const [field, value, error] of [
+      ['sessionTtlSeconds', Number.MAX_SAFE_INTEGER, /sessionTtlSeconds.*expiry.*safe integer/],
+      ['failureWindowSeconds', Number.MAX_SAFE_INTEGER, /failureWindowSeconds.*milliseconds.*safe integer/],
+      ['maxFailuresPerWindow', unsafe, /maxFailuresPerWindow.*safe integer/],
+      ['maxTrackedAddresses', Number.MAX_VALUE, /maxTrackedAddresses.*safe integer/],
+    ] as const) {
+      await expect(loadComposition({ config: { [field]: value } })).rejects.toThrow(error)
     }
   })
 

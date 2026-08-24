@@ -12,8 +12,7 @@ export const name = 'host-invite-auth-invariant'
 export const inject = ['invariants']
 
 /**
- * No runtime invariant: per-request signed cookies derive authorization, while real-composition tests own route disposal and
- * limiter lifecycle.
+ * No runtime invariant: per-request signed cookies derive authorization, and real-composition tests own route disposal.
  */
 const install: InvariantInstaller = () => {}
 

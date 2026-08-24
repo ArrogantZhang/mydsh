@@ -5,7 +5,7 @@
  * @module @deepseek-ai/dsh-host-invite-auth
  */
 
-import type { IncomingMessage, ServerResponse } from 'node:http'
+import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:http'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
@@ -83,9 +83,40 @@ interface SingleHeader {
   value: string | undefined
 }
 
+const ENVIRONMENT_REFERENCE = /^DSH_[A-Z0-9_]+$/
+const INTEGER_CONFIG_FIELDS = [
+  'sessionTtlSeconds',
+  'failureWindowSeconds',
+  'maxFailuresPerWindow',
+  'maxTrackedAddresses',
+  'maxBodyBytes',
+] as const satisfies readonly (keyof ResolvedConfig)[]
+
 /** Project the optional public input into one fully resolved runtime value. */
 function resolveConfig(config: Config): ResolvedConfig {
-  return Config(config) as ResolvedConfig
+  const resolved = Config(config) as ResolvedConfig
+  requireEnvironmentReference(resolved.inviteCodeEnv, 'inviteCodeEnv')
+  requireEnvironmentReference(resolved.sessionSecretEnv, 'sessionSecretEnv')
+  for (const field of INTEGER_CONFIG_FIELDS) {
+    if (!Number.isSafeInteger(resolved[field])) {
+      throw new Error(`invite-auth: ${field} must be a safe integer`)
+    }
+  }
+  if (!Number.isSafeInteger(resolved.failureWindowSeconds * 1_000)) {
+    throw new Error('invite-auth: failureWindowSeconds must produce milliseconds as a safe integer')
+  }
+  const currentSeconds = Math.floor(Date.now() / 1_000)
+  if (!Number.isSafeInteger(currentSeconds + resolved.sessionTtlSeconds)) {
+    throw new Error('invite-auth: sessionTtlSeconds must produce an expiry representable as a safe integer')
+  }
+  return resolved
+}
+
+/** Require an uppercase DSH namespace reference covered by subprocess scrubbing. */
+function requireEnvironmentReference(value: string, field: 'inviteCodeEnv' | 'sessionSecretEnv'): void {
+  if (!ENVIRONMENT_REFERENCE.test(value)) {
+    throw new Error(`invite-auth: ${field} must name an uppercase DSH_ environment variable`)
+  }
 }
 
 /** Read a security-sensitive header only when it has one unambiguous value. */
@@ -154,6 +185,42 @@ function clientAddress(req: IncomingMessage): string {
   return trustedClientAddress(req.socket.remoteAddress, forwarded.value)
 }
 
+/** Add connection closure when a response precedes the complete request body. */
+function responseHeaders(
+  req: IncomingMessage,
+  headers: OutgoingHttpHeaders = {},
+  forceClose = false,
+): OutgoingHttpHeaders {
+  return forceClose || !req.complete ? { ...headers, connection: 'close' } : headers
+}
+
+/** Write one request-aware empty response. */
+function respondEmpty(
+  req: IncomingMessage,
+  res: ServerResponse,
+  status: number,
+  headers: OutgoingHttpHeaders = {},
+  forceClose = false,
+): void {
+  writeEmpty(res, status, responseHeaders(req, headers, forceClose))
+}
+
+/** Write one request-aware HTML response. */
+function respondHtml(req: IncomingMessage, res: ServerResponse, status: number, body: string): void {
+  writeHtml(res, status, body, responseHeaders(req))
+}
+
+/** Write one request-aware redirect response. */
+function respondRedirect(
+  req: IncomingMessage,
+  res: ServerResponse,
+  location: string,
+  headers: OutgoingHttpHeaders = {},
+  forceClose = false,
+): void {
+  redirect(res, location, responseHeaders(req, headers, forceClose))
+}
+
 /** Serve one request claimed by the `/__invite` prefix route. */
 async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runtime): Promise<void> {
   /* v8 ignore next -- node:http always supplies url for server requests. */
@@ -161,10 +228,10 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
   if (url.pathname === '/__invite/login' && req.method === 'GET') {
     const next = safeNextPath(url.searchParams.get('next'))
     if (validSession(req, runtime.sessionSecret)) {
-      redirect(res, next)
+      respondRedirect(req, res, next)
       return
     }
-    writeHtml(res, 200, renderLoginPage(next, false))
+    respondHtml(req, res, 200, renderLoginPage(next, false))
     return
   }
 
@@ -173,7 +240,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
     const address = clientAddress(req)
     const retryAfter = runtime.limiter.retryAfterSeconds(address, Date.now())
     if (retryAfter !== undefined) {
-      writeEmpty(res, 429, { connection: 'close', 'retry-after': String(retryAfter) })
+      respondEmpty(req, res, 429, { 'retry-after': String(retryAfter) }, true)
       return
     }
     const form = await readUrlEncodedForm(req, runtime.config.maxBodyBytes)
@@ -182,24 +249,24 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
     if (candidate === null) throw new HttpError(400, 'missing inviteCode', false)
     if (!inviteCodeMatches(candidate, runtime.inviteCode)) {
       runtime.limiter.recordFailure(address, Date.now())
-      writeHtml(res, 401, renderLoginPage(next, true))
+      respondHtml(req, res, 401, renderLoginPage(next, true))
       return
     }
     runtime.limiter.clear(address)
     const token = issueSessionToken(runtime.sessionSecret, runtime.config.sessionTtlSeconds)
-    redirect(res, next, { 'set-cookie': sessionCookie(token, runtime.config.sessionTtlSeconds) })
+    respondRedirect(req, res, next, { 'set-cookie': sessionCookie(token, runtime.config.sessionTtlSeconds) })
     return
   }
 
   if (url.pathname === '/__invite/check' && req.method === 'GET') {
     if (validSession(req, runtime.sessionSecret)) {
-      writeEmpty(res, 204)
+      respondEmpty(req, res, 204)
       return
     }
     const method = singleHeader(req, 'x-forwarded-method')
     const uri = singleHeader(req, 'x-forwarded-uri')
     if (method.ambiguous || uri.ambiguous) {
-      writeEmpty(res, 401)
+      respondEmpty(req, res, 401)
       return
     }
     const originalMethod = method.value ?? 'GET'
@@ -208,35 +275,34 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
       listHeader(req, 'accept').toLowerCase().includes('text/html')
     ) {
       const next = safeNextPath(uri.value)
-      redirect(res, `/__invite/login?next=${encodeURIComponent(next)}`)
+      respondRedirect(req, res, `/__invite/login?next=${encodeURIComponent(next)}`)
       return
     }
-    writeEmpty(res, 401)
+    respondEmpty(req, res, 401)
     return
   }
 
   if (url.pathname === '/__invite/logout' && req.method === 'POST') {
     requireValidOrigin(req)
-    redirect(res, '/__invite/login', {
-      connection: 'close',
+    respondRedirect(req, res, '/__invite/login', {
       'set-cookie': clearedSessionCookie(),
-    })
+    }, true)
     return
   }
 
   if (url.pathname === '/__invite/login') {
-    writeEmpty(res, 405, { allow: 'GET, POST' })
+    respondEmpty(req, res, 405, { allow: 'GET, POST' })
     return
   }
   if (url.pathname === '/__invite/check') {
-    writeEmpty(res, 405, { allow: 'GET' })
+    respondEmpty(req, res, 405, { allow: 'GET' })
     return
   }
   if (url.pathname === '/__invite/logout') {
-    writeEmpty(res, 405, { allow: 'POST' })
+    respondEmpty(req, res, 405, { allow: 'POST' })
     return
   }
-  writeEmpty(res, 404)
+  respondEmpty(req, res, 404)
 }
 
 /**
@@ -279,10 +345,12 @@ export function apply(ctx: Context, config: Config): void {
         await dispatch(req, res, runtime)
       } catch (error) {
         if (!(error instanceof HttpError)) throw error
-        writeEmpty(
+        respondEmpty(
+          req,
           res,
           error.status,
-          error.closeConnection || !req.complete ? { connection: 'close' } : {},
+          {},
+          error.closeConnection,
         )
       }
     },

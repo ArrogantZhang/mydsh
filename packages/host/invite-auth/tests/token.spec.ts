@@ -38,6 +38,20 @@ describe('invite auth token primitives', () => {
     )
   })
 
+  it('rejects unsafe lifetimes and unrepresentable expiries before signing', () => {
+    for (const ttl of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, Number.MAX_VALUE, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() => issueSessionToken(SECRET, ttl, 1_000, Buffer.alloc(16))).toThrow(
+        new RangeError('session token lifetime must be a positive safe integer'),
+      )
+    }
+    expect(() => issueSessionToken(SECRET, Number.MAX_SAFE_INTEGER, 1_000, Buffer.alloc(16))).toThrow(
+      new RangeError('session token expiry must be a safe integer'),
+    )
+    expect(() => issueSessionToken(SECRET, 1, Number.MAX_VALUE, Buffer.alloc(16))).toThrow(
+      new RangeError('session token expiry must be a safe integer'),
+    )
+  })
+
   it('uses the host-only invite session cookie name', () => {
     expect(SESSION_COOKIE_NAME).toBe('__Host-dsh_invite')
   })
