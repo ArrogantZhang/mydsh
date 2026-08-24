@@ -540,6 +540,14 @@ const SERVICE_ROLES: ServiceRole[] = [
     note: 'Plain node:http carrier: named-route registry, index transform taps, and the static dist fallback; web-transport plugins register their own routes.',
   },
   {
+    key: 'inviteAuthReadiness',
+    pkg: 'invite-auth',
+    title: 'Invite-auth route readiness',
+    mode: 'core',
+    consumers: ['web-app'],
+    note: 'The authentication route exists before readiness is published; the deployment Web fallback waits on this fact and is withdrawn when authentication unloads.',
+  },
+  {
     key: 'clientModules',
     pkg: 'modules',
     title: 'Client plugin graph host',

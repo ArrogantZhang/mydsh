@@ -46,7 +46,7 @@ describe('safeNextPath', () => {
 
   it('retains the parsed-origin fallback after raw input validation', () => {
     class ExternalOriginUrl extends URL {
-      get origin(): string {
+      override get origin(): string {
         return 'https://evil.example'
       }
     }

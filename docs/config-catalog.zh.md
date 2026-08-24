@@ -857,6 +857,34 @@ export interface Config {
 
 来源：[`packages/host/frontend-static/src/index.ts:28`](../packages/host/frontend-static/src/index.ts)
 
+<a id="deepseek-aidsh-host-invite-auth"></a>
+
+## `@deepseek-ai/dsh-host-invite-auth`
+
+需要：`webServer`
+
+```ts config-catalog
+/** Invite-authentication policy and launch-secret references. */
+export interface Config {
+  /** Uppercase `DSH_*` inherited process-environment variable containing the invite code. */
+  inviteCodeEnv?: string
+  /** Uppercase `DSH_*` inherited process-environment variable containing the session signing secret. */
+  sessionSecretEnv?: string
+  /** Signed session lifetime as a safe integer from 60 through 31,536,000 seconds (365 days). */
+  sessionTtlSeconds?: number
+  /** Positive safe-integer failure window in seconds whose millisecond value must remain a safe integer. */
+  failureWindowSeconds?: number
+  /** Positive safe-integer failed-attempt allowance per address during one window. */
+  maxFailuresPerWindow?: number
+  /** Positive safe-integer maximum retained address-bucket count. */
+  maxTrackedAddresses?: number
+  /** Safe-integer URL-encoded login body limit from 128 through 65,536 bytes. */
+  maxBodyBytes?: number
+}
+```
+
+来源：[`packages/host/invite-auth/src/index.ts:62`](../packages/host/invite-auth/src/index.ts)
+
 <a id="deepseek-aidsh-host-webserver"></a>
 
 ## `@deepseek-ai/dsh-host-webserver`

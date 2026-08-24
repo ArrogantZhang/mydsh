@@ -28,6 +28,10 @@ import {
 
 declare module '@deepseek-ai/cordis' {
   interface Context {
+    /**
+     * Fact available only while invite-auth owns its route prefix. A plugin
+     * that injects this service is disposed before that prefix is withdrawn.
+     */
     inviteAuthReadiness: InviteAuthReadiness
   }
 }
@@ -38,7 +42,12 @@ export const name = 'invite-auth'
 /** Service required before the authentication route can be registered. */
 export const inject = ['webServer']
 
-/** Fact published only while the `/__invite` route owns its prefix. */
+/**
+ * Readiness fact for compositions that must not expose a dependent HTTP
+ * fallback without invite authentication. The route is registered before
+ * publication; owning-fiber withdrawal disposes dependent fibers before the
+ * route registration is removed.
+ */
 export interface InviteAuthReadiness {
   /** Prefix reserved for invite-authentication HTTP routes. */
   readonly routePrefix: '/__invite'
@@ -303,7 +312,9 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
  * Activation fails when either required inherited process variable is absent
  * or too short, when environment references or numeric policy values are
  * malformed, or when the failure window cannot be represented in milliseconds.
- * Disposing the plugin removes the complete route prefix.
+ * The route is registered before readiness is published. Disposing the owning
+ * fiber withdraws readiness, disposes dependent fibers, then removes the
+ * complete route prefix.
  * @param ctx Cordis context carrying the WebServer and launch snapshot.
  * @param config Validated invite-authentication configuration.
  * @throws {Error} If environment references are malformed, numeric or derived
