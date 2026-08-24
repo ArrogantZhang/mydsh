@@ -625,16 +625,20 @@ describe('real Loader invite-auth composition', () => {
 
   it('releases and restores the sole prefix route across plugin disposal', { timeout: 60_000 }, async () => {
     const composition = await loadComposition()
+    expect(composition.context.inviteAuthReadiness).toEqual({ routePrefix: '/__invite' })
     const entry = [...composition.context.loader.entries()].find(candidate => candidate.options.id === 'invite-auth')
     expect(entry).toBeDefined()
     await entry!.fiber?.dispose()
     expect((await request(composition, '/__invite/login')).status).toBe(404)
+    expect(composition.context.inviteAuthReadiness).toBeUndefined()
 
     const replacement = composition.context.plugin(InviteAuth, {})
     await expect(replacement.await()).resolves.toBeDefined()
     expect((await request(composition, '/__invite/login')).status).toBe(200)
+    expect(composition.context.inviteAuthReadiness).toEqual({ routePrefix: '/__invite' })
     await replacement.dispose()
     expect((await request(composition, '/__invite/login')).status).toBe(404)
+    expect(composition.context.inviteAuthReadiness).toBeUndefined()
   })
 
   it('registers and disposes the package invariant companion', async () => {

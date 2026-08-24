@@ -9,3 +9,10 @@
         maxFailuresPerWindow: 10
         maxTrackedAddresses: 10000
         maxBodyBytes: 4096
+    - id: web-runtime
+      inject: [webStartup, inviteAuthReadiness]
+      config:
+        openBrowser: !!js ctx.webStartup.openBrowser
+        printUrl: true
+        surfaceContext: true
+        trustedHosts: !!js ctx.webStartup.trustedHosts

@@ -30,8 +30,8 @@ export interface PluginReference {
 }
 
 const root = resolve(import.meta.dirname, '..')
-// These example files are overlays consumed by the built dsh app, so their bare
-// specifiers resolve from apps/cli rather than the examples workspace.
+// These app-resolved overlays are consumed by the built dsh app, so their bare
+// specifiers resolve from apps/cli rather than an examples workspace.
 const appOverlayFiles = new Set([
   'deploy/alibaba-cloud/invite-auth.cordis.yml',
   'examples/web-cordis/cordis.yml',

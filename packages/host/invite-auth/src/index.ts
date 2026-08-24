@@ -26,11 +26,25 @@ import {
   verifySessionToken,
 } from './token.ts'
 
+declare module '@deepseek-ai/cordis' {
+  interface Context {
+    inviteAuthReadiness: InviteAuthReadiness
+  }
+}
+
 /** Stable Cordis plugin name. */
 export const name = 'invite-auth'
 
 /** Service required before the authentication route can be registered. */
 export const inject = ['webServer']
+
+/** Fact published only while the `/__invite` route owns its prefix. */
+export interface InviteAuthReadiness {
+  /** Prefix reserved for invite-authentication HTTP routes. */
+  readonly routePrefix: '/__invite'
+}
+
+const INVITE_AUTH_READINESS: InviteAuthReadiness = Object.freeze({ routePrefix: '/__invite' })
 
 /** Public session protocol cap: signed invite sessions last at most 365 days. */
 const MAX_SESSION_TTL_SECONDS = 31_536_000
@@ -338,4 +352,5 @@ export function apply(ctx: Context, config: Config): void {
       }
     },
   }), 'invite-auth: HTTP routes')
+  ctx.provide('inviteAuthReadiness', INVITE_AUTH_READINESS)
 }
