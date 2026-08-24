@@ -5,6 +5,7 @@ describe('safeNextPath', () => {
   it('preserves a local path, query, and fragment', () => {
     expect(safeNextPath('/sessions?id=1')).toBe('/sessions?id=1')
     expect(safeNextPath('/sessions?id=1#latest')).toBe('/sessions?id=1#latest')
+    expect(safeNextPath('/safe/../sessions')).toBe('/sessions')
   })
 
   it('returns the root path for absent, empty, or cross-origin input', () => {
@@ -36,6 +37,11 @@ describe('safeNextPath', () => {
       expect(safeNextPath(`/${control}/dsh.invalid/safe`)).toBe('/')
       expect(safeNextPath(`/${control}/user@dsh.invalid/safe`)).toBe('/')
     }
+  })
+
+  it('rejects dot-segment normalization that serializes as a protocol-relative target', () => {
+    expect(safeNextPath('/%2e%2e//evil.example/login')).toBe('/')
+    expect(safeNextPath('/safe/..//evil.example/login')).toBe('/')
   })
 
   it('retains the parsed-origin fallback after raw input validation', () => {

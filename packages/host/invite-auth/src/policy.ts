@@ -14,7 +14,11 @@ export function safeNextPath(raw?: string | null): string {
   if (!raw || raw[0] !== '/' || raw.startsWith('//') || raw.includes('\\') || /[\u0000-\u0020\u007f]/.test(raw)) return '/'
   const target = new URL(raw, NEXT_PATH_BASE)
   if (target.origin !== NEXT_PATH_BASE) return '/'
-  return `${target.pathname}${target.search}${target.hash}`
+  const serialized = `${target.pathname}${target.search}${target.hash}`
+  if (!serialized.startsWith('/') || serialized.startsWith('//') || serialized.includes('\\') || /[\u0000-\u0020\u007f]/.test(serialized)) {
+    return '/'
+  }
+  return serialized
 }
 
 /**
