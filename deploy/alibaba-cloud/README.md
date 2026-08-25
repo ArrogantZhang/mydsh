@@ -10,7 +10,7 @@ Use a fresh Linux amd64 Ubuntu 22.04 or 24.04 ECS instance with a public address
 
 The host bootstrap installs only the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
 
-The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed named ref stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed ref selected for this deployment; a verified signed tag is preferable when available.
+The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed named ref stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed ref selected for this deployment; a verified signed tag is preferable when available. `DEPLOY_REF` must be a fully qualified existing `refs/heads/*` or `refs/tags/*` name; shorthand and ambiguous revisions are rejected.
 
 ## Prepare and upload a release
 
@@ -30,7 +30,7 @@ ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
 git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
-[[ $REMOTE_STAGE == */mydsh-deploy.* ]]
+[[ $REMOTE_STAGE =~ ^/[A-Za-z0-9._/-]+/mydsh-deploy\.[A-Za-z0-9]{6}$ ]]
 scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
 scp -r "$ARTIFACT_SET" "$REMOTE:$REMOTE_STAGE/"
 ```
@@ -45,14 +45,14 @@ Run bootstrap from the uploaded directory only for initial host setup. It instal
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-The script creates the non-login `mydsh` runtime account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range and a non-root UID. No builder account, pnpm installation, candidate lifecycle script, or build cache exists on the server. With an active release, bootstrap is a byte-for-byte no-op; any hostname, helper, unit, Caddyfile, or drop-in difference is refused before mutation.
+The script creates the non-login `mydsh` runtime account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range and a non-root UID. No builder account, pnpm installation, candidate lifecycle script, or build cache exists on the server. With an active release, bootstrap is a byte-for-byte no-op; missing files, changed bytes, wrong owners, an over-readable private environment, a writable helper, or directory-mode drift is refused before mutation.
 
 ## Deploy the release
 
-Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, copies both files into persistent root-private new inodes under `/var/lib/mydsh-deploy/uploads`, verifies the strict sidecar and SHA-256 value, then enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release-filesystem space for the expanded archive plus its compressed size and 1 GiB reserve. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, `refs/heads/` or `refs/tags/` label, platform, runtime outputs, and overlay. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
+Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, checks that the `/var` filesystem holding `/var/lib/mydsh-deploy/uploads` has room for the compressed artifact plus a 1 GiB reserve, then copies both files into persistent root-private new inodes. It verifies the strict sidecar and SHA-256 value and enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release-filesystem space for the expanded archive plus its compressed size and a separate 1 GiB reserve. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, a syntactically valid fully qualified `refs/heads/` or `refs/tags/` label, platform, runtime outputs, and overlay. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
 
 ```bash
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
 The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
@@ -126,9 +126,12 @@ git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$
 bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$UPGRADE_STAGE"
 UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+[[ $REMOTE_STAGE =~ ^/[A-Za-z0-9._/-]+/mydsh-deploy\.[A-Za-z0-9]{6}$ ]]
 scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Upgrade passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Upgrade failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
+
+The upgrade removes only the exact validated, unpredictable remote staging directory after successful acceptance. A failed upgrade retains that directory and prints its non-secret path for diagnosis.
 
 The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper or journal-format upgrade requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change.
 

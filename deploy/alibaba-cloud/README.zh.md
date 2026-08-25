@@ -10,7 +10,7 @@
 
 宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。打包需要开发机安装 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
-下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的具名 ref 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标和已评审 ref；如果条件允许，优先使用已验证的签名 tag。
+下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的具名 ref 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标和已评审 ref；如果条件允许，优先使用已验证的签名 tag。`DEPLOY_REF` 必须是已存在且完整的 `refs/heads/*` 或 `refs/tags/*` 名称；脚本会拒绝简写和有歧义的 revision。
 
 ## 准备并上传 release
 
@@ -30,7 +30,7 @@ ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
 git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
-[[ $REMOTE_STAGE == */mydsh-deploy.* ]]
+[[ $REMOTE_STAGE =~ ^/[A-Za-z0-9._/-]+/mydsh-deploy\.[A-Za-z0-9]{6}$ ]]
 scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
 scp -r "$ARTIFACT_SET" "$REMOTE:$REMOTE_STAGE/"
 ```
@@ -45,14 +45,14 @@ scp -r "$ARTIFACT_SET" "$REMOTE:$REMOTE_STAGE/"
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-脚本创建不可登录的 `mydsh` 运行时账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 要求该范围和非 root UID。服务器上不存在 builder 账户、pnpm 安装、候选生命周期脚本执行或构建缓存。存在活动 release 时，bootstrap 只允许逐字节一致的无操作；任何 hostname、helper、unit、Caddyfile 或 drop-in 差异都会在变更前被拒绝。
+脚本创建不可登录的 `mydsh` 运行时账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 要求该范围和非 root UID。服务器上不存在 builder 账户、pnpm 安装、候选生命周期脚本执行或构建缓存。存在活动 release 时，bootstrap 只允许逐字节一致的无操作；文件缺失、字节变化、所有者错误、私有环境文件权限过宽、helper 可写或目录模式漂移都会在变更前被拒绝。
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，把两个文件复制到 `/var/lib/mydsh-deploy/uploads` 下持久的 root-private 新 inode，验证严格 sidecar 与 SHA-256 值，再执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、以 `refs/heads/` 或 `refs/tags/` 开头的 ref 标签、平台、运行时输出和 overlay。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
+通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳压缩 artifact 和 1 GiB 预留空间，再把两个文件复制到持久的 root-private 新 inode。它验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和另一份 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、语法有效且以 `refs/heads/` 或 `refs/tags/` 开头的完整 ref 标签、平台、运行时输出和 overlay。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
 
 ```bash
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
 远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
@@ -126,9 +126,12 @@ git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$
 bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$UPGRADE_STAGE"
 UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+[[ $REMOTE_STAGE =~ ^/[A-Za-z0-9._/-]+/mydsh-deploy\.[A-Za-z0-9]{6}$ ]]
 scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Upgrade passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Upgrade failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
+
+升级成功通过验收后，只删除经过精确验证且不可预测的远程 staging 目录。升级失败时保留该目录，并打印其非秘密路径供诊断。
 
 已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper 或 journal 格式升级需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。
 

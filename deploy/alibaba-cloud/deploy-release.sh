@@ -175,20 +175,23 @@ validate_system_account() {
 
 validate_existing_managed_file() {
   local path=$1
+  local expected_mode=$2
   local resolved
   local owner
+  local mode
 
   [[ ! -L "$path" && -f "$path" ]] || return 1
   resolved=$(realpath -e -- "$path") || return 1
   [[ $resolved == "$path" ]] || return 1
   owner=$(stat -c '%U:%G' -- "$path") || return 1
-  [[ $owner == root:root ]] || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  [[ $owner == root:root && $mode == "$expected_mode" ]] || return 1
   grep -Fqx "$MANAGED_MARKER" "$path" || return 1
 }
 
 require_host_tools() {
   local tool
-  for tool in awk bash caddy cmp curl df flock getent head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
+  for tool in awk bash caddy cmp curl df flock getent git head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
   done
 }
@@ -207,13 +210,45 @@ validate_host_directory() {
   [[ $resolved == "$path" && $owner == "$expected_owner" && $mode == "$expected_mode" ]] || fail "host directory ownership or mode is unsafe: $path"
 }
 
+managed_directory_matches() {
+  local path=$1
+  local expected_owner=$2
+  local expected_mode=$3
+  local owner
+  local mode
+  local resolved
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  resolved=$(realpath -e -- "$path") || return 1
+  owner=$(stat -c '%U:%G' -- "$path") || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  [[ $resolved == "$path" && $owner == "$expected_owner" && $mode == "$expected_mode" ]]
+}
+
+validate_managed_host_state() {
+  local host_root=${1:-}
+  managed_directory_matches "$(host_path "$host_root" /opt/mydsh)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /opt/mydsh/releases)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /srv/mydsh)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /srv/mydsh/workspace)" mydsh:mydsh 750 || return 1
+  managed_directory_matches "$(host_path "$host_root" /var/lib/mydsh)" mydsh:mydsh 700 || return 1
+  managed_directory_matches "$(host_path "$host_root" "$DEPLOY_STATE_ROOT")" root:root 700 || return 1
+  managed_directory_matches "$(host_path "$host_root" "$UPLOADS_DIR")" root:root 700 || return 1
+  managed_directory_matches "$(host_path "$host_root" /etc/mydsh)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /etc/caddy)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /etc/systemd/system/caddy.service.d)" root:root 755 || return 1
+  managed_directory_matches "$(host_path "$host_root" /usr/local/sbin)" root:root 755 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$PUBLIC_ENV")" 644 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$PRIVATE_ENV")" 600 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$CADDY_CONFIG")" 644 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$DSH_UNIT")" 644 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$CADDY_DROPIN")" 644 || return 1
+  validate_existing_managed_file "$(host_path "$host_root" "$ROOT_HELPER")" 755 || return 1
+}
+
 validate_recovery_prerequisites() {
   require_host_tools
   validate_host_directory /var/lib root:root 755
-  validate_host_directory "$DEPLOY_STATE_ROOT" root:root 700
-  validate_host_directory "$UPLOADS_DIR" root:root 700
-  validate_host_directory /etc/mydsh root:root 755
-  validate_existing_managed_file "$PUBLIC_ENV" || fail "unsafe or unmanaged host file: $PUBLIC_ENV"
+  validate_managed_host_state || fail 'managed deployment state is incomplete, aliased, or has unsafe ownership or modes'
 }
 
 atomic_replace_link() {
@@ -259,17 +294,8 @@ validate_host() {
   require_host_tools
   [[ $(uname -m) == x86_64 ]] || fail 'prebuilt artifacts require an x86_64 host'
   [[ $(node --version) == v24.* ]] || fail 'prebuilt artifacts require the Node.js 24 runtime'
-  validate_host_directory /opt/mydsh root:root 755
-  validate_host_directory "$RELEASES_DIR" root:root 755
-  validate_host_directory /srv/mydsh root:root 755
-  validate_host_directory /srv/mydsh/workspace mydsh:mydsh 750
-  validate_host_directory /var/lib/mydsh mydsh:mydsh 700
-  validate_host_directory "$DEPLOY_STATE_ROOT" root:root 700
-  validate_host_directory /etc/mydsh root:root 755
+  validate_managed_host_state || fail 'managed deployment state is incomplete, aliased, or has unsafe ownership or modes'
   validate_system_account mydsh /var/lib/mydsh
-  for path in "$PUBLIC_ENV" "$PRIVATE_ENV" "$CADDY_CONFIG" "$DSH_UNIT" "$CADDY_DROPIN" "$ROOT_HELPER"; do
-    validate_existing_managed_file "$path" || fail "unsafe or unmanaged host file: $path"
-  done
 }
 
 validate_candidate_configs() {
@@ -489,6 +515,16 @@ validate_extraction_space() {
   (( available >= expanded + compressed + reserve ))
 }
 
+validate_upload_space() {
+  local path=$1
+  local compressed=$2
+  local reserve=${3:-1073741824}
+  local available
+  available=$(df -PB1 "$path" | awk 'NR == 2 { print $4 }') || return 1
+  [[ $available =~ ^[0-9]+$ ]] || return 1
+  (( available >= compressed + reserve ))
+}
+
 validate_release_manifest() {
   local release_root=$1
   local manifest="$release_root/.mydsh-release-manifest"
@@ -509,6 +545,7 @@ validate_release_manifest() {
   [[ ${fields[helper_journal_format]:-} == "$HELPER_JOURNAL_FORMAT" ]] || return 1
   [[ ${fields[commit]:-} =~ ^[0-9a-f]{40}$ ]] || return 1
   [[ ${fields[ref]:-} =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]] || return 1
+  git check-ref-format "${fields[ref]}" >/dev/null || return 1
   [[ ${fields[platform]:-} == linux-amd64 && ${fields[node_major]:-} == 24 && ${fields[pnpm_version]:-} == 11.7.0 ]] || return 1
   [[ ${fields[node_image_digest]:-} == "$NODE_IMAGE_DIGEST" ]] || return 1
   MANIFEST_COMMIT=${fields[commit]}
@@ -910,6 +947,7 @@ deploy_artifact() {
   local artifact_path
   local checksum_path
   local commit
+  local compressed_bytes
   local expected_commit
   local expanded_bytes
   local extract_root
@@ -930,7 +968,9 @@ deploy_artifact() {
   [[ -f "$artifact_path" && ! -L "$artifact_path" && -r "$artifact_path" ]] || fail 'artifact set is missing its readable regular artifact'
   [[ -f "$checksum_path" && ! -L "$checksum_path" && -r "$checksum_path" ]] || fail 'artifact set is missing its readable regular checksum sidecar'
   validate_compressed_size "$artifact_path" || fail 'compressed artifact exceeds the 1 GiB limit'
+  compressed_bytes=$(stat -c %s "$artifact_path") || fail 'cannot read compressed artifact size'
   [[ $(stat -c %s "$checksum_path") -le 4096 ]] || fail 'checksum sidecar is too large'
+  validate_upload_space "$UPLOADS_DIR" "$compressed_bytes" || fail 'insufficient persistent upload filesystem space for artifact copy and 1 GiB reserve'
   previous=$(current_release) || fail 'current release link is unsafe'
   TRUST_ROOT=$(mktemp -d "$UPLOADS_DIR/.upload.XXXXXX") || fail 'cannot create persistent root-private artifact directory'
   validate_temp_directory "$TRUST_ROOT" "$UPLOADS_DIR" .upload. || fail 'unsafe root-private artifact directory'

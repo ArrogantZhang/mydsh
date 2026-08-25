@@ -166,6 +166,41 @@ preflight_managed_paths() {
   done
 }
 
+managed_directory_matches() {
+  local path=$1
+  local expected_owner=$2
+  local expected_mode=$3
+  local owner
+  local mode
+  local resolved
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  resolved=$(realpath -e -- "$path") || return 1
+  owner=$(stat -c '%U:%G' -- "$path") || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  [[ $resolved == "$path" && $owner == "$expected_owner" && $mode == "$expected_mode" ]]
+}
+
+validate_active_managed_state() {
+  local host_root=${1:-}
+  managed_directory_matches "$host_root/opt/mydsh" root:root 755 || return 1
+  managed_directory_matches "$host_root/opt/mydsh/releases" root:root 755 || return 1
+  managed_directory_matches "$host_root/etc/mydsh" root:root 755 || return 1
+  managed_directory_matches "$host_root/var/lib/mydsh" mydsh:mydsh 700 || return 1
+  managed_directory_matches "$host_root/srv/mydsh" root:root 755 || return 1
+  managed_directory_matches "$host_root/srv/mydsh/workspace" mydsh:mydsh 750 || return 1
+  managed_directory_matches "$host_root/var/lib/mydsh-deploy" root:root 700 || return 1
+  managed_directory_matches "$host_root/var/lib/mydsh-deploy/uploads" root:root 700 || return 1
+  managed_directory_matches "$host_root/etc/caddy" root:root 755 || return 1
+  managed_directory_matches "$host_root/etc/systemd/system/caddy.service.d" root:root 755 || return 1
+  managed_directory_matches "$host_root/usr/local/sbin" root:root 755 || return 1
+  validate_existing_managed_file "$host_root/etc/mydsh/public.env" 644 || return 1
+  validate_existing_managed_file "$host_root/etc/mydsh/mydsh.env" 600 || return 1
+  validate_existing_managed_file "$host_root/etc/caddy/Caddyfile" 644 || return 1
+  validate_existing_managed_file "$host_root/etc/systemd/system/mydsh.service" 644 || return 1
+  validate_existing_managed_file "$host_root/etc/systemd/system/caddy.service.d/mydsh.conf" 644 || return 1
+  validate_existing_managed_file "$host_root/usr/local/sbin/mydsh-deploy-release" 755 || return 1
+}
+
 active_bootstrap_matches() {
   local public_host=$1
   local source_dir=${2:-$SCRIPT_DIR}
@@ -181,6 +216,7 @@ active_bootstrap_matches() {
   local dropin="$host_root/etc/systemd/system/caddy.service.d/mydsh.conf"
   local helper="$host_root/usr/local/sbin/mydsh-deploy-release"
   local public_env="$host_root/etc/mydsh/public.env"
+  validate_active_managed_state "$host_root" || return 1
   [[ -L "$current_path" ]] || return 1
   [[ -d "$releases_root" && ! -L "$releases_root" ]] || return 1
   resolved_releases=$(realpath -e -- "$releases_root") || return 1
@@ -188,9 +224,7 @@ active_bootstrap_matches() {
   commit=${resolved_current##*/}
   [[ $resolved_releases == "$releases_root" && $commit =~ ^[0-9a-f]{40}$ ]] || return 1
   [[ $resolved_current == "$releases_root/$commit" ]] || return 1
-  for path in "$caddy" "$unit" "$dropin" "$helper" "$public_env"; do
-    validate_existing_managed_file "$path" || return 1
-  done
+  managed_directory_matches "$resolved_current" root:root 755 || return 1
   cmp -- "$source_dir/Caddyfile" "$caddy" || return 1
   cmp -- "$source_dir/mydsh.service" "$unit" || return 1
   cmp -- "$source_dir/caddy-mydsh.conf" "$dropin" || return 1
@@ -203,16 +237,18 @@ active_bootstrap_matches() {
 
 validate_existing_managed_file() {
   local path=$1
+  local expected_mode=${2#0}
   local resolved
   local owner
+  local mode
 
-  [[ ! -L "$path" ]] || fail "managed file must not be a symlink: $path"
-  [[ -f "$path" ]] || fail "managed file must be a regular file: $path"
-  resolved=$(realpath -e -- "$path") || fail "cannot resolve managed file: $path"
-  [[ $resolved == "$path" ]] || fail "managed file escapes its literal path: $path -> $resolved"
-  owner=$(stat -c '%U:%G' -- "$path") || fail "cannot read managed file ownership: $path"
-  [[ $owner == root:root ]] || fail "managed file must be owned by root:root: $path"
-  grep -Fqx "$MANAGED_MARKER" "$path" || fail "refusing to replace or preserve unmanaged file: $path"
+  [[ ! -L "$path" && -f "$path" ]] || return 1
+  resolved=$(realpath -e -- "$path") || return 1
+  [[ $resolved == "$path" ]] || return 1
+  owner=$(stat -c '%U:%G' -- "$path") || return 1
+  mode=$(stat -c '%a' -- "$path") || return 1
+  [[ $owner == root:root && $mode == "$expected_mode" ]] || return 1
+  grep -Fqx "$MANAGED_MARKER" "$path" || return 1
 }
 
 install_managed_file() {
@@ -226,7 +262,7 @@ install_managed_file() {
   target_dir=$(dirname -- "$target")
   [[ $(realpath -e -- "$target_dir") == "$target_dir" ]] || fail "managed file parent is not canonical: $target_dir"
   if [[ -e "$target" || -L "$target" ]]; then
-    validate_existing_managed_file "$target"
+    validate_existing_managed_file "$target" "$mode" || fail "refusing unsafe, unmanaged, or mode-drifted file: $target"
   fi
   create_registered_temp_file "$target_dir" || return 1
   temporary=$CREATED_TEMP_FILE
@@ -248,7 +284,7 @@ write_managed_file() {
   target_dir=$(dirname -- "$target")
   [[ $(realpath -e -- "$target_dir") == "$target_dir" ]] || fail "managed file parent is not canonical: $target_dir"
   if [[ -e "$target" || -L "$target" ]]; then
-    validate_existing_managed_file "$target"
+    validate_existing_managed_file "$target" "$mode" || fail "refusing unsafe, unmanaged, or mode-drifted file: $target"
   fi
   create_registered_temp_file "$target_dir" || return 1
   temporary=$CREATED_TEMP_FILE
@@ -369,8 +405,7 @@ write_environment_files() {
 
   write_managed_file /etc/mydsh/public.env 0644 "DSH_PUBLIC_HOST=$public_host"
   if [[ -e /etc/mydsh/mydsh.env || -L /etc/mydsh/mydsh.env ]]; then
-    validate_existing_managed_file /etc/mydsh/mydsh.env
-    chmod 0600 /etc/mydsh/mydsh.env
+    validate_existing_managed_file /etc/mydsh/mydsh.env 600 || fail 'existing private environment file has unsafe ownership, mode, type, or content marker'
   else
     create_registered_temp_file /etc/mydsh || return 1
     private_tmp=$CREATED_TEMP_FILE
@@ -429,12 +464,14 @@ main() {
     /srv/mydsh \
     /srv/mydsh/workspace \
     /var/lib/mydsh-deploy \
+    /var/lib/mydsh-deploy/uploads \
     /etc/caddy \
     /etc/systemd/system/caddy.service.d \
     /usr/share/keyrings \
     /etc/apt/sources.list.d \
     /usr/local/sbin
   if [[ -e /opt/mydsh/current || -L /opt/mydsh/current ]]; then
+    validate_system_account mydsh /var/lib/mydsh
     active_bootstrap_matches "$public_host" || fail 'active host differs from bootstrap assets; use the separate reviewed control-plane maintenance procedure'
     printf 'Active host already matches reviewed bootstrap assets; no changes applied.\n'
     return 0
@@ -444,7 +481,7 @@ main() {
   trap cleanup EXIT
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring gnupg gzip iproute2 openssl python3 tar
+  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring git gnupg gzip iproute2 openssl python3 tar
   create_accounts_and_directories
   configure_package_repositories
   install_managed_file "$SCRIPT_DIR/Caddyfile" /etc/caddy/Caddyfile 0644

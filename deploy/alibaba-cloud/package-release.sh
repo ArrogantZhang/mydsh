@@ -37,6 +37,18 @@ verify_static_inputs() {
   done
 }
 
+resolve_named_ref_commit() {
+  local ref=$1
+  local repository=${2:-.}
+  local commit
+  [[ $ref == refs/heads/* || $ref == refs/tags/* ]] || return 1
+  git check-ref-format "$ref" >/dev/null || return 1
+  git -C "$repository" show-ref --verify --quiet "$ref" || return 1
+  commit=$(git -C "$repository" rev-parse --verify "${ref}^{commit}") || return 1
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || return 1
+  printf '%s\n' "$commit"
+}
+
 verify_staged_artifact_set() (
   local staging=$1
   local artifact="$staging/mydsh-linux-amd64.tar.gz"
@@ -87,7 +99,6 @@ main() {
   local repository
   local uid
   local gid
-  local named_ref
   local source_root
   local trusted_root
   local self_from_git
@@ -100,13 +111,9 @@ main() {
   [[ -d "$output_dir" && ! -L "$output_dir" && -w "$output_dir" ]] || fail 'output directory must be a writable real directory'
   [[ $(realpath -e -- "$output_dir") == "$output_dir" ]] || fail 'output directory must be canonical'
   for tool in cmp docker git gzip realpath sha256sum sync tar timeout; do command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"; done
-  docker info >/dev/null 2>&1 || fail 'Docker is required; no host-build fallback is available'
-  git check-ref-format --branch "$ref" >/dev/null || git check-ref-format "$ref" >/dev/null || fail 'deployment ref must be a named Git ref'
   repository=$(git rev-parse --show-toplevel) || fail 'run from a Git worktree'
-  named_ref=$(git -C "$repository" rev-parse --symbolic-full-name "$ref") || fail 'deployment ref must resolve to a named branch or tag'
-  [[ $named_ref == refs/heads/* || $named_ref == refs/tags/* ]] || fail 'deployment ref must resolve to a named branch or tag'
-  commit=$(git -C "$repository" rev-parse --verify "$ref^{commit}") || fail 'cannot resolve deployment ref'
-  [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail 'deployment ref did not resolve to one full commit'
+  commit=$(resolve_named_ref_commit "$ref" "$repository") || fail 'deployment ref must be an existing fully qualified refs/heads/* or refs/tags/* name'
+  docker info >/dev/null 2>&1 || fail 'Docker is required; no host-build fallback is available'
   final_dir="$output_dir/mydsh-release-$commit"
   [[ ! -e "$final_dir" && ! -L "$final_dir" ]] || fail "refusing to overwrite ${final_dir##*/}"
   PAIR_PARENT=$output_dir
@@ -180,7 +187,7 @@ main() {
   CIDFILE=''
   verify_static_inputs "$trusted_root" "$source_root" || fail 'container modified a static security input'
   for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do cp -- "$trusted_root/deploy/alibaba-cloud/$name" "$source_root/deploy/alibaba-cloud/$name"; done
-  printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975\n' "$commit" "$named_ref" >"$source_root/.mydsh-release-manifest"
+  printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975\n' "$commit" "$ref" >"$source_root/.mydsh-release-manifest"
   chmod 0644 "$source_root/.mydsh-release-manifest" || fail 'cannot secure release manifest'
   tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --exclude=./.builder -C "$source_root" -cf - . | gzip -n >"$PAIR_STAGING/mydsh-linux-amd64.tar.gz"
   digest=$(sha256sum "$PAIR_STAGING/mydsh-linux-amd64.tar.gz"); digest=${digest%% *}

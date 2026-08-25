@@ -133,6 +133,10 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('validate_lock_path')
     expect(script).toContain('ensure_managed_directory')
     expect(script).toContain('validate_existing_managed_file')
+    expect(script).toContain('validate_active_managed_state')
+    expect(script).toContain('validate_existing_managed_file "$host_root/etc/mydsh/mydsh.env" 600')
+    expect(script).toContain('validate_existing_managed_file "$host_root/usr/local/sbin/mydsh-deploy-release" 755')
+    expect(script).toMatch(/apt-get install -y[^\n]*\bgit\b/)
     expect(script).toContain('create_registered_temp_file')
     expect(script).toContain('cleanup_registered_temp_files')
     expect(script).toMatch(/caddy validate --config \/etc\/caddy\/Caddyfile --adapter caddyfile/)
@@ -179,6 +183,10 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('copy_bounded_upload')
     expect(script).toContain('head -c "$((limit + 1))"')
     expect(script).toContain('validate_extraction_space')
+    expect(script).toContain('validate_upload_space')
+    expect(script).toContain('validate_managed_host_state')
+    expect(script).toContain('validate_existing_managed_file "$(host_path "$host_root" "$PRIVATE_ENV")" 600')
+    expect(script).toContain('validate_existing_managed_file "$(host_path "$host_root" "$ROOT_HELPER")" 755')
     expect(script).toContain('validate_release_manifest')
     expect(script).toContain('validate_candidate_unit_contract')
     expect(script).toContain('cmp -- "$asset_root/Caddyfile" "$installed_caddy"')
@@ -254,6 +262,8 @@ describe('Alibaba Cloud deployment assets', () => {
     const main = script.slice(script.indexOf('\nmain() {'))
     expect(main.indexOf('recover_activation_journal "$ACTIVATION_DIR"')).toBeLessThan(main.indexOf('\n  validate_host'))
     const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
+    expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('TRUST_ROOT=$(mktemp'))
+    expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('copy_bounded_upload'))
     expect(deploy.indexOf('validate_archive_members')).toBeLessThan(deploy.indexOf('tar -xzf'))
     expect(deploy.indexOf('validate_candidate_configs')).toBeLessThan(deploy.indexOf('publish_extracted_release'))
   })
@@ -265,11 +275,15 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('node:24-bookworm')
     expect(script).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
     expect(script).toContain('verify_static_inputs')
+    expect(script).toContain('resolve_named_ref_commit')
+    expect(script).toContain('git check-ref-format "$ref"')
+    expect(script).toContain('"${ref}^{commit}"')
+    expect(script).not.toContain('check-ref-format --branch')
     expect(script).toContain('show "$commit:deploy/alibaba-cloud/package-release.sh"')
     expect(script).toContain('timeout --signal=TERM --kill-after=30s 45m docker run')
     expect(script).toContain('--cidfile')
     expect(script).toContain('docker rm -f')
-    expect(script).toContain('rev-parse --symbolic-full-name')
+    expect(script).toContain('show-ref --verify --quiet "$ref"')
     expect(script).toContain('archive "$commit"')
     expect(script).toContain('--memory=')
     expect(script).toContain('--pids-limit=')
@@ -396,10 +410,10 @@ if (ensure_managed_directory "$root/ancestor/child" "$(id -un)" "$(id -gn)" 0700
 [[ ! -e "$root/outside/child" ]]
 printf 'private\n' >"$root/private-real"
 ln -s "$root/private-real" "$root/private.env"
-if (validate_existing_managed_file "$root/private.env"); then exit 91; fi
+if (validate_existing_managed_file "$root/private.env" 600); then exit 91; fi
 printf 'unmanaged\n' >"$root/unmanaged"
 stat() { printf 'root:root\n'; }
-if (validate_existing_managed_file "$root/unmanaged"); then exit 92; fi
+if (validate_existing_managed_file "$root/unmanaged" 600); then exit 92; fi
 `, 'bootstrap-host.sh')
     })
 
@@ -484,6 +498,47 @@ if validate_extraction_space "$root" 1024 1024 1024; then exit 94; fi
 `)
     })
 
+    it('checks persistent upload space before creating a private copy', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+mkdir "$root/var" "$root/opt"
+df() {
+  if [[ "\${*: -1}" == "$root/var" ]]; then
+    printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100 99 1 99%% /var\n'
+  else
+    printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100000 1 99999 1%% /opt\n'
+  fi
+}
+if validate_upload_space "$root/var" 1024 1024; then exit 90; fi
+[[ -z $(find "$root/var" -mindepth 1 -print -quit) ]]
+validate_extraction_space "$root/opt" 1024 1024 1024
+`)
+    })
+
+    it('accepts only fully qualified existing branch or tag refs', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+git init -q "$root/repo"
+git -C "$root/repo" config user.email test@example.invalid
+git -C "$root/repo" config user.name Test
+printf 'reviewed\n' >"$root/repo/file"
+git -C "$root/repo" add file
+git -C "$root/repo" commit -qm reviewed
+git -C "$root/repo" branch reviewed
+git -C "$root/repo" tag reviewed
+branch_commit=$(resolve_named_ref_commit refs/heads/reviewed "$root/repo")
+tag_commit=$(resolve_named_ref_commit refs/tags/reviewed "$root/repo")
+[[ $branch_commit =~ ^[0-9a-f]{40}$ && $tag_commit == "$branch_commit" ]]
+for invalid in reviewed HEAD refs/tags/foo..bar 'refs/heads/@{bad}'; do
+  if resolve_named_ref_commit "$invalid" "$root/repo" >/dev/null 2>&1; then exit 90; fi
+done
+`, 'package-release.sh')
+    })
+
     it('caps the root-private upload copy even when the caller file grows', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -505,21 +560,82 @@ cmp "$root/input" "$root/copied"
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-source_dir="$root/source"; host="$root/host"; current="$root/current"; releases="$root/releases"; commit=${'8'.repeat(40)}
-mkdir -p "$source_dir" "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$host/etc/mydsh" "$releases/$commit"
+source_dir="$root/source"; host="$root/host"; current="$host/opt/mydsh/current"; releases="$host/opt/mydsh/releases"; commit=${'8'.repeat(40)}
+mkdir -p "$source_dir" "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$host/etc/mydsh" "$releases/$commit" "$host/var/lib/mydsh" "$host/var/lib/mydsh-deploy/uploads" "$host/srv/mydsh/workspace"
 for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
   name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nmatch\n' "$MANAGED_MARKER" >"$source_dir/$name"; cp "$source_dir/$name" "$host/$path"
 done
 printf '%s\nDSH_PUBLIC_HOST=dsh.example.com\n' "$MANAGED_MARKER" >"$host/etc/mydsh/public.env"
+printf '%s\nDSH_HOME=/var/lib/mydsh\n' "$MANAGED_MARKER" >"$host/etc/mydsh/mydsh.env"
+chmod 0644 "$host/etc/caddy/Caddyfile" "$host/etc/systemd/system/mydsh.service" "$host/etc/systemd/system/caddy.service.d/mydsh.conf" "$host/etc/mydsh/public.env"
+chmod 0600 "$host/etc/mydsh/mydsh.env"
+chmod 0755 "$host/usr/local/sbin/mydsh-deploy-release" "$host/opt/mydsh" "$releases" "$host/srv/mydsh" "$host/etc/mydsh" "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d"
+chmod 0700 "$host/var/lib/mydsh" "$host/var/lib/mydsh-deploy" "$host/var/lib/mydsh-deploy/uploads"
+chmod 0750 "$host/srv/mydsh/workspace"
 ln -s "$releases/$commit" "$current"
-validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
+stat() {
+  if [[ "$1" == -c && "$2" == %U:%G ]]; then
+    case "\${*: -1}" in
+      */var/lib/mydsh|*/srv/mydsh/workspace) printf 'mydsh:mydsh\n' ;;
+      *) printf 'root:root\n' ;;
+    esac
+  else
+    command stat "$@"
+  fi
+}
 active_bootstrap_matches dsh.example.com "$source_dir" "$host" "$current" "$releases"
 before=$(sha256sum "$host/etc/caddy/Caddyfile")
 printf '%s\ndrift\n' "$MANAGED_MARKER" >"$source_dir/Caddyfile"
 if active_bootstrap_matches dsh.example.com "$source_dir" "$host" "$current" "$releases"; then exit 90; fi
 after=$(sha256sum "$host/etc/caddy/Caddyfile")
 [[ $before == "$after" ]]
+cp "$host/etc/caddy/Caddyfile" "$source_dir/Caddyfile"
+chmod 0644 "$host/etc/mydsh/mydsh.env"
+if active_bootstrap_matches dsh.example.com "$source_dir" "$host" "$current" "$releases"; then exit 91; fi
+chmod 0600 "$host/etc/mydsh/mydsh.env"
+chmod 0775 "$host/usr/local/sbin/mydsh-deploy-release"
+if active_bootstrap_matches dsh.example.com "$source_dir" "$host" "$current" "$releases"; then exit 92; fi
+chmod 0755 "$host/usr/local/sbin/mydsh-deploy-release"
+rm "$host/etc/mydsh/mydsh.env"
+if active_bootstrap_matches dsh.example.com "$source_dir" "$host" "$current" "$releases"; then exit 93; fi
 `,'bootstrap-host.sh')
+    })
+
+    it('rejects incomplete or over-permissive deployed host state', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+host="$root/host"
+mkdir -p "$host/opt/mydsh/releases" "$host/srv/mydsh/workspace" "$host/var/lib/mydsh" "$host/var/lib/mydsh-deploy/uploads" "$host/etc/mydsh" "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin"
+for path in etc/mydsh/public.env etc/mydsh/mydsh.env etc/caddy/Caddyfile etc/systemd/system/mydsh.service etc/systemd/system/caddy.service.d/mydsh.conf usr/local/sbin/mydsh-deploy-release; do
+  printf '%s\nmanaged\n' "$MANAGED_MARKER" >"$host/$path"
+done
+chmod 0644 "$host/etc/mydsh/public.env" "$host/etc/caddy/Caddyfile" "$host/etc/systemd/system/mydsh.service" "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
+chmod 0600 "$host/etc/mydsh/mydsh.env"
+chmod 0755 "$host/usr/local/sbin/mydsh-deploy-release" "$host/opt/mydsh" "$host/opt/mydsh/releases" "$host/srv/mydsh" "$host/etc/mydsh" "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin"
+chmod 0700 "$host/var/lib/mydsh" "$host/var/lib/mydsh-deploy" "$host/var/lib/mydsh-deploy/uploads"
+chmod 0750 "$host/srv/mydsh/workspace"
+stat() {
+  if [[ "$1" == -c && "$2" == %U:%G ]]; then
+    case "\${*: -1}" in
+      */var/lib/mydsh|*/srv/mydsh/workspace) printf 'mydsh:mydsh\n' ;;
+      *) printf 'root:root\n' ;;
+    esac
+  else
+    command stat "$@"
+  fi
+}
+validate_managed_host_state "$host"
+chmod 0644 "$host/etc/mydsh/mydsh.env"
+if validate_managed_host_state "$host"; then exit 90; fi
+chmod 0600 "$host/etc/mydsh/mydsh.env"
+chmod 0775 "$host/usr/local/sbin/mydsh-deploy-release"
+if validate_managed_host_state "$host"; then exit 91; fi
+chmod 0755 "$host/usr/local/sbin/mydsh-deploy-release"
+rm "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
+if validate_managed_host_state "$host"; then exit 92; fi
+`)
     })
 
     it('removes registered target-directory temps when atomic rename fails', () => {
@@ -577,9 +693,11 @@ touch "$release/apps/web/dist/index.html"
 for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do touch "$release/deploy/alibaba-cloud/$name"; done
 printf 'format=1\ncommit=%s\nref=refs/tags/reviewed\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=%s\n' "${'d'.repeat(40)}" "$NODE_IMAGE_DIGEST" >"$release/.mydsh-release-manifest"
 validate_release_manifest "$release"
-sed -i 's#ref=refs/tags/reviewed#ref=reviewed#' "$release/.mydsh-release-manifest"
-if validate_release_manifest "$release"; then exit 89; fi
-sed -i 's#ref=reviewed#ref=refs/heads/reviewed#' "$release/.mydsh-release-manifest"
+for invalid_ref in reviewed refs/tags/foo..bar 'refs/heads/@{bad}'; do
+  sed -i "s#^ref=.*#ref=$invalid_ref#" "$release/.mydsh-release-manifest"
+  if validate_release_manifest "$release"; then exit 89; fi
+done
+sed -i 's#^ref=.*#ref=refs/heads/reviewed#' "$release/.mydsh-release-manifest"
 sed -i 's#node_image_digest=.*#node_image_digest=sha256:0000#' "$release/.mydsh-release-manifest"
 if validate_release_manifest "$release"; then exit 90; fi
 sed -i "s#node_image_digest=.*#node_image_digest=$NODE_IMAGE_DIGEST#" "$release/.mydsh-release-manifest"
@@ -972,6 +1090,9 @@ wait "$holder"
       expect(readme).not.toContain('scp deploy/alibaba-cloud/{Caddyfile')
       expect(readme).not.toContain('feat/invite-auth-deployment')
       expect(readme).toContain('mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+      expect(readme.split('[[ $REMOTE_STAGE =~ ^/[A-Za-z0-9._/-]+/mydsh-deploy\\.[A-Za-z0-9]{6}$ ]]').length - 1).toBe(2)
+      expect(readme.split("if [[ \\$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'").length - 1).toBe(2)
+      expect(readme).toContain('Upgrade failed; upload retained')
       expect(readme).not.toContain('git bundle verify')
       expect(readme).toContain('SHA-256')
       expect(readme).toMatch(/does not establish signer identity|不能证明签名者身份|真实性/i)
