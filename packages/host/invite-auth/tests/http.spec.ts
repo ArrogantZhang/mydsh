@@ -195,6 +195,7 @@ describe('renderLoginPage', () => {
     expect(page).toContain('<html lang="zh-CN">')
     expect(page).toContain('<title>访问 DSH</title>')
     expect(page).toContain('<h1>访问 DSH</h1>')
+    expect(page).toContain('<p>请输入共享邀请码后继续。</p>')
     expect(page).toContain('<form method="post" action="/__invite/login">')
     expect(page).toContain('<input type="hidden" name="next" value="/sessions">')
     expect(page).toContain('<label for="inviteCode">邀请码</label>')

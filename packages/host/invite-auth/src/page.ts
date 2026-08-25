@@ -61,7 +61,7 @@ export function renderLoginPage(next: string, invalid: boolean): string {
 <body>
   <main>
     <h1>访问 DSH</h1>
-    <p>请输入邀请码以继续访问此 DSH 服务。</p>
+    <p>请输入共享邀请码后继续。</p>
     ${alert}
     <form method="post" action="/__invite/login">
       <input type="hidden" name="next" value="${escapeAttribute(next)}">
