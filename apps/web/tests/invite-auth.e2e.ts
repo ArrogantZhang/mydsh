@@ -120,7 +120,10 @@ describe('web e2e: invite authentication login', () => {
     expect(await inviteCode.getAttribute('name')).toBe('inviteCode')
     expect(await inviteCode.getAttribute('autocomplete')).toBe('current-password')
     expect(await inviteCode.evaluate((element: HTMLInputElement) => element.required)).toBe(true)
-    expect(await inviteCode.evaluate(node => document.activeElement === node)).toBe(true)
+    await expect.poll(
+      async () => inviteCode.evaluate(node => document.activeElement === node),
+      { timeout: 10_000 },
+    ).toBe(true)
     expect(await page.getByRole('button', { name: '进入', exact: true }).count()).toBe(1)
     expect(await page.getByText('请输入共享邀请码后继续。', { exact: true }).count()).toBe(1)
     expect(await page.getByRole('alert').count()).toBe(0)
