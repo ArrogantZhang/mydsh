@@ -37,7 +37,7 @@ cd /tmp/mydsh-deploy
 sudo bash ./bootstrap-host.sh dsh.example.com
 ```
 
-脚本创建 `mydsh` 系统账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。它会验证并启动 Caddy，但在 release 存在之前不会启动 `mydsh`。脚本为已有且不受管理的目标创建一次 `.pre-mydsh` 后缀备份；如果之后再次出现不受管理的冲突，脚本会失败，不会覆盖该备份。
+脚本创建 `mydsh` 系统账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 在更改运行时目录所有权前，要求该范围、非 root UID，以及 `/usr/sbin/nologin` 或等价的 `/sbin/nologin`。它会验证并启动 Caddy，但在 release 存在之前不会启动 `mydsh`。脚本为已有且不受管理的目标创建一次 `.pre-mydsh` 后缀备份；如果之后再次出现不受管理的冲突，脚本会失败，不会覆盖该备份。
 
 ## 部署 release
 

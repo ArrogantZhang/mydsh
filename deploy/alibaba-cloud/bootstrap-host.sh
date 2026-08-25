@@ -29,6 +29,27 @@ fail() {
   exit 1
 }
 
+validate_mydsh_account() {
+  local account_name
+  local entries=()
+  local gecos
+  local gid
+  local home
+  local mydsh_shell
+  local mydsh_uid
+  local passwd_uid
+  local password
+
+  mapfile -t entries < <(getent passwd mydsh)
+  [[ ${#entries[@]} -eq 1 ]] || fail 'getent must resolve exactly one mydsh account'
+  IFS=: read -r account_name password passwd_uid gid gecos home mydsh_shell <<<"${entries[0]}"
+  [[ $account_name == mydsh && $passwd_uid =~ ^[0-9]+$ ]] || fail 'the mydsh passwd entry is malformed'
+  mydsh_uid=$(id -u mydsh) || fail 'id cannot resolve the mydsh account'
+  [[ $mydsh_uid == "$passwd_uid" ]] || fail 'id and getent disagree about the mydsh uid'
+  [[ $mydsh_uid != 0 && $mydsh_uid -lt 1000 ]] || fail 'the mydsh account must be a non-root Ubuntu system account'
+  [[ $mydsh_shell == /usr/sbin/nologin || $mydsh_shell == /sbin/nologin ]] || fail 'the mydsh account must use the Ubuntu nologin shell'
+}
+
 install_managed_file() {
   local source=$1
   local target=$2
@@ -90,7 +111,7 @@ DEBIAN_FRONTEND=noninteractive apt-get install -y caddy
 if ! id mydsh >/dev/null 2>&1; then
   useradd --system --home-dir /var/lib/mydsh --shell /usr/sbin/nologin --user-group mydsh
 fi
-[[ $(id -u mydsh) != 0 ]] || fail 'the mydsh service account must not be root'
+validate_mydsh_account
 
 install -d -o root -g root -m 0755 /opt/mydsh /opt/mydsh/releases /etc/mydsh
 install -d -o mydsh -g mydsh -m 0700 /var/lib/mydsh

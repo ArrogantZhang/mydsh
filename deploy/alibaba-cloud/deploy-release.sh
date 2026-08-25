@@ -55,6 +55,27 @@ validate_release_target() {
   [[ ${resolved_target%/*} == "$resolved_root" ]] || return 1
 }
 
+validate_mydsh_account() {
+  local account_name
+  local entries=()
+  local gecos
+  local gid
+  local home
+  local mydsh_shell
+  local mydsh_uid
+  local passwd_uid
+  local password
+
+  mapfile -t entries < <(getent passwd mydsh)
+  [[ ${#entries[@]} -eq 1 ]] || fail 'getent must resolve exactly one mydsh account'
+  IFS=: read -r account_name password passwd_uid gid gecos home mydsh_shell <<<"${entries[0]}"
+  [[ $account_name == mydsh && $passwd_uid =~ ^[0-9]+$ ]] || fail 'the mydsh passwd entry is malformed'
+  mydsh_uid=$(id -u mydsh) || fail 'id cannot resolve the mydsh account'
+  [[ $mydsh_uid == "$passwd_uid" ]] || fail 'id and getent disagree about the mydsh uid'
+  [[ $mydsh_uid != 0 && $mydsh_uid -lt 1000 ]] || fail 'the mydsh account must be a non-root Ubuntu system account'
+  [[ $mydsh_shell == /usr/sbin/nologin || $mydsh_shell == /sbin/nologin ]] || fail 'the mydsh account must use the Ubuntu nologin shell'
+}
+
 atomic_replace_link() {
   local current_path=$1
   local target=$2
@@ -141,9 +162,6 @@ load_public_environment() {
 }
 
 validate_host() {
-  local mydsh_entry
-  local mydsh_shell
-  local mydsh_uid
   local tool
 
   for tool in caddy curl getent git node pnpm realpath runuser systemctl; do
@@ -151,12 +169,7 @@ validate_host() {
   done
   [[ -d /opt/mydsh && -d "$RELEASES_DIR" && -d /srv/mydsh/workspace && -d /var/lib/mydsh && -d /var/cache/mydsh-pnpm ]] || fail 'host directories are missing; run bootstrap-host.sh first'
   [[ -r /etc/mydsh/public.env && -r /etc/mydsh/mydsh.env && -r /etc/caddy/Caddyfile && -r /etc/systemd/system/mydsh.service && -r /etc/systemd/system/caddy.service.d/mydsh.conf ]] || fail 'host configuration is incomplete; run bootstrap-host.sh first'
-  mydsh_uid=$(id -u mydsh) || fail 'the mydsh service account is missing'
-  [[ $mydsh_uid != 0 ]] || fail 'the mydsh service account must not be root'
-  [[ $mydsh_uid -lt 1000 ]] || fail 'the mydsh account must be a system account'
-  mydsh_entry=$(getent passwd mydsh) || fail 'the mydsh passwd entry is missing'
-  mydsh_shell=${mydsh_entry##*:}
-  [[ $mydsh_shell == /usr/sbin/nologin || $mydsh_shell == /sbin/nologin ]] || fail 'the mydsh account must use a nologin shell'
+  validate_mydsh_account
 }
 
 activate_release() {

@@ -6,24 +6,17 @@ import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 const deploymentRoot = resolve(import.meta.dirname, '../deploy/alibaba-cloud')
+const linuxFilesystemTestsEnabled = process.platform === 'linux'
 
 function asset(name: string): string {
   return readFileSync(resolve(deploymentRoot, name), 'utf8')
 }
 
-function wslPath(path: string): string {
-  const match = /^([A-Za-z]):[\\/](.*)$/.exec(path)
-  if (match === null) throw new Error(`cannot project Windows path into WSL: ${path}`)
-  return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replaceAll('\\', '/')}`
-}
-
 function runBash(body: string): ReturnType<typeof spawnSync> {
+  if (!linuxFilesystemTestsEnabled) throw new Error('real Bash filesystem tests run only on Linux CI')
   const deploymentScript = resolve(deploymentRoot, 'deploy-release.sh')
-  const command = process.platform === 'win32' ? 'wsl.exe' : 'bash'
-  const shellPath = process.platform === 'win32' ? wslPath(deploymentScript) : deploymentScript
-  const sourceCommand = `source '${shellPath.replaceAll("'", "'\\''")}'\n${body}`
-  const args = process.platform === 'win32' ? ['bash', '-s'] : ['-s']
-  return spawnSync(command, args, { encoding: 'utf8', input: sourceCommand })
+  const sourceCommand = `source '${deploymentScript.replaceAll("'", "'\\''")}'\n${body}`
+  return spawnSync('bash', ['-s'], { encoding: 'utf8', input: sourceCommand })
 }
 
 function expectBashSuccess(body: string): void {
@@ -120,6 +113,11 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).not.toMatch(/systemctl (?:enable|start|restart).*mydsh/)
     expect(script).toContain('Managed by DeepSeek Harness Alibaba Cloud deployment')
     expect(script).toContain('.pre-mydsh')
+    expect(script).toMatch(/mapfile -t entries < <\(getent passwd mydsh\)/)
+    expect(script).toContain('[[ ${#entries[@]} -eq 1 ]]')
+    expect(script).toContain('[[ $mydsh_uid != 0 && $mydsh_uid -lt 1000 ]]')
+    expect(script).toMatch(/\/usr\/sbin\/nologin.*\/sbin\/nologin/)
+    expect(script).toMatch(/if ! id mydsh[\s\S]*?\nfi\nvalidate_mydsh_account\n\ninstall -d -o root/)
     expect(script).toContain("printf 'DSH_INVITE_CODE_SECRET=%s\\n' \"$invite_code\"")
     expect(script).toMatch(/printf 'DSH_INVITE_SESSION_SECRET=%s\\n' "\$session_secret"\n  \} >"\$private_env_tmp"/)
     expect(script).not.toMatch(/(?:invite_code|session_secret)[^\n]*(?:\/dev\/stdout|>&2)/i)
@@ -156,16 +154,25 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('systemctl reload caddy')
     expect(script).toContain('/etc/systemd/system/caddy.service.d/mydsh.conf')
     expect(script).toContain('mydsh_uid=$(id -u mydsh)')
-    expect(script).toContain('[[ $mydsh_uid != 0 ]]')
+    expect(script).toContain('[[ $mydsh_uid != 0 && $mydsh_uid -lt 1000 ]]')
     expect(script).toContain('getent passwd mydsh')
+    expect(script).toContain('[[ ${#entries[@]} -eq 1 ]]')
     expect(script).toContain('nologin')
     expect(script).toContain('if [[ ${BASH_SOURCE[0]} == "$0" ]]')
     expect(script).not.toMatch(/rm -rf -- \/opt\/mydsh\/releases(?:\s|$)/m)
     expect(script).not.toMatch(/(?:echo|printf)[^\n]*DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
 
-  it('atomically replaces the current link with an adjacent next link', () => {
-    expectBashSuccess(`
+  it('limits GNU filesystem integration to Linux CI', () => {
+    expect(linuxFilesystemTestsEnabled).toBe(process.platform === 'linux')
+    if (!linuxFilesystemTestsEnabled) expect(() => runBash('true')).toThrow('only on Linux CI')
+  })
+
+  // atomic_replace_link uses GNU mv -T. Linux CI executes these tests; Windows
+  // keeps static coverage without requiring WSL, and macOS avoids BSD mv.
+  describe.runIf(linuxFilesystemTestsEnabled)('Linux release-link helpers', () => {
+    it('atomically replaces the current link with an adjacent next link', () => {
+      expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
@@ -177,10 +184,10 @@ atomic_replace_link "$root/current" "$new"
 [[ $(readlink "$root/current") == "$new" ]]
 [[ ! -e "$root/current.next" && ! -L "$root/current.next" ]]
 `)
-  })
+    })
 
-  it('refuses a non-symlink next path without changing current', () => {
-    expectBashSuccess(`
+    it('refuses a non-symlink next path without changing current', () => {
+      expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
@@ -192,10 +199,10 @@ if atomic_replace_link "$root/current" "$new"; then exit 90; fi
 [[ $(readlink "$root/current") == "$old" ]]
 [[ -d "$root/current.next" ]]
 `)
-  })
+    })
 
-  it('leaves current unchanged and cleans next when link creation fails', () => {
-    expectBashSuccess(`
+    it('leaves current unchanged and cleans next when link creation fails', () => {
+      expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
@@ -208,10 +215,10 @@ if atomic_replace_link "$root/current" "$new"; then exit 90; fi
 [[ $(readlink "$root/current") == "$old" ]]
 [[ ! -e "$root/current.next" && ! -L "$root/current.next" ]]
 `)
-  })
+    })
 
-  it('rejects a commit directory outside the canonical releases root', () => {
-    expectBashSuccess(`
+    it('rejects a commit directory outside the canonical releases root', () => {
+      expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
@@ -220,6 +227,7 @@ mkdir -p "$root/releases/$commit" "$root/outside/$commit"
 validate_release_target "$root/releases/$commit" "$root/releases"
 if validate_release_target "$root/outside/$commit" "$root/releases"; then exit 90; fi
 `)
+    })
   })
 
   it('activates Caddy only after the switched DSH release is healthy', () => {

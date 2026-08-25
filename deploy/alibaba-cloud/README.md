@@ -37,7 +37,7 @@ cd /tmp/mydsh-deploy
 sudo bash ./bootstrap-host.sh dsh.example.com
 ```
 
-The script creates the `mydsh` system account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. It validates Caddy and starts Caddy, but it does not start `mydsh` before a release exists. A pre-existing unmanaged target is backed up once with suffix `.pre-mydsh`; a later unmanaged collision fails instead of overwriting that backup.
+The script creates the `mydsh` system account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, and `/usr/sbin/nologin` or its `/sbin/nologin` equivalent before changing runtime-directory ownership. It validates Caddy and starts Caddy, but it does not start `mydsh` before a release exists. A pre-existing unmanaged target is backed up once with suffix `.pre-mydsh`; a later unmanaged collision fails instead of overwriting that backup.
 
 ## Deploy the release
 
