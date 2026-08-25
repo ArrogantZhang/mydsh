@@ -999,16 +999,31 @@ git diff --check master...HEAD
 
 Expected: all pass. On Windows, if the known symlink-permission test alone returns `EPERM`, rerun `doc-sync` in an elevated shell or Linux and require a clean pass before deployment.
 
-- [ ] **Step 4: Review for secrets and default-surface drift**
+- [ ] **Step 4: Review for committed secret values and default-composition drift**
+
+Reject committed concrete secret values, not environment-variable names or reviewed assignment construction. The bootstrap and deployment scripts, documentation, and tests may name the invite/session variables; test values must remain deliberate sentinels.
 
 ```bash
 git diff --stat master...HEAD
 git diff --name-only master...HEAD
-git grep -n -E 'DSH_INVITE_(CODE_SECRET|SESSION_SECRET)=' -- ':!deploy/alibaba-cloud/bootstrap-host.sh'
+git grep -n -E 'DSH_INVITE_(CODE_SECRET|SESSION_SECRET)=[^[:space:]]+' -- \
+  packages apps examples deploy \
+  ':(exclude,glob)**/tests/**' \
+  ':(exclude,glob)deploy/**/*.md' \
+  ':(exclude,glob)deploy/**/*.i18n.yaml' \
+  ':(exclude)deploy/alibaba-cloud/bootstrap-host.sh' \
+  ':(exclude)deploy/alibaba-cloud/deploy-release.sh' \
+  ':(exclude)deploy/alibaba-cloud/package-release.sh'
+git grep -n -E \
+  -e '-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----' \
+  -e 'sk-[A-Za-z0-9_-]{32,}' \
+  -e 'gh[pousr]_[A-Za-z0-9]{36,}' \
+  -e 'AKIA[0-9A-Z]{16}' \
+  -- .
 git grep -n 'invite-auth' packages/bundle/web-app/cordis.patch.yml
 ```
 
-Expected: the first secret search has no matches; the Web bundle search has no matches; only intended package, overlay, deployment, tests, docs, and metadata files changed.
+Expected: both secret-value searches produce no output and exit `1`; any match fails review until classified and removed. The first search covers production runtime and configuration paths while excluding the three reviewed secret-generating scripts, documentation, and tests. The second searches the complete tracked tree for common concrete API-token and private-key forms; its expressions contain no matching literal specimen, so the plan does not match itself. The Web bundle search has no matches, and only intended package, overlay, deployment, test, documentation, and metadata files changed.
 
 - [ ] **Step 5: Request code review before production mutation**
 

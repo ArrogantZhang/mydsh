@@ -999,16 +999,31 @@ git diff --check master...HEAD
 
 预期：全部通过。在 Windows 上，若只有已知符号链接权限测试返回 `EPERM`，则在提升权限的 shell 或 Linux 中重跑 `doc-sync`，部署前必须得到完整通过结果。
 
-- [ ] **步骤 4：审阅秘密与默认表层漂移**
+- [ ] **步骤 4：审阅已提交的具体秘密值与默认组合漂移**
+
+拒绝提交具体秘密值，而不是拒绝环境变量名或经审阅的赋值构造。bootstrap 与部署脚本、文档和测试可以提及邀请／会话变量；测试值必须是刻意设置的测试哨兵值。
 
 ```bash
 git diff --stat master...HEAD
 git diff --name-only master...HEAD
-git grep -n -E 'DSH_INVITE_(CODE_SECRET|SESSION_SECRET)=' -- ':!deploy/alibaba-cloud/bootstrap-host.sh'
+git grep -n -E 'DSH_INVITE_(CODE_SECRET|SESSION_SECRET)=[^[:space:]]+' -- \
+  packages apps examples deploy \
+  ':(exclude,glob)**/tests/**' \
+  ':(exclude,glob)deploy/**/*.md' \
+  ':(exclude,glob)deploy/**/*.i18n.yaml' \
+  ':(exclude)deploy/alibaba-cloud/bootstrap-host.sh' \
+  ':(exclude)deploy/alibaba-cloud/deploy-release.sh' \
+  ':(exclude)deploy/alibaba-cloud/package-release.sh'
+git grep -n -E \
+  -e '-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY( BLOCK)?-----' \
+  -e 'sk-[A-Za-z0-9_-]{32,}' \
+  -e 'gh[pousr]_[A-Za-z0-9]{36,}' \
+  -e 'AKIA[0-9A-Z]{16}' \
+  -- .
 git grep -n 'invite-auth' packages/bundle/web-app/cordis.patch.yml
 ```
 
-预期：第一条秘密搜索没有匹配；Web 组合包搜索没有匹配；仅预期的包、覆盖层、部署、测试、文档与元数据文件发生变化。
+预期：两条秘密值搜索均不产生输出并以 `1` 退出；任何匹配都必须先分类并移除，否则审阅失败。第一条搜索覆盖生产运行时与配置路径，同时排除三份经审阅的秘密生成脚本、文档和测试。第二条搜索完整的已跟踪文件树，查找常见的具体 API token 与私钥形态；它的表达式不含可匹配的字面样本，因此计划不会匹配自身。Web 组合包搜索没有匹配，并且只有预期的包、覆盖层、部署、测试、文档与元数据文件发生变化。
 
 - [ ] **步骤 5：生产变更前请求代码审阅**
 
