@@ -13,9 +13,15 @@ readonly PUBLIC_ENV=/etc/mydsh/public.env
 readonly PRIVATE_ENV=/etc/mydsh/mydsh.env
 readonly ROOT_HELPER=/usr/local/sbin/mydsh-deploy-release
 readonly DEPLOY_STATE_ROOT=/var/lib/mydsh-deploy
+readonly UPLOADS_DIR=/var/lib/mydsh-deploy/uploads
 readonly ACTIVATION_DIR=/var/lib/mydsh-deploy/activation
+readonly MAX_COMPRESSED_BYTES=1073741824
+readonly MAX_ARCHIVE_MEMBERS=500000
+readonly MAX_MEMBER_BYTES=536870912
+readonly MAX_EXPANDED_BYTES=8589934592
 readonly RELEASE_FORMAT=1
 readonly HELPER_JOURNAL_FORMAT=1
+readonly NODE_IMAGE_DIGEST=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975
 DEPLOY_LOCK_FD=''
 TRUST_ROOT=''
 CREATED_TEMP_FILE=''
@@ -73,7 +79,7 @@ cleanup_operation() {
   cleanup_registered_temp_files
   if [[ -n "$TRUST_ROOT" ]]; then
     case "$TRUST_ROOT" in
-      /run/mydsh-artifact.*) rm -rf -- "$TRUST_ROOT" || true ;;
+      "$UPLOADS_DIR"/.upload.*) rm -rf -- "$TRUST_ROOT" || true ;;
       *) printf 'mydsh-deploy-release: refusing unsafe trust-root cleanup: %s\n' "$TRUST_ROOT" >&2 ;;
     esac
   fi
@@ -182,7 +188,7 @@ validate_existing_managed_file() {
 
 require_host_tools() {
   local tool
-  for tool in awk bash caddy cp curl flock getent install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
+  for tool in awk bash caddy cmp curl df flock getent head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
   done
 }
@@ -205,28 +211,9 @@ validate_recovery_prerequisites() {
   require_host_tools
   validate_host_directory /var/lib root:root 755
   validate_host_directory "$DEPLOY_STATE_ROOT" root:root 700
+  validate_host_directory "$UPLOADS_DIR" root:root 700
   validate_host_directory /etc/mydsh root:root 755
   validate_existing_managed_file "$PUBLIC_ENV" || fail "unsafe or unmanaged host file: $PUBLIC_ENV"
-}
-
-install_managed_file() {
-  local source=$1
-  local target=$2
-  local mode=$3
-  local temporary
-
-  [[ -f "$source" && ! -L "$source" ]] || return 1
-  if [[ -e "$target" || -L "$target" ]]; then
-    validate_existing_managed_file "$target" || return 1
-  fi
-  create_registered_temp_file "$(dirname -- "$target")" || return 1
-  temporary=$CREATED_TEMP_FILE
-  install -o root -g root -m "$mode" -- "$source" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
-  mv -f -- "$temporary" "$target" || {
-    discard_registered_temp_file "$temporary" || true
-    return 1
-  }
-  unregister_temp_file "$temporary"
 }
 
 atomic_replace_link() {
@@ -302,16 +289,17 @@ validate_candidate_configs() {
   grep -Fqx "$MANAGED_MARKER" "$caddy_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$unit_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$dropin_candidate" || return 1
+  validate_control_plane_match "$asset_root" "$CADDY_CONFIG" "$DSH_UNIT" "$CADDY_DROPIN" || return 1
   validate_candidate_unit_contract "$unit_candidate" || return 1
   [[ $(grep -Fvc "$MANAGED_MARKER" "$dropin_candidate") == 2 ]] || return 1
   grep -Fqx '[Service]' "$dropin_candidate" || return 1
   grep -Fqx 'EnvironmentFile=/etc/mydsh/public.env' "$dropin_candidate" || return 1
-  caddy validate --config "$caddy_candidate" --adapter caddyfile || return 1
+  caddy validate --config "$CADDY_CONFIG" --adapter caddyfile || return 1
   verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX) || return 1
   validate_temp_directory "$verify_root" /run mydsh-systemd-verify. || return 1
   mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib" || { rm -rf -- "$verify_root" || true; return 1; }
-  install -m 0644 "$unit_candidate" "$verify_root/etc/systemd/system/mydsh.service" || { rm -rf -- "$verify_root" || true; return 1; }
-  install -m 0644 "$dropin_candidate" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { rm -rf -- "$verify_root" || true; return 1; }
+  install -m 0644 "$DSH_UNIT" "$verify_root/etc/systemd/system/mydsh.service" || { rm -rf -- "$verify_root" || true; return 1; }
+  install -m 0644 "$CADDY_DROPIN" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { rm -rf -- "$verify_root" || true; return 1; }
   printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service" || { rm -rf -- "$verify_root" || true; return 1; }
   touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
   chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" || { rm -rf -- "$verify_root" || true; return 1; }
@@ -320,6 +308,16 @@ validate_candidate_configs() {
     return 1
   fi
   rm -rf -- "$verify_root" || return 1
+}
+
+validate_control_plane_match() {
+  local asset_root=$1
+  local installed_caddy=$2
+  local installed_unit=$3
+  local installed_dropin=$4
+  cmp -- "$asset_root/Caddyfile" "$installed_caddy" || return 1
+  cmp -- "$asset_root/mydsh.service" "$installed_unit" || return 1
+  cmp -- "$asset_root/caddy-mydsh.conf" "$installed_dropin" || return 1
 }
 
 require_unit_value_once() {
@@ -412,16 +410,31 @@ validate_artifact_set_directory() (
 
 validate_archive_members() {
   local artifact=$1
-  python3 - "$artifact" <<'PY'
+  local max_members=${2:-$MAX_ARCHIVE_MEMBERS}
+  local max_member=${3:-$MAX_MEMBER_BYTES}
+  local max_total=${4:-$MAX_EXPANDED_BYTES}
+  python3 - "$artifact" "$max_members" "$max_member" "$max_total" <<'PY'
 import posixpath
 import sys
 import tarfile
 from pathlib import PurePosixPath
 
 archive = sys.argv[1]
+max_members, max_member, max_total = map(int, sys.argv[2:])
 seen = set()
+count = total = 0
 with tarfile.open(archive, "r:gz") as stream:
-    for member in stream.getmembers():
+    for member in stream:
+        count += 1
+        if count > max_members:
+            raise SystemExit("archive member limit exceeded")
+        if member.size > max_member:
+            raise SystemExit(f"archive member too large: {member.name}")
+        total += member.size
+        if total > max_total:
+            raise SystemExit("archive expanded-size limit exceeded")
+        if getattr(member, "sparse", None):
+            raise SystemExit(f"sparse archive member: {member.name}")
         path = PurePosixPath(member.name)
         normalized = posixpath.normpath(member.name)
         if path.is_absolute() or normalized == ".." or normalized.startswith("../"):
@@ -440,7 +453,40 @@ with tarfile.open(archive, "r:gz") as stream:
             resolved = posixpath.normpath(str(base / link))
             if resolved == ".." or resolved.startswith("../"):
                 raise SystemExit(f"escaping archive link: {member.name}")
+print(count, total)
 PY
+}
+
+validate_compressed_size() {
+  local artifact=$1
+  local limit=${2:-$MAX_COMPRESSED_BYTES}
+  local size
+  size=$(stat -c %s "$artifact") || return 1
+  [[ $size =~ ^[0-9]+$ && $size -le $limit ]]
+}
+
+copy_bounded_upload() {
+  local source=$1
+  local target=$2
+  local limit=$3
+  local size
+  [[ -f "$source" && ! -L "$source" && ! -e "$target" && ! -L "$target" ]] || return 1
+  (umask 077; set -o noclobber; : >"$target") 2>/dev/null || return 1
+  head -c "$((limit + 1))" -- "$source" >"$target" || { rm -f -- "$target" || true; return 1; }
+  chmod 0400 "$target" || { rm -f -- "$target" || true; return 1; }
+  size=$(stat -c %s "$target") || { rm -f -- "$target" || true; return 1; }
+  [[ $size =~ ^[0-9]+$ && $size -le $limit ]]
+}
+
+validate_extraction_space() {
+  local path=$1
+  local expanded=$2
+  local compressed=$3
+  local reserve=${4:-1073741824}
+  local available
+  available=$(df -PB1 "$path" | awk 'NR == 2 { print $4 }') || return 1
+  [[ $available =~ ^[0-9]+$ ]] || return 1
+  (( available >= expanded + compressed + reserve ))
 }
 
 validate_release_manifest() {
@@ -456,14 +502,15 @@ validate_release_manifest() {
     fields[$key]=$value
   done <"$manifest"
   line_count=$(wc -l <"$manifest") || return 1
-  [[ $line_count == 7 ]] || return 1
+  [[ $line_count == 8 ]] || return 1
   grep -Fqx 'format=1' "$manifest" || return 1
   grep -Fqx 'helper_journal_format=1' "$manifest" || return 1
   [[ ${fields[format]:-} == "$RELEASE_FORMAT" ]] || return 1
   [[ ${fields[helper_journal_format]:-} == "$HELPER_JOURNAL_FORMAT" ]] || return 1
   [[ ${fields[commit]:-} =~ ^[0-9a-f]{40}$ ]] || return 1
-  [[ ${fields[ref]:-} =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ ${fields[ref]:-} =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]] || return 1
   [[ ${fields[platform]:-} == linux-amd64 && ${fields[node_major]:-} == 24 && ${fields[pnpm_version]:-} == 11.7.0 ]] || return 1
+  [[ ${fields[node_image_digest]:-} == "$NODE_IMAGE_DIGEST" ]] || return 1
   MANIFEST_COMMIT=${fields[commit]}
   MANIFEST_REF=${fields[ref]}
 }
@@ -502,25 +549,6 @@ host_path() {
   local root=$1
   local absolute=$2
   printf '%s%s\n' "$root" "$absolute"
-}
-
-backup_host_configs() {
-  local backup=$1
-  local host_root=${2:-}
-  install -d -o root -g root -m 0700 "$backup" || return 1
-  copy_durable_file "$(host_path "$host_root" "$CADDY_CONFIG")" "$backup/Caddyfile" || return 1
-  copy_durable_file "$(host_path "$host_root" "$DSH_UNIT")" "$backup/mydsh.service" || return 1
-  copy_durable_file "$(host_path "$host_root" "$CADDY_DROPIN")" "$backup/caddy-mydsh.conf" || return 1
-  sync -f "$backup" || return 1
-}
-
-copy_durable_file() {
-  local source=$1
-  local target=$2
-  [[ -f "$source" && ! -L "$source" ]] || return 1
-  cp -a --reflink=never -- "$source" "$target" || return 1
-  [[ -f "$target" && ! -L "$target" ]] || return 1
-  sync -f "$target" || return 1
 }
 
 write_journal_value() {
@@ -595,8 +623,8 @@ prepare_activation_journal() {
   local journal=$1
   local target=$2
   local previous=$3
-  local asset_root=$4
-  local host_root=${5:-}
+  local _asset_root=$4
+  local _host_root=${5:-}
   local previous_enabled=$6
   local parent
   local staging
@@ -607,12 +635,6 @@ prepare_activation_journal() {
   staging=$(mktemp -d "$parent/activation.new.XXXXXX") || return 1
   validate_temp_directory "$staging" "$parent" activation.new. || return 1
   chmod 0700 "$staging" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  backup_host_configs "$staging/backup" "$host_root" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  install -d -o root -g root -m 0700 "$staging/candidate" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  copy_durable_file "$asset_root/Caddyfile" "$staging/candidate/Caddyfile" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  copy_durable_file "$asset_root/mydsh.service" "$staging/candidate/mydsh.service" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  copy_durable_file "$asset_root/caddy-mydsh.conf" "$staging/candidate/caddy-mydsh.conf" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  sync -f "$staging/candidate" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" previous "${previous:-none}" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" target "$target" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" service-enabled "$previous_enabled" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
@@ -645,7 +667,6 @@ recover_activation_journal() {
   local previous
   local previous_enabled
   local target
-  local installed_caddy
   local journal_format
   local restored_release
   [[ $mode == normal || $mode == force ]] || return 1
@@ -669,11 +690,6 @@ recover_activation_journal() {
   target=$(<"$journal/target") || return 1
   previous_enabled=$(<"$journal/service-enabled") || return 1
   [[ $previous_enabled == enabled || $previous_enabled == disabled ]] || return 1
-  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
-  if ! restore_host_configs "$journal/backup" "$host_root" || ! systemctl daemon-reload; then
-    printf 'mydsh-deploy-release: recovery failed; journal retained at %s\n' "$journal" >&2
-    return 1
-  fi
   if [[ $previous == none ]]; then
     remove_first_link "$target" "$current_path" || return 1
     systemctl stop mydsh || return 1
@@ -685,8 +701,6 @@ recover_activation_journal() {
     restored_release=$previous
   fi
   restore_service_enable_state "$previous_enabled" || return 1
-  caddy validate --config "$installed_caddy" --adapter caddyfile || return 1
-  systemctl reload caddy || return 1
   sync_activated_state "$restored_release" "$journal" "$host_root" "$current_path" || return 1
   remove_activation_journal "$journal" || return 1
 }
@@ -724,22 +738,6 @@ restore_service_enable_state() {
   else
     return 1
   fi
-}
-
-stage_candidate_configs() {
-  local asset_root=$1
-  local host_root=${2:-}
-  install_managed_file "$asset_root/Caddyfile" "$(host_path "$host_root" "$CADDY_CONFIG")" 0644 || return 1
-  install_managed_file "$asset_root/mydsh.service" "$(host_path "$host_root" "$DSH_UNIT")" 0644 || return 1
-  install_managed_file "$asset_root/caddy-mydsh.conf" "$(host_path "$host_root" "$CADDY_DROPIN")" 0644 || return 1
-}
-
-restore_host_configs() {
-  local backup=$1
-  local host_root=${2:-}
-  install_managed_file "$backup/Caddyfile" "$(host_path "$host_root" "$CADDY_CONFIG")" 0644 || return 1
-  install_managed_file "$backup/mydsh.service" "$(host_path "$host_root" "$DSH_UNIT")" 0644 || return 1
-  install_managed_file "$backup/caddy-mydsh.conf" "$(host_path "$host_root" "$CADDY_DROPIN")" 0644 || return 1
 }
 
 health_check() {
@@ -849,26 +847,18 @@ activate_transaction() {
   local host_root=${4:-}
   local current_path=${5:-$CURRENT_LINK}
   local journal=${6:-$ACTIVATION_DIR}
-  local installed_caddy
   local previous_enabled
 
   validate_candidate_configs "$asset_root" || return 1
-  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
   previous_enabled=$(service_enable_state) || return 1
   prepare_activation_journal "$journal" "$target" "$previous" "$asset_root" "$host_root" "$previous_enabled" || return 1
-  if stage_candidate_configs "$journal/candidate" "$host_root" && systemctl daemon-reload; then
-    if atomic_replace_link "$current_path" "$target" && systemctl restart mydsh; then
-      if health_check "$target"; then
-        if caddy validate --config "$installed_caddy" --adapter caddyfile && systemctl reload caddy; then
-          if public_acceptance && authenticated_acceptance && systemctl enable mydsh; then
-            if sync_activated_state "$target" "$journal" "$host_root" "$current_path" && write_journal_state "$journal" committed && finalize_committed_journal "$journal"; then
-              if ! remove_activation_journal "$journal"; then
-                printf 'mydsh-deploy-release: activation accepted but committed journal cleanup was not durable at %s; the next operation will retry if it remains\n' "$journal" >&2
-              fi
-              return 0
-            fi
-          fi
+  if atomic_replace_link "$current_path" "$target" && systemctl restart mydsh; then
+    if health_check "$target" && public_acceptance && authenticated_acceptance && systemctl enable mydsh; then
+      if sync_activated_state "$target" "$journal" "$host_root" "$current_path" && write_journal_state "$journal" committed && finalize_committed_journal "$journal"; then
+        if ! remove_activation_journal "$journal"; then
+          printf 'mydsh-deploy-release: activation accepted but committed journal cleanup was not durable at %s; the next operation will retry if it remains\n' "$journal" >&2
         fi
+        return 0
       fi
     fi
   fi
@@ -921,11 +911,14 @@ deploy_artifact() {
   local checksum_path
   local commit
   local expected_commit
+  local expanded_bytes
   local extract_root
   local previous
   local target
   local trusted_artifact
   local trusted_checksum
+  local member_count
+  local stats
 
   [[ -d "$artifact_set_input" && ! -L "$artifact_set_input" ]] || fail 'artifact set must be a real directory'
   artifact_set=$(realpath -e -- "$artifact_set_input") || fail 'cannot resolve artifact-set directory'
@@ -936,17 +929,22 @@ deploy_artifact() {
   validate_artifact_set_directory "$artifact_set" || fail 'artifact set must contain exactly the artifact and checksum'
   [[ -f "$artifact_path" && ! -L "$artifact_path" && -r "$artifact_path" ]] || fail 'artifact set is missing its readable regular artifact'
   [[ -f "$checksum_path" && ! -L "$checksum_path" && -r "$checksum_path" ]] || fail 'artifact set is missing its readable regular checksum sidecar'
+  validate_compressed_size "$artifact_path" || fail 'compressed artifact exceeds the 1 GiB limit'
+  [[ $(stat -c %s "$checksum_path") -le 4096 ]] || fail 'checksum sidecar is too large'
   previous=$(current_release) || fail 'current release link is unsafe'
-  TRUST_ROOT=$(mktemp -d /run/mydsh-artifact.XXXXXX) || fail 'cannot create root-private artifact directory'
-  validate_temp_directory "$TRUST_ROOT" /run mydsh-artifact. || fail 'unsafe root-private artifact directory'
+  TRUST_ROOT=$(mktemp -d "$UPLOADS_DIR/.upload.XXXXXX") || fail 'cannot create persistent root-private artifact directory'
+  validate_temp_directory "$TRUST_ROOT" "$UPLOADS_DIR" .upload. || fail 'unsafe root-private artifact directory'
   trap cleanup_operation EXIT
   trusted_artifact="$TRUST_ROOT/${artifact_path##*/}"
   trusted_checksum="$TRUST_ROOT/checksum.sha256"
-  install -o root -g root -m 0400 -- "$artifact_path" "$trusted_artifact"
-  install -o root -g root -m 0400 -- "$checksum_path" "$trusted_checksum"
+  copy_bounded_upload "$artifact_path" "$trusted_artifact" "$MAX_COMPRESSED_BYTES" || fail 'artifact changed or exceeded the 1 GiB limit during its root-private copy'
+  copy_bounded_upload "$checksum_path" "$trusted_checksum" 4096 || fail 'checksum changed or exceeded 4 KiB during its root-private copy'
   [[ $(stat -c '%d:%i' "$artifact_path") != "$(stat -c '%d:%i' "$trusted_artifact")" ]] || fail 'artifact root-private copy reused the upload inode'
   verify_artifact_checksum "$trusted_artifact" "$trusted_checksum" || fail 'artifact SHA-256 verification failed'
-  validate_archive_members "$trusted_artifact" || fail 'artifact archive contains an unsafe member'
+  stats=$(validate_archive_members "$trusted_artifact") || fail 'artifact archive violates path, link, type, or resource limits'
+  read -r member_count expanded_bytes <<<"$stats"
+  [[ $member_count =~ ^[0-9]+$ && $expanded_bytes =~ ^[0-9]+$ ]] || fail 'artifact archive statistics are invalid'
+  validate_extraction_space "$RELEASES_DIR" "$expanded_bytes" "$(stat -c %s "$trusted_artifact")" || fail 'insufficient release filesystem space for safe extraction'
   extract_root=$(mktemp -d "$RELEASES_DIR/.extract.XXXXXX") || fail 'cannot create root-private extraction directory'
   OPERATION_ROOT=$extract_root
   validate_temp_directory "$extract_root" "$RELEASES_DIR" .extract. || fail 'unsafe extraction directory'

@@ -92,22 +92,22 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/var/lib/mydsh` 是持久化 `DSH_HOME`，独立于 release。
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
 - `/usr/local/sbin/mydsh-deploy-release` 是 root 所有、拥有 journal 格式 1 的部署、回滚和清理控制 helper；release 内容绝不提供或更新 root 控制流。
-- `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/activation` 是持久激活 journal。每个 builder tree 使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
+- `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/uploads` 在验证期间保存持久的 root-private 上传副本，`/var/lib/mydsh-deploy/activation` 是持久激活 journal。解压使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
 - `/run/lock/mydsh-deploy.lock` 将 bootstrap、部署、回滚和清理串行化。
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-Linux amd64 服务器只安装 Node.js 24 运行时和 Caddy；bootstrap 会在加锁或变更前拒绝其他任何 `dpkg` 架构，宿主也不存在 builder 账户、pnpm、源码 checkout、依赖生命周期执行、测试运行器或构建缓存。在开发机上，`package-release.sh` 归档精确的具名 Git ref，并在受资源限制的临时官方 Node 24 Linux 容器中使用全新状态和固定 pnpm tarball integrity，执行冻结依赖安装、invite-auth 测试、完整构建和配置转储。容器只能看到精确源码 tree 和不可预测、模式为 0700 的 artifact-set staging 目录，绝不能看到调用者输出目录。容器退出后，宿主验证并同步 tarball 与 checksum，再把它们共同的单个 commit 命名父目录原子重命名到输出位置。生成的确定性 archive 包含完整 Linux amd64 运行时 tree、依赖、已构建前端和库、部署数据，以及记录格式、commit、具名 ref、平台、Node、pnpm 和 helper journal 兼容版本的 manifest。
+Linux amd64 服务器只安装 Node.js 24 运行时和 Caddy；bootstrap 会在加锁或变更前拒绝其他任何 `dpkg` 架构，宿主也不存在 builder 账户、pnpm、源码 checkout、依赖生命周期执行、测试运行器或构建缓存。在开发机上，选定的具名 Git ref 提供 `package-release.sh`；脚本会在 Docker 启动前对照该 ref 检查自身字节，并创建干净的可信解压目录。脚本固定使用 `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`、全新状态和 pnpm tarball integrity；CPU、内存、进程数和运行时间受限，而网络与磁盘使用量不受限。容器只收到精确源码 tree 的副本，绝不能看到调用者输出目录。容器退出后，宿主把 unit、Caddyfile、Caddy drop-in 和 invite-auth overlay 与可信解压目录逐字节比较，由宿主生成 manifest 与 checksum，再将完整、以 commit 命名的 artifact-set 目录原子重命名到输出位置。生成的确定性 archive 包含完整 Linux amd64 运行时 tree、依赖、已构建前端和库、可信部署数据，以及记录格式、commit、具名 ref、平台、Node、pnpm、镜像 digest 和 helper journal 兼容版本的 manifest。
 
-稳定的宿主 helper 要求原子 artifact-set 目录中恰好只有 tarball 和 checksum，把两者复制到 root-private 新 inode，验证 SHA-256，拒绝绝对路径、父目录穿越、特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。激活前，它还会逐项且仅一次验证所有安全相关 systemd 值，包括运行时身份、工作目录、环境文件、命令、重启策略、mask、强化设置、可写路径和安装目标。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
+稳定的宿主 helper 要求原子 artifact-set 目录中恰好只有 tarball 和 checksum，把两者复制到持久的 root-private 新 inode，验证 SHA-256，并在解压前执行压缩大小、member 数量、单个 member、展开大小和可用空间限制。它拒绝绝对路径、父目录穿越、sparse 或特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。候选 unit、Caddyfile 和 Caddy drop-in 必须与已安装、root 所有的受管理文件逐字节相同；systemd 与 Caddy 验证针对该冻结控制平面运行，正常部署绝不会安装或重新加载这些文件。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
 
-Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
+Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。bootstrap 安装并验证受管理配置；更改配置需要单独评审的控制平面维护。
 
 ## 发布与回滚
 
 本地仓库保留 DeepSeek 上游 remote 和邀请码扩展提交。升级先获取最新 `master`，再把本地提交合并到新的已评审部署 ref。上游处于 developer preview，因此每次升级都视为需要重新验证的显式发布。
 
-root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` journal，其中包含之前的链接、宿主文件备份和服务之前的启用状态；完成 fsync 后，helper 将其原子重命名为 `activation`，然后才安装候选 unit、Caddyfile 和 Caddy drop-in。helper 本身不属于 release 事务；更改 helper 或 journal 格式需要在 DSH 停止时执行单独评审的维护流程。部署锁保护下会删除经过验证的遗留同级目录；不安全的条目会保留供检查，但不会成为恢复状态。helper 随后重新加载 systemd，切换 `current`，重启 DSH，验证 PID 所有者、精确且仅限回环的 `127.0.0.1:3080` 监听、回环登录、公开拒绝和认证访问，启用服务，同步每个受影响的 `/opt`、`/etc` 和 `/var` 路径，最后才记录 `committed`。在该提交前发生的任何中断或失败都会恢复并同步之前的链接、宿主文件、进程状态以及启用或禁用状态；恢复失败会保留完整 journal 并阻止新工作。已提交 journal 的清理失败只会留下供下一次操作删除且不会触发回滚的状态。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
+root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` journal，其中包含之前的链接和服务之前的启用状态；完成 fsync 后，helper 将其原子重命名为 `activation`，然后才切换代码。helper、unit、Caddyfile 和 Caddy drop-in 都不属于 release 事务；更改其中任何一项都需要在 DSH 停止时执行单独评审的维护流程。部署锁保护下会删除经过验证的遗留同级目录；不安全的条目会保留供检查，但不会成为恢复状态。helper 随后切换 `current`，重启 DSH，验证 PID 所有者、精确且仅限回环的 `127.0.0.1:3080` 监听、回环登录、公开拒绝和认证访问，启用服务，同步每个受影响的 release、链接、启用状态和 journal 路径，最后才记录 `committed`。在该提交前发生的任何中断或失败都会恢复并同步之前的链接、进程状态以及启用或禁用状态；恢复失败会保留完整 journal 并阻止新工作。已提交 journal 的清理失败只会留下供下一次操作删除且不会触发回滚的状态。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
 
 ## 测试与验收
 

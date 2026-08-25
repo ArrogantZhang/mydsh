@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-readonly NODE_IMAGE=node:24-bookworm
+readonly NODE_IMAGE='node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975'
 readonly PNPM_TARBALL=https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz
 readonly PNPM_INTEGRITY='sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
 PACKAGE_ROOT=''
 PAIR_STAGING=''
 PAIR_PARENT=''
+CIDFILE=''
 
 usage() {
   printf 'Usage: %s <named-reviewed-git-ref> <output-directory>\n' "${0##*/}" >&2
@@ -18,8 +19,22 @@ fail() {
 }
 
 cleanup() {
+  local container_id
+  if [[ -n "$CIDFILE" && -f "$CIDFILE" && ! -L "$CIDFILE" ]]; then
+    container_id=$(<"$CIDFILE") || container_id=''
+    if [[ $container_id =~ ^[0-9a-f]{64}$ ]]; then docker rm -f "$container_id" >/dev/null 2>&1 || true; fi
+  fi
   if [[ -n "$PAIR_STAGING" && -n "$PAIR_PARENT" && "$PAIR_STAGING" == "$PAIR_PARENT"/.mydsh-release-*.new.* ]]; then rm -rf -- "$PAIR_STAGING" || true; fi
   if [[ -n "$PACKAGE_ROOT" && "$PACKAGE_ROOT" == /tmp/mydsh-package.* ]]; then rm -rf -- "$PACKAGE_ROOT" || true; fi
+}
+
+verify_static_inputs() {
+  local trusted=$1
+  local built=$2
+  local name
+  for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do
+    cmp -- "$trusted/deploy/alibaba-cloud/$name" "$built/deploy/alibaba-cloud/$name" || return 1
+  done
 }
 
 verify_staged_artifact_set() (
@@ -74,13 +89,17 @@ main() {
   local gid
   local named_ref
   local source_root
+  local trusted_root
+  local self_from_git
+  local digest
+  local name
 
   [[ $# -eq 2 ]] || { usage; return 64; }
   ref=$1
   output_dir=$(realpath -e -- "$2") || fail 'output directory does not exist'
   [[ -d "$output_dir" && ! -L "$output_dir" && -w "$output_dir" ]] || fail 'output directory must be a writable real directory'
   [[ $(realpath -e -- "$output_dir") == "$output_dir" ]] || fail 'output directory must be canonical'
-  for tool in docker git gzip realpath sha256sum tar; do command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"; done
+  for tool in cmp docker git gzip realpath sha256sum sync tar timeout; do command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"; done
   docker info >/dev/null 2>&1 || fail 'Docker is required; no host-build fallback is available'
   git check-ref-format --branch "$ref" >/dev/null || git check-ref-format "$ref" >/dev/null || fail 'deployment ref must be a named Git ref'
   repository=$(git rev-parse --show-toplevel) || fail 'run from a Git worktree'
@@ -88,7 +107,6 @@ main() {
   [[ $named_ref == refs/heads/* || $named_ref == refs/tags/* ]] || fail 'deployment ref must resolve to a named branch or tag'
   commit=$(git -C "$repository" rev-parse --verify "$ref^{commit}") || fail 'cannot resolve deployment ref'
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail 'deployment ref did not resolve to one full commit'
-
   final_dir="$output_dir/mydsh-release-$commit"
   [[ ! -e "$final_dir" && ! -L "$final_dir" ]] || fail "refusing to overwrite ${final_dir##*/}"
   PAIR_PARENT=$output_dir
@@ -99,16 +117,23 @@ main() {
 
   PACKAGE_ROOT=$(mktemp -d /tmp/mydsh-package.XXXXXX) || fail 'cannot create packaging directory'
   [[ -n "$PACKAGE_ROOT" && "$PACKAGE_ROOT" == /tmp/mydsh-package.* && ! -L "$PACKAGE_ROOT" && $(realpath -e -- "$PACKAGE_ROOT") == "$PACKAGE_ROOT" ]] || fail 'unsafe packaging directory'
+  self_from_git="$PACKAGE_ROOT/package-release.ref"
+  git -C "$repository" show "$commit:deploy/alibaba-cloud/package-release.sh" >"$self_from_git" || fail 'selected ref lacks package-release.sh'
+  cmp -- "$self_from_git" "${BASH_SOURCE[0]}" || fail 'run package-release.sh extracted from the selected ref'
+  trusted_root="$PACKAGE_ROOT/trusted"
   source_root="$PACKAGE_ROOT/source"
-  install -d -m 0755 "$source_root"
-  git -C "$repository" archive "$commit" | tar -x -C "$source_root"
-  printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\n' "$commit" "$named_ref" >"$source_root/.mydsh-release-manifest"
-  chmod 0644 "$source_root/.mydsh-release-manifest"
+  install -d -m 0755 "$trusted_root" "$source_root"
+  git -C "$repository" archive "$commit" | tar -x -C "$trusted_root"
+  cp -a --reflink=never "$trusted_root/." "$source_root/"
   install -d -m 0700 "$source_root/.builder/home" "$source_root/.builder/xdg-config" "$source_root/.builder/xdg-cache" "$source_root/.builder/tmp" "$source_root/.builder/store" "$source_root/.builder/dsh-home" "$source_root/.builder/npm-prefix"
   uid=$(id -u)
   gid=$(id -g)
+  CIDFILE=$(mktemp "$PACKAGE_ROOT/container.XXXXXX.cid") || fail 'cannot create Docker cidfile'
+  rm -f -- "$CIDFILE"
 
-  docker run --rm --platform linux/amd64 \
+  # The container Bash, not the packaging shell, expands this command body.
+  # shellcheck disable=SC2016
+  timeout --signal=TERM --kill-after=30s 45m docker run --rm --platform linux/amd64 --cidfile "$CIDFILE" \
     --memory=8g --pids-limit=1024 --cpus=4 \
     --user "$uid:$gid" \
     --env HOME=/workspace/.builder/home \
@@ -120,12 +145,8 @@ main() {
     --env DSH_HOME=/workspace/.builder/dsh-home \
     --env PNPM_TARBALL="$PNPM_TARBALL" \
     --env PNPM_INTEGRITY="$PNPM_INTEGRITY" \
-    --env ARTIFACT_TEMP=/output/mydsh-linux-amd64.tar.gz \
-    --env CHECKSUM_TEMP=/output/mydsh-linux-amd64.tar.gz.sha256 \
-    --env ARTIFACT_NAME=mydsh-linux-amd64.tar.gz \
     --env EXPECTED_COMMIT="$commit" \
     --mount "type=bind,src=$source_root,dst=/workspace" \
-    --mount "type=bind,src=$PAIR_STAGING,dst=/output" \
     --workdir /workspace \
     "$NODE_IMAGE" bash -euo pipefail -c '
       git init --quiet
@@ -154,12 +175,16 @@ main() {
       test -f apps/web/dist/index.html
       test -d node_modules
       rm -rf -- /workspace/.git
-      tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --exclude=./.builder -C /workspace -cf - . | gzip -n >"$ARTIFACT_TEMP"
-      digest=$(sha256sum "$ARTIFACT_TEMP")
-      digest=${digest%% *}
-      printf "%s  %s\n" "$digest" "$ARTIFACT_NAME" >"$CHECKSUM_TEMP"
-    '
+     '
 
+  CIDFILE=''
+  verify_static_inputs "$trusted_root" "$source_root" || fail 'container modified a static security input'
+  for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do cp -- "$trusted_root/deploy/alibaba-cloud/$name" "$source_root/deploy/alibaba-cloud/$name"; done
+  printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975\n' "$commit" "$named_ref" >"$source_root/.mydsh-release-manifest"
+  chmod 0644 "$source_root/.mydsh-release-manifest" || fail 'cannot secure release manifest'
+  tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --exclude=./.builder -C "$source_root" -cf - . | gzip -n >"$PAIR_STAGING/mydsh-linux-amd64.tar.gz"
+  digest=$(sha256sum "$PAIR_STAGING/mydsh-linux-amd64.tar.gz"); digest=${digest%% *}
+  printf '%s  mydsh-linux-amd64.tar.gz\n' "$digest" >"$PAIR_STAGING/mydsh-linux-amd64.tar.gz.sha256"
   publish_artifact_set "$PAIR_STAGING" "$final_dir" "$output_dir" || fail 'artifact-set validation or atomic publication failed'
   printf 'Packaged commit %s as atomic artifact set %s.\n' "$commit" "${final_dir##*/}"
 }

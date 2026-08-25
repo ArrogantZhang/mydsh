@@ -356,6 +356,7 @@ create_accounts_and_directories() {
   ensure_managed_directory /srv/mydsh root root 0755
   ensure_managed_directory /srv/mydsh/workspace mydsh mydsh 0750
   ensure_managed_directory /var/lib/mydsh-deploy root root 0700
+  ensure_managed_directory /var/lib/mydsh-deploy/uploads root root 0700
   ensure_managed_directory /etc/caddy root root 0755
   ensure_managed_directory /etc/systemd/system/caddy.service.d root root 0755
 }
@@ -434,7 +435,7 @@ main() {
     /etc/apt/sources.list.d \
     /usr/local/sbin
   if [[ -e /opt/mydsh/current || -L /opt/mydsh/current ]]; then
-    active_bootstrap_matches "$public_host" || fail 'active host differs from bootstrap assets; deploy the reviewed ref through mydsh-deploy-release'
+    active_bootstrap_matches "$public_host" || fail 'active host differs from bootstrap assets; use the separate reviewed control-plane maintenance procedure'
     printf 'Active host already matches reviewed bootstrap assets; no changes applied.\n'
     return 0
   fi

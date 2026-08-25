@@ -14,15 +14,17 @@ The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed nam
 
 ## Prepare and upload a release
 
-Run these commands from the repository root on your development machine. The packager reads only Git objects from the selected named ref, runs install, tests, build, and config validation in a resource-bounded ephemeral `node:24-bookworm` container, and emits a complete Linux runtime tarball plus SHA-256 sidecar. It fails when Docker is unavailable and never falls back to a host build.
+Run these commands from the repository root on your development machine. The selected ref supplies the packager itself, and the packager reads only Git objects from that ref. It pins `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`, bounds the container to 4 CPUs, 8 GiB of memory, 1,024 processes, and 45 minutes, and runs install, tests, build, and config validation with fresh state. Container network and disk use are not bounded. Docker is mandatory; there is no host-build fallback.
 
 ```bash
 set -euo pipefail
 DEPLOY_REF=refs/tags/dsh-reviewed-YYYYMMDD
 REMOTE=ecs-admin@203.0.113.10
 LOCAL_STAGE=$(mktemp -d)
-trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
-bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$LOCAL_STAGE"
+PACKAGER_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$LOCAL_STAGE" "$PACKAGER_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$PACKAGER_STAGE"
+bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$LOCAL_STAGE"
 ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 [[ -d $ARTIFACT_SET ]]
 ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
@@ -47,13 +49,13 @@ The script creates the non-login `mydsh` runtime account, persistent and release
 
 ## Deploy the release
 
-Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, copies both files into root-private new inodes, verifies the strict sidecar and SHA-256 value, rejects unsafe tar paths and escaping links, extracts into a root-private directory, validates manifest format `1`, helper journal compatibility `1`, commit, ref label, platform, required dependencies, built CLI, overlay, the exact hardened unit contract, and Caddy configuration, and publishes the commit directory. It never runs Git, pnpm, install hooks, tests, build commands, config scripts, or a helper from the artifact. Activation journals and transacts the unit, Caddy files, release link, and service enablement; the stable helper itself is not part of the release transaction.
+Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, copies both files into persistent root-private new inodes under `/var/lib/mydsh-deploy/uploads`, verifies the strict sidecar and SHA-256 value, then enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release-filesystem space for the expanded archive plus its compressed size and 1 GiB reserve. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, `refs/heads/` or `refs/tags/` label, platform, runtime outputs, and overlay. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-The remote command removes the upload only after success. A failed update retains the exact artifact set, restores the previous `current` target, configuration, listener state, and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
+The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
 
 ## Verify HTTPS and login
 
@@ -118,8 +120,10 @@ For an upgrade, run `package-release.sh` for the new reviewed ref, create a fres
 
 ```bash
 UPGRADE_STAGE=$(mktemp -d)
-trap 'rm -rf -- "$UPGRADE_STAGE"' EXIT
-bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$UPGRADE_STAGE"
+PACKAGER_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$UPGRADE_STAGE" "$PACKAGER_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$PACKAGER_STAGE"
+bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$UPGRADE_STAGE"
 UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
@@ -128,7 +132,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-releas
 
 The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper or journal-format upgrade requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change.
 
-The deploy script rolls back automatically when restart, health acceptance, Caddy validation, or Caddy reload fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same validation, atomic switch, restart, health check, and Caddy activation.
+The deploy script rolls back automatically when restart, listener checks, or public and authenticated acceptance fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same byte comparison, atomic switch, restart, and acceptance checks.
 
 ```bash
 set -euo pipefail
@@ -189,7 +193,7 @@ systemctl restart mydsh
 
 - Read recent service logs with `sudo journalctl -u mydsh -n 200 --no-pager` and Caddy logs with `sudo journalctl -u caddy -n 200 --no-pager`; do not copy environment files or cookies into reports.
 - A public `502` means Caddy cannot reach a ready DSH process. Inspect `systemctl status mydsh`, its journal, `/opt/mydsh/current`, and the loopback listener.
-- A login `403` usually means the public hostname, HTTPS origin, or proxy headers disagree. Re-run bootstrap with the exact lowercase DNS hostname, validate DNS, then run `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`.
+- A login `403` usually means the public hostname, HTTPS origin, or proxy headers disagree. Validate DNS and run `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`; an active-host hostname or control-plane change requires the separate reviewed maintenance procedure rather than bootstrap.
 - A login `429` means the source address exceeded the in-process failure limit. Wait for the configured window or restart `mydsh` only after investigating repeated failures; restart clears every rate-limit bucket.
 
 ## Limitations

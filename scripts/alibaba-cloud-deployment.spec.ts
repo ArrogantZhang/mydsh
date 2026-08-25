@@ -171,8 +171,19 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('$RELEASES_DIR/.extract.XXXXXX')
     expect(script).toContain('verify_artifact_checksum')
     expect(script).toContain('validate_archive_members')
+    expect(script).toContain('/var/lib/mydsh-deploy/uploads')
+    expect(script).toContain('MAX_COMPRESSED_BYTES')
+    expect(script).toContain('MAX_ARCHIVE_MEMBERS')
+    expect(script).toContain('MAX_MEMBER_BYTES')
+    expect(script).toContain('MAX_EXPANDED_BYTES')
+    expect(script).toContain('copy_bounded_upload')
+    expect(script).toContain('head -c "$((limit + 1))"')
+    expect(script).toContain('validate_extraction_space')
     expect(script).toContain('validate_release_manifest')
     expect(script).toContain('validate_candidate_unit_contract')
+    expect(script).toContain('cmp -- "$asset_root/Caddyfile" "$installed_caddy"')
+    expect(script).toContain('cmp -- "$asset_root/mydsh.service" "$installed_unit"')
+    expect(script).toContain('cmp -- "$asset_root/caddy-mydsh.conf" "$installed_dropin"')
     expect(script).toContain('After network-online.target')
     expect(script).toContain('Wants network-online.target')
     expect(script).toContain('StartLimitIntervalSec 60')
@@ -186,15 +197,15 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('chown -R root:root')
     expect(script).toContain('chmod 0755 "$extract_root"')
     expect(script).toContain('chmod -R go-w')
-    expect(script).toContain('caddy validate --config "$installed_caddy" --adapter caddyfile')
+    expect(script).toContain('caddy validate --config "$CADDY_CONFIG" --adapter caddyfile')
     expect(script).toContain('local next_path="${current_path}.next"')
     expect(script).toContain('ln -s -- "$target" "$next_path"')
     expect(script).toContain('mv -Tf -- "$next_path" "$current_path"')
     expect(script).toMatch(/for .* in \{1\.\.30\}/)
     expect(script).toContain('http://127.0.0.1:3080/__invite/login')
-    expect(script).toMatch(/if health_check "\$target"; then/)
+    expect(script).toContain('health_check "$target" && public_acceptance')
     expect(script).toMatch(/recover_activation_journal[\s\S]*systemctl restart mydsh/)
-    expect(script).toContain('systemctl reload caddy')
+    expect(script).not.toContain('systemctl reload caddy')
     expect(script).toContain('/etc/systemd/system/caddy.service.d/mydsh.conf')
     expect(script).toContain('uid=$(id -u "$name")')
     expect(script).toContain('$uid != 0 && $uid -lt 1000')
@@ -225,14 +236,14 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).not.toMatch(/runuser -u mydsh -- (?:git|pnpm|env|node)/)
     expect(script).not.toContain('DSH_HOME=/var/lib/mydsh /usr/bin/node')
     expect(script).toContain('systemd-analyze')
-    expect(script).toContain('stage_candidate_configs')
-    expect(script).toContain('restore_host_configs')
     expect(script).toContain('systemctl is-active --quiet mydsh')
     expect(script).toContain('MainPID')
     expect(script).toContain('stat -c %U "/proc/$main_pid"')
     expect(script).toContain('public_acceptance')
     expect(script).toContain('authenticated_acceptance')
     expect(script).not.toContain('install_managed_file "$asset_root/deploy-release.sh"')
+    expect(script).not.toContain('stage_candidate_configs')
+    expect(script).not.toContain('restore_host_configs')
     expect(script).toContain('create_registered_temp_file')
     expect(script).toContain('cleanup_registered_temp_files')
     expect(script).toContain('activation accepted but committed journal cleanup was not durable')
@@ -252,6 +263,12 @@ describe('Alibaba Cloud deployment assets', () => {
 
     expect(script).toMatch(/^#!\/usr\/bin\/env bash\nset -euo pipefail\n/)
     expect(script).toContain('node:24-bookworm')
+    expect(script).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
+    expect(script).toContain('verify_static_inputs')
+    expect(script).toContain('show "$commit:deploy/alibaba-cloud/package-release.sh"')
+    expect(script).toContain('timeout --signal=TERM --kill-after=30s 45m docker run')
+    expect(script).toContain('--cidfile')
+    expect(script).toContain('docker rm -f')
     expect(script).toContain('rev-parse --symbolic-full-name')
     expect(script).toContain('archive "$commit"')
     expect(script).toContain('--memory=')
@@ -271,6 +288,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('.new.XXXXXX')
     expect(script).toContain('mv -T -- "$staging" "$final_dir"')
     expect(script).not.toContain('src=$output_dir,dst=/output')
+    expect(script).not.toContain('dst=/output')
     expect(script).not.toContain('.mydsh-release.$$.tmp')
     expect(script).not.toMatch(/runuser|systemd-run|DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
@@ -448,6 +466,40 @@ if validate_archive_members "$root/traversal.tar.gz"; then exit 91; fi
 `)
     })
 
+    it('rejects bounded archive and disk-space violations before extraction', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+mkdir "$root/tree"
+printf a >"$root/tree/a"; printf b >"$root/tree/b"; printf c >"$root/tree/c"
+tar -czf "$root/three.tar.gz" -C "$root/tree" .
+if validate_archive_members "$root/three.tar.gz" 2 1024 4096; then exit 90; fi
+if validate_archive_members "$root/three.tar.gz" 100 0 4096; then exit 91; fi
+if validate_archive_members "$root/three.tar.gz" 100 1024 2; then exit 92; fi
+stat() { printf '1073741825\n'; }
+if validate_compressed_size "$root/three.tar.gz" 1073741824; then exit 93; fi
+df() { printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100 99 1 99%% /\n'; }
+if validate_extraction_space "$root" 1024 1024 1024; then exit 94; fi
+`)
+    })
+
+    it('caps the root-private upload copy even when the caller file grows', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+head -c 2048 /dev/zero >"$root/input"
+if copy_bounded_upload "$root/input" "$root/oversized" 1024; then exit 90; fi
+[[ $(stat -c %s "$root/oversized") -le 1025 ]]
+printf 'small\n' >"$root/input"
+copy_bounded_upload "$root/input" "$root/copied" 1024
+cmp "$root/input" "$root/copied"
+[[ $(stat -c '%d:%i' "$root/input") != "$(stat -c '%d:%i' "$root/copied")" ]]
+[[ $(stat -c %a "$root/copied") == 400 ]]
+`)
+    })
+
     it('refuses active bootstrap drift without changing host files', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -523,8 +575,14 @@ mkdir -p "$release/apps/cli/lib" "$release/apps/web/dist" "$release/deploy/aliba
 touch "$release/apps/cli/lib/bin.js"
 touch "$release/apps/web/dist/index.html"
 for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do touch "$release/deploy/alibaba-cloud/$name"; done
-printf 'format=1\ncommit=%s\nref=refs/tags/reviewed\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\n' "${'d'.repeat(40)}" >"$release/.mydsh-release-manifest"
+printf 'format=1\ncommit=%s\nref=refs/tags/reviewed\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=%s\n' "${'d'.repeat(40)}" "$NODE_IMAGE_DIGEST" >"$release/.mydsh-release-manifest"
 validate_release_manifest "$release"
+sed -i 's#ref=refs/tags/reviewed#ref=reviewed#' "$release/.mydsh-release-manifest"
+if validate_release_manifest "$release"; then exit 89; fi
+sed -i 's#ref=reviewed#ref=refs/heads/reviewed#' "$release/.mydsh-release-manifest"
+sed -i 's#node_image_digest=.*#node_image_digest=sha256:0000#' "$release/.mydsh-release-manifest"
+if validate_release_manifest "$release"; then exit 90; fi
+sed -i "s#node_image_digest=.*#node_image_digest=$NODE_IMAGE_DIGEST#" "$release/.mydsh-release-manifest"
 validate_required_release_outputs "$release"
 rm "$release/apps/cli/lib/bin.js"
 if validate_required_release_outputs "$release"; then exit 91; fi
@@ -571,6 +629,23 @@ publish_artifact_set "$staging" "$final" "$output"
 `,'package-release.sh')
     })
 
+    it('detects container mutation of every static security input', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+trusted="$root/trusted"; built="$root/built"; mkdir -p "$trusted/deploy/alibaba-cloud" "$built/deploy/alibaba-cloud"
+for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do printf '%s\n' "$name" >"$trusted/deploy/alibaba-cloud/$name"; done
+cp -a "$trusted/." "$built/"
+verify_static_inputs "$trusted" "$built"
+for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do
+  cp -a "$trusted/." "$built/"
+  printf 'mutated\n' >>"$built/deploy/alibaba-cloud/$name"
+  if verify_static_inputs "$trusted" "$built"; then exit 90; fi
+done
+`,'package-release.sh')
+    })
+
     it('rejects weakened or duplicated candidate systemd settings', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -608,27 +683,40 @@ if validate_candidate_unit_contract "$unit"; then exit 98; fi
 `)
     })
 
-    it('restores update and first-deploy configuration transactions', () => {
+    it('rejects any candidate control-plane byte drift', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-host="$root/host"
+installed="$root/installed"; candidate="$root/candidate"; mkdir "$installed" "$candidate"
+cp "${resolve(deploymentRoot, 'Caddyfile').replaceAll('\\', '/')}" "$installed/Caddyfile"
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$installed/mydsh.service"
+cp "${resolve(deploymentRoot, 'caddy-mydsh.conf').replaceAll('\\', '/')}" "$installed/caddy-mydsh.conf"
+cp -a "$installed/." "$candidate/"
+validate_control_plane_match "$candidate" "$installed/Caddyfile" "$installed/mydsh.service" "$installed/caddy-mydsh.conf"
+printf 'ExecStartPre=+/bin/sh\n' >>"$candidate/mydsh.service"
+if validate_control_plane_match "$candidate" "$installed/Caddyfile" "$installed/mydsh.service" "$installed/caddy-mydsh.conf"; then exit 90; fi
+cp "$installed/mydsh.service" "$candidate/mydsh.service"
+printf '\n[Socket]\nListenStream=0.0.0.0:3080\n' >>"$candidate/mydsh.service"
+if validate_control_plane_match "$candidate" "$installed/Caddyfile" "$installed/mydsh.service" "$installed/caddy-mydsh.conf"; then exit 91; fi
+cp "$installed/mydsh.service" "$candidate/mydsh.service"
+printf '\n:443 { reverse_proxy 127.0.0.1:3080 }\n' >>"$candidate/Caddyfile"
+if validate_control_plane_match "$candidate" "$installed/Caddyfile" "$installed/mydsh.service" "$installed/caddy-mydsh.conf"; then exit 92; fi
+`)
+    })
+
+    it('activates code without modifying the stable control plane', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
 candidate="$root/candidate"
 previous="$root/${'a'.repeat(40)}"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$candidate/deploy/alibaba-cloud" "$previous"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf'; do
-  name=\${spec%%:*}; path=\${spec#*:}
-  printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"
-  printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/$name"
-done
-printf '%s\nold\n' "$MANAGED_MARKER" >"$host/usr/local/sbin/mydsh-deploy-release"
-printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/deploy-release.sh"
+control="$root/control"
+mkdir -p "$candidate/deploy/alibaba-cloud" "$previous" "$control"
+for name in Caddyfile mydsh.service caddy-mydsh.conf; do printf 'stable-%s\n' "$name" >"$control/$name"; done
+before=$(sha256sum "$control"/*)
 validate_candidate_configs() { return 0; }
-validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
-install() {
-  if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi
-}
 enable_state=enabled
 service_enable_state() { printf '%s\n' "$enable_state"; }
 systemctl() {
@@ -638,68 +726,51 @@ systemctl() {
   esac
   return 0
 }
-caddy() { return 0; }
 health_check() { return 0; }
 sync_activated_state() { return 0; }
 authenticated_acceptance() { return 0; }
 public_acceptance() { return 0; }
 ln -s "$previous" "$root/current"
-activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"
+activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" '' "$root/current" "$root/activation"
 [[ $(readlink "$root/current") == "$candidate" ]]
-grep -Fx new "$host/etc/caddy/Caddyfile"
+[[ $enable_state == enabled ]]
+[[ $(sha256sum "$control"/*) == "$before" ]]
 rm -f "$root/current"
 ln -s "$previous" "$root/current"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf'; do
-  path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"
-done
 sync_activated_state() { if [[ ! -e "$root/sync-failed" ]]; then touch "$root/sync-failed"; return 1; fi; return 0; }
-if activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 90; fi
+if activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" '' "$root/current" "$root/activation"; then exit 90; fi
 [[ $(readlink "$root/current") == "$previous" ]]
 [[ $enable_state == enabled ]]
-grep -Fx old "$host/etc/caddy/Caddyfile"
-grep -Fx old "$host/etc/systemd/system/mydsh.service"
-grep -Fx old "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
+[[ $(sha256sum "$control"/*) == "$before" ]]
 rm -f "$root/current"
 enable_state=disabled
 rm -f "$root/sync-failed"
-if activate_transaction "$candidate" '' "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 91; fi
+if activate_transaction "$candidate" '' "$candidate/deploy/alibaba-cloud" '' "$root/current" "$root/activation"; then exit 91; fi
 [[ ! -e "$root/current" && ! -L "$root/current" ]]
 [[ $enable_state == disabled ]]
-grep -Fx old "$host/etc/caddy/Caddyfile"
+[[ $(sha256sum "$control"/*) == "$before" ]]
 `)
     })
 
-    it('keeps an accepted activation successful when backup cleanup fails', () => {
+    it('keeps an accepted code activation successful when journal cleanup fails', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'command rm -rf -- "$root"' EXIT
-host="$root/host"
 candidate="$root/candidate"
 previous="$root/${'a'.repeat(40)}"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$candidate/deploy/alibaba-cloud" "$previous"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf'; do
-  name=\${spec%%:*}; path=\${spec#*:}
-  printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"
-  printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/$name"
-done
-printf '%s\nold\n' "$MANAGED_MARKER" >"$host/usr/local/sbin/mydsh-deploy-release"
-printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/deploy-release.sh"
+mkdir -p "$candidate/deploy/alibaba-cloud" "$previous"
 validate_candidate_configs() { return 0; }
-validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
-install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
 service_enable_state() { printf 'enabled\n'; }
 systemctl() { return 0; }
-caddy() { return 0; }
 health_check() { return 0; }
 sync_activated_state() { return 0; }
 public_acceptance() { return 0; }
 authenticated_acceptance() { return 0; }
 rm() { [[ "\${*: -1}" == */activation ]] && return 1; command rm "$@"; }
 ln -s "$previous" "$root/current"
-activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation" 2>"$root/warning"
+activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" '' "$root/current" "$root/activation" 2>"$root/warning"
 [[ $(readlink "$root/current") == "$candidate" ]]
-grep -Fx new "$host/etc/caddy/Caddyfile"
 grep -F 'activation accepted but committed journal cleanup was not durable' "$root/warning"
 `)
     })
@@ -709,33 +780,27 @@ grep -F 'activation accepted but committed journal cleanup was not durable' "$ro
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-host="$root/host"; assets="$root/assets"; previous="$root/${'a'.repeat(40)}"; candidate="$root/${'b'.repeat(40)}"; journal="$root/activation"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$previous" "$candidate"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
-  name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"; printf '%s\nnew\n' "$MANAGED_MARKER" >"$assets/$name"
-done
-validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
-install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
-systemctl() { return 0; }; caddy() { return 0; }; health_check() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
+previous="$root/${'a'.repeat(40)}"; candidate="$root/${'b'.repeat(40)}"; journal="$root/activation"
+mkdir -p "$previous" "$candidate"
+systemctl() { return 0; }; health_check() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
 ln -s "$previous" "$root/current"
-prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
-stage_candidate_configs "$assets" "$host"
+prepare_activation_journal "$journal" "$candidate" "$previous" '' '' enabled
 atomic_replace_link "$root/current" "$candidate"
-restore_host_configs_real=$(declare -f restore_host_configs)
-restore_host_configs() { return 1; }
-if recover_activation_journal "$journal" "$host" "$root/current"; then exit 90; fi
+atomic_definition=$(declare -f atomic_replace_link)
+atomic_replace_link() { return 1; }
+if recover_activation_journal "$journal" '' "$root/current"; then exit 90; fi
 [[ -d "$journal" && $(readlink "$root/current") == "$candidate" ]]
-eval "$restore_host_configs_real"
-recover_activation_journal "$journal" "$host" "$root/current"
+eval "$atomic_definition"
+recover_activation_journal "$journal" '' "$root/current"
 [[ ! -e "$journal" && $(readlink "$root/current") == "$previous" ]]
-prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
+prepare_activation_journal "$journal" "$candidate" "$previous" '' '' enabled
 write_journal_state "$journal" committed
 finalize_committed_journal "$journal"
 rm() { return 1; }
-if recover_activation_journal "$journal" "$host" "$root/current"; then exit 91; fi
+if recover_activation_journal "$journal" '' "$root/current"; then exit 91; fi
 [[ -d "$journal" && $(readlink "$root/current") == "$previous" ]]
 unset -f rm
-recover_activation_journal "$journal" "$host" "$root/current"
+recover_activation_journal "$journal" '' "$root/current"
 [[ ! -e "$journal" && $(readlink "$root/current") == "$previous" ]]
 `)
     })
@@ -745,27 +810,23 @@ recover_activation_journal "$journal" "$host" "$root/current"
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-host="$root/host"; assets="$root/assets"; journal="$root/activation"; candidate="$root/${'c'.repeat(40)}"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$candidate"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
-  name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"; printf '%s\nnew\n' "$MANAGED_MARKER" >"$assets/$name"
-done
-install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
+journal="$root/activation"; candidate="$root/${'c'.repeat(40)}"
+mkdir -p "$candidate"
 sync() { return 0; }
-copy_definition=$(declare -f copy_durable_file)
-copy_durable_file() { return 1; }
-if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 90; fi
+value_definition=$(declare -f write_journal_value)
+write_journal_value() { return 1; }
+if prepare_activation_journal "$journal" "$candidate" '' '' '' disabled; then exit 90; fi
 [[ ! -e "$journal" && ! -L "$journal" ]]
 if compgen -G "$root/activation.new.*" >/dev/null; then exit 91; fi
-eval "$copy_definition"
+eval "$value_definition"
 state_definition=$(declare -f write_journal_state)
 write_journal_state() { return 1; }
-if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 92; fi
+if prepare_activation_journal "$journal" "$candidate" '' '' '' disabled; then exit 92; fi
 [[ ! -e "$journal" && ! -L "$journal" ]]
 if compgen -G "$root/activation.new.*" >/dev/null; then exit 93; fi
 eval "$state_definition"
 sync() { return 1; }
-if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 94; fi
+if prepare_activation_journal "$journal" "$candidate" '' '' '' disabled; then exit 94; fi
 [[ ! -e "$journal" && ! -L "$journal" ]]
 if compgen -G "$root/activation.new.*" >/dev/null; then exit 95; fi
 unset -f sync
@@ -789,39 +850,32 @@ grep -Fx 'state=prepared' "$journal/state"
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-host="$root/host"; assets="$root/assets"; candidate="$root/${'7'.repeat(40)}"; journal="$root/activation"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$candidate"
-for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
-  name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"; printf '%s\nnew\n' "$MANAGED_MARKER" >"$assets/$name"
-done
+assets="$root/assets"; candidate="$root/${'7'.repeat(40)}"; journal="$root/activation"
+mkdir -p "$assets" "$candidate"
 validate_candidate_configs() { return 0; }
-validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
-install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
 enable_state=disabled
 service_enable_state() { printf '%s\n' "$enable_state"; }
 systemctl() { case "\${1:-} \${2:-}" in 'enable mydsh') enable_state=enabled ;; 'disable mydsh') enable_state=disabled ;; esac; return 0; }
-caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
+health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
 eval "$(declare -f write_journal_state | sed '1s/write_journal_state/write_journal_state_real/')"
 write_journal_state() { if [[ $2 == committed ]]; then printf 'state=committed\n' >"$1/state"; return 2; fi; write_journal_state_real "$@"; }
-if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal" >"$root/first-output" 2>&1; then exit 90; fi
+if activate_transaction "$candidate" '' "$assets" '' "$root/current" "$journal" >"$root/first-output" 2>&1; then exit 90; fi
 [[ ! -e "$root/current" && ! -L "$root/current" ]]
 [[ $enable_state == disabled ]]
-grep -Fx old "$host/etc/caddy/Caddyfile"
 [[ ! -e "$journal" ]]
 if grep -F 'activation accepted' "$root/first-output"; then exit 91; fi
-restore_definition=$(declare -f restore_host_configs)
-restore_host_configs() { return 1; }
-if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal" >"$root/second-output" 2>&1; then exit 92; fi
+remove_definition=$(declare -f remove_first_link)
+remove_first_link() { return 1; }
+if activate_transaction "$candidate" '' "$assets" '' "$root/current" "$journal" >"$root/second-output" 2>&1; then exit 92; fi
 [[ -d "$journal" && -f "$journal/rollback-required" ]]
 grep -Fx 'state=committed' "$journal/state"
 [[ $(readlink "$root/current") == "$candidate" && $enable_state == enabled ]]
 if grep -F 'activation accepted' "$root/second-output"; then exit 93; fi
 grep -F 'forced rollback incomplete; recovery required' "$root/second-output"
-eval "$restore_definition"
-recover_activation_journal "$journal" "$host" "$root/current"
+eval "$remove_definition"
+recover_activation_journal "$journal" '' "$root/current"
 [[ ! -e "$root/current" && ! -L "$root/current" && ! -e "$journal" ]]
 [[ $enable_state == disabled ]]
-grep -Fx old "$host/etc/caddy/Caddyfile"
 `)
     })
 
@@ -870,7 +924,7 @@ wait "$holder"
     })
   })
 
-  it('validates and reloads Caddy only after the switched DSH release is healthy', () => {
+  it('activates code only after validating the frozen control plane', () => {
     const script = asset('deploy-release.sh')
     const start = script.indexOf('activate_transaction() {')
     const end = script.indexOf('\nrollback_to_commit()', start)
@@ -880,10 +934,11 @@ wait "$holder"
     expect(end).toBeGreaterThan(start)
     expect(activation.indexOf('atomic_replace_link "$current_path" "$target"')).toBeLessThan(activation.indexOf('systemctl restart mydsh'))
     expect(activation.indexOf('systemctl restart mydsh')).toBeLessThan(activation.indexOf('health_check'))
-    expect(activation.indexOf('health_check')).toBeLessThan(activation.indexOf('caddy validate'))
-    expect(activation.indexOf('caddy validate')).toBeLessThan(activation.indexOf('systemctl reload caddy'))
+    expect(activation.indexOf('validate_candidate_configs')).toBeLessThan(activation.indexOf('atomic_replace_link'))
+    expect(activation).not.toContain('caddy validate')
+    expect(activation).not.toContain('systemctl reload caddy')
     expect(activation.indexOf('systemctl enable mydsh')).toBeLessThan(activation.indexOf('write_journal_state "$journal" committed'))
-    expect(activation).toMatch(/if caddy validate[\s\S]*systemctl reload caddy[\s\S]*recover_activation_journal/)
+    expect(activation).not.toMatch(/install_managed_file|stage_candidate_configs|restore_host_configs/)
   })
 
   it('documents complete acceptance and a confined rollback command', () => {
@@ -906,8 +961,12 @@ wait "$holder"
       expect(readme).not.toContain('/opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh')
       expect(readme).toContain('DEPLOY_REF=')
       expect(readme).toContain('git archive "$DEPLOY_REF"')
-      expect(readme).toContain('package-release.sh "$DEPLOY_REF"')
-      expect(readme).toContain('node:24-bookworm')
+      expect(readme).toContain('PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh')
+      expect(readme).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
+      expect(readme).toContain('/var/lib/mydsh-deploy/uploads')
+      expect(readme).toMatch(/1 GiB.*500,000.*512 MiB.*8 GiB|1 GiB.*500,000.*512 MiB.*8 GiB/)
+      expect(readme).toMatch(/byte-for-byte identical|逐字节相同/)
+      expect(readme).toMatch(/network and disk.*not bounded|网络和磁盘.*不受限制/)
       expect(readme).toContain("mydsh-deploy-release './${UPGRADE_SET##*/}'")
       expect(readme).not.toMatch(/with those two files|这两个文件调用/)
       expect(readme).not.toContain('scp deploy/alibaba-cloud/{Caddyfile')
@@ -936,11 +995,13 @@ wait "$holder"
       expect(note).toContain('package-release.sh')
       expect(note).toContain('Node 24 Linux')
       expect(note).toContain('/var/lib/mydsh-deploy/activation')
-      expect(note).toMatch(/serialized|串行/)
+      expect(note).toMatch(/serializes|串行/)
       expect(note).toContain('SHA-256')
       expect(note).toMatch(/release-contained|release 中的|release 内/)
       expect(note).toMatch(/production host|生产宿主/)
-      expect(note).toMatch(/code-only rollback|仅代码回滚/)
+      expect(note).toMatch(/frozen control-plane|冻结的控制平面/)
+      expect(note).toMatch(/byte-identical|逐字节相同/)
+      expect(note).not.toMatch(/resource-bounded|受资源限制/)
     }
   })
 
@@ -954,11 +1015,14 @@ wait "$holder"
       expect(design).toContain('/usr/local/sbin/mydsh-deploy-release')
       expect(design).not.toContain('mydsh-build')
       expect(design).toContain('package-release.sh')
-      expect(design).toMatch(/official Node 24|官方 Node 24/)
+      expect(design).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
       expect(design).toContain('/var/lib/mydsh-deploy/activation')
+      expect(design).toContain('/var/lib/mydsh-deploy/uploads')
       expect(design).toContain('/run/lock/mydsh-deploy.lock')
       expect(design).toMatch(/systemd.*Caddy|systemd.*Caddy/)
       expect(design).toMatch(/public.*authenticated|公开.*认证/)
+      expect(design).toMatch(/byte for byte|逐字节相同/)
+      expect(design).not.toMatch(/host-file backups|宿主文件备份|resource-bounded|受资源限制/)
       expect(design).not.toMatch(/builds? as `mydsh`|以 `mydsh` 身份.*构建/)
     }
   })
@@ -973,7 +1037,16 @@ wait "$holder"
       expect(plan).toContain('deploy/alibaba-cloud/package-release.sh')
       expect(plan).toMatch(/prebuilt Linux artifact|预构建 Linux artifact/)
       expect(plan).toContain('SHA-256')
-      expect(plan).not.toMatch(/mydsh-build|mydsh-release\.bundle|runuser -u mydsh|var\/cache\/mydsh-pnpm/)
+      expect(plan).toContain('PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh')
+      expect(plan).toMatch(/byte-identical|逐字节相同/)
+      for (const stale of [
+        'mydsh-build',
+        'mydsh-release.bundle',
+        'runuser -u mydsh',
+        'var/cache/mydsh-pnpm',
+        'node_setup',
+        'bash deploy/alibaba-cloud/package-release.sh',
+      ]) expect(plan).not.toContain(stale)
     }
   })
 })

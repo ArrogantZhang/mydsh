@@ -14,15 +14,17 @@
 
 ## 准备并上传 release
 
-在开发机的仓库根目录运行以下命令。打包脚本只读取选定具名 ref 的 Git 对象，在受资源限制的临时 `node:24-bookworm` 容器中执行安装、测试、构建和配置验证，并生成完整的 Linux 运行时 tarball 及其 SHA-256 sidecar。Docker 不可用时脚本会失败，绝不会回退到宿主构建。
+在开发机的仓库根目录运行以下命令。打包脚本本身来自选定 ref，且只读取该 ref 的 Git 对象。脚本固定使用 `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`，把容器限制为 4 个 CPU、8 GiB 内存、1,024 个进程和 45 分钟，并以全新状态执行安装、测试、构建和配置验证。容器的网络和磁盘使用量不受限制。Docker 是强制依赖，不存在宿主构建回退。
 
 ```bash
 set -euo pipefail
 DEPLOY_REF=refs/tags/dsh-reviewed-YYYYMMDD
 REMOTE=ecs-admin@203.0.113.10
 LOCAL_STAGE=$(mktemp -d)
-trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
-bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$LOCAL_STAGE"
+PACKAGER_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$LOCAL_STAGE" "$PACKAGER_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$PACKAGER_STAGE"
+bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$LOCAL_STAGE"
 ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 [[ -d $ARTIFACT_SET ]]
 ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
@@ -47,13 +49,13 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，把两个文件复制到 root-private 新 inode，验证严格 sidecar 与 SHA-256 值，拒绝不安全 tar 路径和越界链接，在 root-private 目录中解压，验证 manifest 格式 `1`、helper journal 兼容版本 `1`、commit、ref 标签、平台、必要依赖、已构建 CLI、overlay、精确强化 unit 约束和 Caddy 配置，再发布 commit 目录。它绝不会运行 Git、pnpm、安装 hook、测试、构建命令、配置脚本或 artifact 中的 helper。激活会将 unit、Caddy 文件、release 链接和服务启用状态作为一个事务；稳定 helper 本身不属于 release 事务。
+通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，把两个文件复制到 `/var/lib/mydsh-deploy/uploads` 下持久的 root-private 新 inode，验证严格 sidecar 与 SHA-256 值，再执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、以 `refs/heads/` 或 `refs/tags/` 开头的 ref 标签、平台、运行时输出和 overlay。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-远程命令只在成功后删除上传目录。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标、配置、监听状态和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
+远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
 
 ## 验证 HTTPS 和登录
 
@@ -118,8 +120,10 @@ printf "Authenticated smoke passed.\n"
 
 ```bash
 UPGRADE_STAGE=$(mktemp -d)
-trap 'rm -rf -- "$UPGRADE_STAGE"' EXIT
-bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$UPGRADE_STAGE"
+PACKAGER_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$UPGRADE_STAGE" "$PACKAGER_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$PACKAGER_STAGE"
+bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" "$UPGRADE_STAGE"
 UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
@@ -128,7 +132,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-releas
 
 已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper 或 journal 格式升级需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。
 
-重启、健康检查验收、Caddy 验证或 Caddy 重新加载失败时，deploy helper 会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，解析目录的规范化真实路径，并在 helper 执行相同的验证、原子切换、重启、健康检查和 Caddy 激活之前，证明目录的父路径和 basename 完全匹配。
+重启、监听检查或公开与已认证验收失败时，deploy helper 会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，解析目录的规范化真实路径，并在 helper 执行相同的逐字节比较、原子切换、重启和验收检查之前，证明目录的父路径和 basename 完全匹配。
 
 ```bash
 set -euo pipefail
@@ -189,7 +193,7 @@ systemctl restart mydsh
 
 - 使用 `sudo journalctl -u mydsh -n 200 --no-pager` 读取近期服务日志，并使用 `sudo journalctl -u caddy -n 200 --no-pager` 读取 Caddy 日志；不要将环境文件或 cookie 复制到报告中。
 - 公开端点返回 `502`，表示 Caddy 无法连接已就绪的 DSH 进程。检查 `systemctl status mydsh`、该服务的 journal、`/opt/mydsh/current` 和 loopback 监听地址。
-- 登录返回 `403`，通常表示公开主机名、HTTPS origin 或代理请求头不一致。使用确切的全小写 DNS 主机名重新运行 bootstrap，验证 DNS，然后运行 `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`。
+- 登录返回 `403`，通常表示公开主机名、HTTPS origin 或代理请求头不一致。请验证 DNS，并运行 `sudo caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile`；活动宿主的 hostname 或控制平面变更需要单独评审的维护流程，不能使用 bootstrap。
 - 登录返回 `429`，表示源地址超过进程内失败限制。等待已配置的时间窗口；只有在调查重复失败后才重启 `mydsh`，因为重启会清除全部速率限制 bucket。
 
 ## 限制

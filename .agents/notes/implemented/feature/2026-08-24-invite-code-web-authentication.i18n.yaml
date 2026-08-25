@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.md
-2026-08-24-invite-code-web-authentication.md: 4c1a65301a0c791df0ef4985db22d23f94ca0142
-2026-08-24-invite-code-web-authentication.zh.md: 29bbbeccf8963f923f535655927204e4f53560ff
+2026-08-24-invite-code-web-authentication.md: 89a1c56d23887c1fef8f28fb3d2a990214a1599e
+2026-08-24-invite-code-web-authentication.zh.md: a099813744bd7cc9b3985a4b8c1574efa2da497a

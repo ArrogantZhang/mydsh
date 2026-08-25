@@ -50,8 +50,8 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 - `deploy/alibaba-cloud/mydsh.service` — low-privilege DSH runtime.
 - `deploy/alibaba-cloud/caddy-mydsh.conf` — Caddy systemd drop-in for the public host only.
 - `deploy/alibaba-cloud/bootstrap-host.sh` — installs Node/Caddy, creates users and private configuration, and installs units.
-- `deploy/alibaba-cloud/package-release.sh` — packages an exact reviewed ref in a bounded official Node 24 Linux container.
-- `deploy/alibaba-cloud/deploy-release.sh` — validates a prebuilt Linux artifact, switches atomically, and rolls back failed activation without running candidate code.
+- `deploy/alibaba-cloud/package-release.sh` — self-checks against an exact reviewed ref, runs the digest-pinned Node 24 Linux build, verifies static provenance, and atomically publishes the artifact set.
+- `deploy/alibaba-cloud/deploy-release.sh` — bounds and validates a prebuilt Linux artifact, rejects frozen control-plane drift, switches code atomically, and rolls back failed activation without running candidate code.
 - `deploy/alibaba-cloud/README.md`, `README.zh.md`, `README.i18n.yaml` — initial deploy, upgrade, rollback, and secret retrieval procedure.
 - `.agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.md`, `.zh.md`, `.i18n.yaml` — decision, rejected alternatives, and consequences.
 
@@ -928,107 +928,15 @@ EnvironmentFile=/etc/mydsh/public.env
 
 Install the unit files and Caddyfile, run `systemctl daemon-reload`, validate Caddy with the public environment loaded, enable Caddy, and leave `mydsh.service` disabled until a release exists. Trap and remove only temporary files created by this run.
 
-The script's command sequence must be complete and fail closed:
-
-```bash
-#!/usr/bin/env bash
-set -euo pipefail
-
-[[ ${EUID} -eq 0 ]] || { echo 'bootstrap-host: run as root' >&2; exit 1; }
-[[ $# -eq 1 ]] || { echo 'usage: bootstrap-host.sh dsh.example.com' >&2; exit 2; }
-public_host="$1"
-[[ "$public_host" =~ ^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+$ ]] \
-  || { echo 'bootstrap-host: invalid lowercase DNS hostname' >&2; exit 2; }
-script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-node_setup="$(mktemp)"
-public_tmp="$(mktemp)"
-private_tmp="$(mktemp)"
-caddy_key_tmp="$(mktemp)"
-caddy_source_tmp="$(mktemp)"
-trap 'rm -f -- "$node_setup" "$public_tmp" "$private_tmp" "$caddy_key_tmp" "$caddy_source_tmp"' EXIT
-printf 'DSH_PUBLIC_HOST=%s\n' "$public_host" >"$public_tmp"
-apt-get update
-apt-get install -y ca-certificates curl gnupg gzip iproute2 openssl python3 tar debian-keyring debian-archive-keyring apt-transport-https
-umask 077
-printf '%s\n' \
-  'DSH_HOME=/var/lib/mydsh' \
-  "DSH_INVITE_CODE_SECRET=$(openssl rand -hex 16)" \
-  "DSH_INVITE_SESSION_SECRET=$(openssl rand -hex 32)" >"$private_tmp"
-curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$node_setup"
-apt-get install -y nodejs
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --batch --yes --dearmor -o "$caddy_key_tmp"
-curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o "$caddy_source_tmp"
-install -o root -g root -m 0644 "$caddy_key_tmp" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
-install -o root -g root -m 0644 "$caddy_source_tmp" /etc/apt/sources.list.d/caddy-stable.list
-chmod o+r /usr/share/keyrings/caddy-stable-archive-keyring.gpg /etc/apt/sources.list.d/caddy-stable.list
-apt-get update
-apt-get install -y caddy
-id mydsh >/dev/null 2>&1 || useradd --system --home-dir /var/lib/mydsh --shell /usr/sbin/nologin mydsh
-install -d -o root -g root -m 0755 /opt/mydsh /opt/mydsh/releases /etc/mydsh
-install -d -o mydsh -g mydsh -m 0700 /var/lib/mydsh
-install -d -o mydsh -g mydsh -m 0750 /srv/mydsh/workspace
-install -o root -g root -m 0644 "$public_tmp" /etc/mydsh/public.env
-if [[ ! -e /etc/mydsh/mydsh.env ]]; then
-  install -o root -g root -m 0600 "$private_tmp" /etc/mydsh/mydsh.env
-fi
-install -o root -g root -m 0644 "$script_dir/Caddyfile" /etc/caddy/Caddyfile
-install -o root -g root -m 0644 "$script_dir/mydsh.service" /etc/systemd/system/mydsh.service
-install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
-install -o root -g root -m 0644 "$script_dir/caddy-mydsh.conf" /etc/systemd/system/caddy.service.d/mydsh.conf
-systemctl daemon-reload
-set -a; source /etc/mydsh/public.env; set +a
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
-systemctl enable --now caddy.service
-```
+The owning implementation is `deploy/alibaba-cloud/bootstrap-host.sh`; keep this plan at the required behavior level so repository-key verification, managed-path defenses, temp cleanup, and initialization-only policy cannot drift into a second executable recipe.
 
 - [ ] **Step 3: Implement immutable release activation and rollback**
 
-`package-release.sh` accepts a named reviewed Git ref and output directory, reads only that ref's Git objects, and uses a resource-bounded ephemeral official Node 24 Linux container to install the integrity-pinned pnpm 11.7.0 artifact, install frozen dependencies, run invite-auth tests, build, and dump config. The container mounts only an unpredictable mode-0700 artifact-set staging directory, never the caller output directory. After it exits, the host validates and syncs the deterministic Linux amd64 runtime archive and SHA-256 sidecar, then publishes both with one atomic rename to `$OUTPUT_DIR/mydsh-release-$commit/`. Docker is mandatory and there is no host-build fallback.
+`package-release.sh` accepts a named reviewed Git ref and output directory, verifies that the running script came from that ref, and creates a trusted Git extraction before Docker starts. It pins the exact Node 24 Bookworm image digest and pnpm 11.7.0 integrity, bounds CPU, memory, process count, and elapsed time, and runs frozen install, invite-auth tests, build, and config dump with fresh state; network and disk use remain unbounded. Docker mounts only the private source copy, never the caller output directory. After it exits, the host rejects any unit, Caddyfile, drop-in, or overlay mutation, creates the manifest and SHA-256 sidecar, and publishes the complete artifact-set directory with one atomic rename to `$OUTPUT_DIR/mydsh-release-$commit/`.
 
-`deploy-release.sh` accepts only the atomic commit-named artifact-set directory and requires exactly its archive and sidecar. Under the shared lock it copies both into root-private new inodes, verifies SHA-256, rejects unsafe archive paths and links, validates the manifest, helper-journal compatibility, built CLI, dependencies, overlay, every hardened systemd value exactly once, and Caddy configuration, and publishes the root-owned commit directory. It never runs candidate Git, pnpm, hooks, tests, builds, config scripts, or helpers. The stable installed helper is excluded from release transactions.
+`deploy-release.sh` accepts only the atomic commit-named artifact-set directory and requires exactly its archive and sidecar. Under the shared lock it copies both into persistent root-private new inodes, verifies SHA-256, enforces the documented compressed, member-count, per-member, expanded-size, and free-space caps, rejects unsafe archive entries, and validates the manifest, image digest, helper-journal compatibility, built CLI, dependencies, and overlay. Candidate copies of the systemd unit, Caddyfile, and drop-in must be byte-identical to the installed managed control plane. The helper publishes and activates code only; it never runs candidate commands or updates the stable helper, unit, or Caddy files.
 
-Use an atomic symlink switch and retain the previous target:
-
-```bash
-previous="$(readlink -f /opt/mydsh/current 2>/dev/null || true)"
-ln -s "$release" /opt/mydsh/current.next
-mv -Tf /opt/mydsh/current.next /opt/mydsh/current
-systemctl enable mydsh.service
-healthy=false
-if systemctl restart mydsh.service; then
-  for _attempt in $(seq 1 30); do
-    if curl --fail --silent --show-error http://127.0.0.1:3080/__invite/login >/dev/null; then
-      healthy=true
-      break
-    fi
-    sleep 1
-  done
-fi
-if [[ "$healthy" != true ]]; then
-  if [[ -n "$previous" ]]; then
-    ln -s "$previous" /opt/mydsh/current.previous
-    mv -Tf /opt/mydsh/current.previous /opt/mydsh/current
-    systemctl restart mydsh.service
-  fi
-  exit 1
-fi
-```
-
-Validate and reload Caddy only after DSH answers. Never delete old releases automatically and never print either secret.
-
-Artifact validation and publication use these command families after copying both uploads into root-private new inodes; no candidate command is executed:
-
-```bash
-extract="$(mktemp -d /opt/mydsh/releases/.extract.XXXXXX)"
-sha256sum "$artifact"
-python3 validate_archive_members.py "$artifact"
-tar -xzf "$artifact" --no-same-owner -C "$extract"
-commit="$(sed -n 's/^commit=//p' "$extract/.mydsh-release-manifest")"
-release="/opt/mydsh/releases/$commit"
-chown -R root:root "$extract"
-chmod -R go-w "$extract"
-mv "$extract" "$release"
-```
+The owning implementation is `deploy/alibaba-cloud/deploy-release.sh`; it serializes deployment, rollback, recovery, and pruning, journals the previous link and enablement before mutation, switches the symlink atomically, verifies the runtime identity, loopback listener, public denial, and authenticated access, and durably commits or restores the previous code state. Normal release activation never reloads the frozen Caddy or systemd configuration. Never delete old releases automatically or print either secret.
 
 - [ ] **Step 4: Write the bilingual deployment tutorial**
 
@@ -1123,15 +1031,23 @@ Run `ssh` to inspect `/etc/os-release`, `dpkg --print-architecture`, disk space,
 
 ```bash
 mkdir -p .artifacts
-bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" .artifacts
-scp -r .artifacts/mydsh-release-* deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
+PACKAGER_STAGE=$(mktemp -d)
+INIT_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$PACKAGER_STAGE" "$INIT_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/package-release.sh | tar -x -C "$PACKAGER_STAGE"
+bash "$PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh" "$DEPLOY_REF" .artifacts
+ARTIFACT_SET=$(find .artifacts -maxdepth 1 -type d -name 'mydsh-release-*')
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/{bootstrap-host.sh,deploy-release.sh,Caddyfile,mydsh.service,caddy-mydsh.conf} | tar -x -C "$INIT_STAGE"
+REMOTE_STAGE=$(ssh "$SSH_TARGET" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+scp "$INIT_STAGE"/deploy/alibaba-cloud/{bootstrap-host.sh,deploy-release.sh,Caddyfile,mydsh.service,caddy-mydsh.conf} "$SSH_TARGET:$REMOTE_STAGE/"
+scp -r "$ARTIFACT_SET" "$SSH_TARGET:$REMOTE_STAGE/"
 ```
 
-Expected: the bounded official Node 24 container passes install, invite-auth tests, full build, and config dump; the artifact and strict checksum sidecar upload succeeds. The checksum detects corruption but does not authenticate the signer.
+Expected: the CPU-, memory-, PID-, and time-bounded digest-pinned Node 24 container passes install, invite-auth tests, full build, and config dump; static security inputs match the trusted extraction, and the complete atomic artifact set uploads. Network and disk use remain unbounded. The checksum detects corruption but does not authenticate the signer.
 
 - [ ] **Step 4: Bootstrap and activate over SSH**
 
-For initial setup only, run the Git-ref-extracted `bootstrap-host.sh` with `sudo` and the exact public host. Then invoke the installed stable `/usr/local/sbin/mydsh-deploy-release` with the uploaded commit-named artifact-set directory. Upgrades upload only a new atomic artifact set and never replace the helper automatically. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
+For initial setup only, run the Git-ref-extracted `bootstrap-host.sh` with `sudo` and the exact public host. Then invoke the installed stable `/usr/local/sbin/mydsh-deploy-release` with the uploaded commit-named artifact-set directory. Upgrades upload only a new atomic artifact set and never replace the helper or installed Caddy/systemd control plane. Candidate control-plane drift is rejected and requires separate reviewed maintenance. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
 
 Expected: both scripts exit 0, `systemctl is-active mydsh caddy` prints `active` twice, and `ss -lntp` shows DSH only on `127.0.0.1:3080` while Caddy owns public 80/443.
 
