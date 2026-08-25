@@ -169,6 +169,8 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('Usage: sudo %s <atomic-artifact-set-directory>')
     expect(script).toContain('sudo %s --rollback <40-character-lowercase-commit>')
     expect(script).toContain('sudo %s --prune <40-character-lowercase-commit>')
+    expect(script).toContain('sudo %s --rotate-invite')
+    expect(script).toContain('sudo %s --rotate-session')
     expect(script).toMatch(/\[\[ \$# -eq 2 \]\]/)
     expect(script).not.toContain('set -x')
     expect(script).toContain('realpath -e --')
@@ -180,9 +182,14 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('MAX_ARCHIVE_MEMBERS')
     expect(script).toContain('MAX_MEMBER_BYTES')
     expect(script).toContain('MAX_EXPANDED_BYTES')
+    expect(script).toContain('FILESYSTEM_BYTES_PER_MEMBER')
+    expect(script).toContain('INODE_SAFETY_MARGIN')
     expect(script).toContain('copy_bounded_upload')
     expect(script).toContain('head -c "$((limit + 1))"')
     expect(script).toContain('validate_extraction_space')
+    expect(script).toContain('validate_extraction_inodes')
+    expect(script).toContain('cleanup_abandoned_operation_directories')
+    expect(script).toContain('rotate_authentication_secret')
     expect(script).toContain('validate_upload_space')
     expect(script).toContain('UPLOAD_METADATA_BYTES')
     expect(script).toContain('validate_managed_host_state')
@@ -264,6 +271,8 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET[^\n]*(?:>&2|\/dev\/stdout)/)
     const main = script.slice(script.indexOf('\nmain() {'))
     expect(main.indexOf('recover_activation_journal "$ACTIVATION_DIR"')).toBeLessThan(main.indexOf('\n  validate_host'))
+    expect(main.indexOf('acquire_operation_lock')).toBeLessThan(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"'))
+    expect(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"')).toBeLessThan(main.indexOf('deploy_artifact "$1"'))
     const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('TRUST_ROOT=$(mktemp'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('copy_bounded_upload'))
@@ -304,11 +313,16 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('helper_journal_format=1')
     expect(script).toContain('sha256sum')
     expect(script).toContain('publish_artifact_set')
+    expect(script).toContain('validate_archive_members')
+    expect(script).toContain('MAX_COMPRESSED_BYTES')
     expect(script).toContain('mydsh-release-$commit')
     expect(script).toContain('.new.XXXXXX')
     expect(script).toContain('mv -T -- "$staging" "$final_dir"')
     expect(script).not.toContain('src=$output_dir,dst=/output')
     expect(script).not.toContain('dst=/output')
+    const packageMain = script.slice(script.indexOf('\nmain() {'))
+    expect(packageMain.indexOf('validate_compressed_size')).toBeLessThan(packageMain.indexOf('publish_artifact_set'))
+    expect(packageMain.indexOf('validate_archive_members')).toBeLessThan(packageMain.indexOf('publish_artifact_set'))
     expect(script).not.toContain('.mydsh-release.$$.tmp')
     expect(script).not.toMatch(/runuser|systemd-run|DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
@@ -386,6 +400,8 @@ usage_output=$(usage 2>&1)
 grep -F -- '<atomic-artifact-set-directory>' <<<"$usage_output"
 grep -F -- '--rollback <40-character-lowercase-commit>' <<<"$usage_output"
 grep -F -- '--prune <40-character-lowercase-commit>' <<<"$usage_output"
+grep -F -- '--rotate-invite' <<<"$usage_output"
+grep -F -- '--rotate-session' <<<"$usage_output"
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
 real=${'1'.repeat(40)}
@@ -486,6 +502,30 @@ if validate_archive_members "$root/traversal.tar.gz"; then exit 91; fi
 `)
     })
 
+    it('cleans only safe abandoned operation directories', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+mkdir -m 0700 "$root/.upload.abc123" "$root/.upload.def456"
+cleanup_abandoned_operation_directories "$root" .upload.
+[[ -z $(find "$root" -mindepth 1 -print -quit) ]]
+mkdir "$root/outside"
+ln -s "$root/outside" "$root/.upload.bad123"
+if cleanup_abandoned_operation_directories "$root" .upload.; then exit 90; fi
+[[ -L "$root/.upload.bad123" && -d "$root/outside" ]]
+rm "$root/.upload.bad123"
+printf file >"$root/.upload.file12"
+if cleanup_abandoned_operation_directories "$root" .upload.; then exit 91; fi
+[[ -f "$root/.upload.file12" ]]
+rm "$root/.upload.file12"
+mkdir "$root/.extract.own123"
+stat() { if [[ "\${*: -1}" == "$root/.extract.own123" ]]; then printf 'nobody:nogroup\n'; else command stat "$@"; fi; }
+if cleanup_abandoned_operation_directories "$root" .extract.; then exit 92; fi
+[[ -d "$root/.extract.own123" ]]
+`)
+    })
+
     it('rejects bounded archive and disk-space violations before extraction', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -500,7 +540,7 @@ if validate_archive_members "$root/three.tar.gz" 100 1024 2; then exit 92; fi
 stat() { printf '1073741825\n'; }
 if validate_compressed_size "$root/three.tar.gz" 1073741824; then exit 93; fi
 df() { printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100 99 1 99%% /\n'; }
-if validate_extraction_space "$root" 1024 1024 1024; then exit 94; fi
+if validate_extraction_space "$root" 1024 1024 0 1024 4096; then exit 94; fi
 `)
     })
 
@@ -525,7 +565,53 @@ if validate_upload_space "$root/var" 1024 1024 1024; then
 fi
 [[ ! -e "$root/copied" ]]
 [[ -z $(find "$root/var" -mindepth 1 -print -quit) ]]
-validate_extraction_space "$root/opt" 1024 1024 1024
+validate_extraction_space "$root/opt" 1024 1024 0 1024 4096
+`)
+    })
+
+    it('accounts for extraction inodes and per-member metadata', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+df() {
+  if [[ "$1" == -Pi ]]; then
+    printf 'Filesystem Inodes IUsed IFree IUse%% Mounted on\nproof 600000 100000 500000 17%% /\n'
+  else
+    printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 9999999999 1 9999999998 1%% /\n'
+  fi
+}
+if validate_extraction_inodes "$root" 500000 10000; then exit 90; fi
+validate_extraction_space "$root" 0 1 500000 1 4096
+`)
+    })
+
+    it('rotates exactly one secret and rolls back failed activation', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+env_file="$root/mydsh.env"
+printf '%s\nDSH_HOME=/var/lib/mydsh\nDSH_INVITE_CODE_SECRET=old-invite\nDSH_INVITE_SESSION_SECRET=old-session\n' "$MANAGED_MARKER" >"$env_file"
+chmod 0600 "$env_file"
+stat() { if [[ "$1" == -c && "$2" == %U:%G ]]; then printf 'root:root\n'; else command stat "$@"; fi; }
+openssl() { printf '11111111111111111111111111111111\n'; }
+systemctl() { return 0; }
+health_check() { return 0; }
+public_acceptance() { return 0; }
+authenticated_acceptance() { return 0; }
+sync() { return 0; }
+rotate_authentication_secret invite "$env_file" "$root"
+grep -Fx 'DSH_INVITE_CODE_SECRET=11111111111111111111111111111111' "$env_file"
+grep -Fx 'DSH_INVITE_SESSION_SECRET=old-session' "$env_file"
+before=$(sha256sum "$env_file")
+sync() { if [[ "\${*: -1}" == "$env_file" ]] && grep -Fq 'DSH_INVITE_SESSION_SECRET=11111111111111111111111111111111' "$env_file"; then return 1; fi; return 0; }
+if rotate_authentication_secret session "$env_file" "$root"; then exit 90; fi
+[[ $(sha256sum "$env_file") == "$before" ]]
+sync() { return 0; }
+systemctl() { return 1; }
+if rotate_authentication_secret session "$env_file" "$root"; then exit 91; fi
+[[ $(sha256sum "$env_file") == "$before" ]]
 `)
     })
 
@@ -559,10 +645,12 @@ done
     it('uses the same ordinary ref grammar in producer and consumer', () => {
       expectBashSuccess(`
 set -euo pipefail
-consumer_body=$(declare -f validate_manifest_ref | tail -n +2)
-source "${resolve(deploymentRoot, 'package-release.sh').replaceAll('\\', '/')}"
-producer_body=$(declare -f validate_manifest_ref | tail -n +2)
+consumer_body=$(sed -n '/^validate_manifest_ref() {$/,/^}$/p' "${resolve(deploymentRoot, 'deploy-release.sh').replaceAll('\\', '/')}")
+producer_body=$(sed -n '/^validate_manifest_ref() {$/,/^}$/p' "${resolve(deploymentRoot, 'package-release.sh').replaceAll('\\', '/')}")
 [[ $producer_body == "$consumer_body" ]]
+consumer_archive=$(sed -n '/^validate_archive_members() {$/,/^}$/p' "${resolve(deploymentRoot, 'deploy-release.sh').replaceAll('\\', '/')}")
+producer_archive=$(sed -n '/^validate_archive_members() {$/,/^}$/p' "${resolve(deploymentRoot, 'package-release.sh').replaceAll('\\', '/')}")
+[[ $producer_archive == "$consumer_archive" ]]
 valid_refs=(refs/heads/feature-x refs/tags/v1.2.3)
 invalid_refs=(refs/heads/foo@bar refs/tags/v1+build refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?' 'refs/tags/back\\slash')
 for ref in "\${valid_refs[@]}"; do validate_manifest_ref "$ref"; done
@@ -1159,6 +1247,9 @@ wait "$holder"
       expect(readme).toContain('if [[ \\$status == 0 ]]')
       expect(readme).toContain('/usr/local/sbin/mydsh-deploy-release --prune "$candidate"')
       expect(readme).not.toContain('sudo rm -rf -- "$target"')
+      expect(readme).toContain('mydsh-deploy-release --rotate-invite')
+      expect(readme).toContain('mydsh-deploy-release --rotate-session')
+      expect(readme).not.toContain("sudo bash -c '\nset -euo pipefail\numask 077\nrotate()")
     }
   })
 

@@ -20,6 +20,8 @@ readonly UPLOAD_METADATA_BYTES=1048576
 readonly MAX_ARCHIVE_MEMBERS=500000
 readonly MAX_MEMBER_BYTES=536870912
 readonly MAX_EXPANDED_BYTES=8589934592
+readonly FILESYSTEM_BYTES_PER_MEMBER=4096
+readonly INODE_SAFETY_MARGIN=10000
 readonly RELEASE_FORMAT=1
 readonly HELPER_JOURNAL_FORMAT=1
 readonly NODE_IMAGE_DIGEST=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975
@@ -35,6 +37,8 @@ usage() {
   printf 'Usage: sudo %s <atomic-artifact-set-directory>\n' "${0##*/}" >&2
   printf '       sudo %s --rollback <40-character-lowercase-commit>\n' "${0##*/}" >&2
   printf '       sudo %s --prune <40-character-lowercase-commit>\n' "${0##*/}" >&2
+  printf '       sudo %s --rotate-invite\n' "${0##*/}" >&2
+  printf '       sudo %s --rotate-session\n' "${0##*/}" >&2
 }
 
 fail() {
@@ -192,7 +196,7 @@ validate_existing_managed_file() {
 
 require_host_tools() {
   local tool
-  for tool in awk bash caddy cmp curl df flock getent head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
+  for tool in awk bash caddy cmp curl df flock getent head install node openssl python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
   done
 }
@@ -449,7 +453,7 @@ from pathlib import PurePosixPath
 archive = sys.argv[1]
 max_members, max_member, max_total = map(int, sys.argv[2:])
 seen = set()
-count = total = 0
+count = total = largest = 0
 with tarfile.open(archive, "r:gz") as stream:
     for member in stream:
         count += 1
@@ -458,6 +462,7 @@ with tarfile.open(archive, "r:gz") as stream:
         if member.size > max_member:
             raise SystemExit(f"archive member too large: {member.name}")
         total += member.size
+        largest = max(largest, member.size)
         if total > max_total:
             raise SystemExit("archive expanded-size limit exceeded")
         if getattr(member, "sparse", None):
@@ -480,7 +485,7 @@ with tarfile.open(archive, "r:gz") as stream:
             resolved = posixpath.normpath(str(base / link))
             if resolved == ".." or resolved.startswith("../"):
                 raise SystemExit(f"escaping archive link: {member.name}")
-print(count, total)
+print(count, total, largest)
 PY
 }
 
@@ -509,11 +514,29 @@ validate_extraction_space() {
   local path=$1
   local expanded=$2
   local compressed=$3
-  local reserve=${4:-1073741824}
+  local members=${4:-0}
+  local reserve=${5:-1073741824}
+  local per_member=${6:-$FILESYSTEM_BYTES_PER_MEMBER}
   local available
+  local metadata
+  local required
+  [[ $expanded =~ ^[0-9]+$ && $compressed =~ ^[0-9]+$ && $members =~ ^[0-9]+$ ]] || return 1
+  (( expanded <= MAX_EXPANDED_BYTES && compressed <= MAX_COMPRESSED_BYTES && members <= MAX_ARCHIVE_MEMBERS )) || return 1
+  metadata=$((members * per_member))
+  required=$((expanded + compressed + metadata + reserve))
   available=$(df -PB1 "$path" | awk 'NR == 2 { print $4 }') || return 1
   [[ $available =~ ^[0-9]+$ ]] || return 1
-  (( available >= expanded + compressed + reserve ))
+  (( available >= required ))
+}
+
+validate_extraction_inodes() {
+  local path=$1
+  local members=$2
+  local margin=${3:-$INODE_SAFETY_MARGIN}
+  local available
+  available=$(df -Pi "$path" | awk 'NR == 2 { print $4 }') || return 1
+  [[ $available =~ ^[0-9]+$ && $members =~ ^[0-9]+$ && $members -le $MAX_ARCHIVE_MEMBERS ]] || return 1
+  (( available >= members + margin ))
 }
 
 validate_upload_space() {
@@ -673,6 +696,36 @@ cleanup_abandoned_journal_staging() (
     fi
   done
   return 0
+)
+
+cleanup_abandoned_operation_directories() (
+  local root=$1
+  local prefix=$2
+  local candidate
+  local name
+  local owner
+  local root_owner
+  local resolved
+  local candidates=()
+  [[ $prefix == .upload. || $prefix == .extract. ]] || return 1
+  [[ -d "$root" && ! -L "$root" && $(realpath -e -- "$root") == "$root" ]] || return 1
+  root_owner=$(stat -c '%U:%G' -- "$root") || return 1
+  [[ $root_owner == root:root ]] || return 1
+  shopt -s nullglob
+  candidates=("$root"/"$prefix"*)
+  for candidate in "${candidates[@]}"; do
+    name=${candidate##*/}
+    if [[ $prefix == .upload. ]]; then
+      [[ $name =~ ^\.upload\.[A-Za-z0-9]{6}$ ]] || return 1
+    else
+      [[ $name =~ ^\.extract\.[A-Za-z0-9]{6}$ ]] || return 1
+    fi
+    [[ -d "$candidate" && ! -L "$candidate" ]] || return 1
+    resolved=$(realpath -e -- "$candidate") || return 1
+    owner=$(stat -c '%U:%G' -- "$candidate") || return 1
+    [[ $resolved == "$candidate" && ${resolved%/*} == "$root" && $owner == root:root ]] || return 1
+  done
+  for candidate in "${candidates[@]}"; do rm -rf -- "$candidate" || return 1; done
 )
 
 prepare_activation_journal() {
@@ -960,6 +1013,74 @@ prune_release() {
   printf 'Pruned inactive release %s.\n' "$commit"
 }
 
+restore_secret_backup() {
+  local backup=$1
+  local env_file=$2
+  local temporary
+  create_registered_temp_file "$(dirname -- "$env_file")" || return 1
+  temporary=$CREATED_TEMP_FILE
+  install -o root -g root -m 0600 -- "$backup" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  mv -f -- "$temporary" "$env_file" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  unregister_temp_file "$temporary"
+  sync -f "$env_file" || return 1
+  sync -f "$(dirname -- "$env_file")" || return 1
+}
+
+rotate_authentication_secret() {
+  local kind=$1
+  local env_file=${2:-$PRIVATE_ENV}
+  local state_root=${3:-$DEPLOY_STATE_ROOT}
+  local key
+  local bytes
+  local value
+  local backup
+  local temporary
+  local found=0
+  local line
+  local active
+  case "$kind" in
+    invite) key=DSH_INVITE_CODE_SECRET; bytes=16 ;;
+    session) key=DSH_INVITE_SESSION_SECRET; bytes=32 ;;
+    *) return 1 ;;
+  esac
+  validate_existing_managed_file "$env_file" 600 || return 1
+  [[ -d "$state_root" && ! -L "$state_root" && $(realpath -e -- "$state_root") == "$state_root" ]] || return 1
+  backup=$(mktemp "$state_root/.rotate-backup.XXXXXX") || return 1
+  [[ $backup == "$state_root/.rotate-backup."* && -f "$backup" && ! -L "$backup" ]] || return 1
+  install -o root -g root -m 0600 -- "$env_file" "$backup" || { rm -f -- "$backup" || true; return 1; }
+  sync -f "$backup" || { rm -f -- "$backup" || true; return 1; }
+  value=$(openssl rand -hex "$bytes") || { rm -f -- "$backup" || true; return 1; }
+  create_registered_temp_file "$(dirname -- "$env_file")" || { rm -f -- "$backup" || true; return 1; }
+  temporary=$CREATED_TEMP_FILE
+  while IFS= read -r line; do
+    case "$line" in
+      "$key="*) printf '%s=%s\n' "$key" "$value"; found=$((found + 1)) ;;
+      *) printf '%s\n' "$line" ;;
+    esac
+  done <"$env_file" >"$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  unset value
+  [[ $found == 1 ]] || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  chown root:root "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  chmod 0600 "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  mv -f -- "$temporary" "$env_file" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  unregister_temp_file "$temporary"
+  active=$(current_release) || active=''
+  if sync -f "$env_file" && sync -f "$(dirname -- "$env_file")" && systemctl restart mydsh && health_check "$active" && public_acceptance && authenticated_acceptance; then
+    if ! rm -f -- "$backup"; then printf 'mydsh-deploy-release: rotation accepted; stale backup retained at %s\n' "$backup" >&2; fi
+    printf 'Rotated %s authentication secret.\n' "$kind"
+    return 0
+  fi
+  if ! restore_secret_backup "$backup" "$env_file"; then
+    printf 'mydsh-deploy-release: secret rollback failed; recovery backup retained at %s\n' "$backup" >&2
+    return 1
+  fi
+  systemctl restart mydsh || true
+  if ! rm -f -- "$backup"; then printf 'mydsh-deploy-release: restored secret but stale backup remains at %s\n' "$backup" >&2; fi
+  return 1
+}
+
 deploy_artifact() {
   local artifact_set_input=$1
   local artifact_set
@@ -974,6 +1095,7 @@ deploy_artifact() {
   local trusted_artifact
   local trusted_checksum
   local member_count
+  local largest_member
   local stats
 
   [[ -d "$artifact_set_input" && ! -L "$artifact_set_input" ]] || fail 'artifact set must be a real directory'
@@ -999,9 +1121,10 @@ deploy_artifact() {
   [[ $(stat -c '%d:%i' "$artifact_path") != "$(stat -c '%d:%i' "$trusted_artifact")" ]] || fail 'artifact root-private copy reused the upload inode'
   verify_artifact_checksum "$trusted_artifact" "$trusted_checksum" || fail 'artifact SHA-256 verification failed'
   stats=$(validate_archive_members "$trusted_artifact") || fail 'artifact archive violates path, link, type, or resource limits'
-  read -r member_count expanded_bytes <<<"$stats"
-  [[ $member_count =~ ^[0-9]+$ && $expanded_bytes =~ ^[0-9]+$ ]] || fail 'artifact archive statistics are invalid'
-  validate_extraction_space "$RELEASES_DIR" "$expanded_bytes" "$(stat -c %s "$trusted_artifact")" || fail 'insufficient release filesystem space for safe extraction'
+  read -r member_count expanded_bytes largest_member <<<"$stats"
+  [[ $member_count =~ ^[0-9]+$ && $expanded_bytes =~ ^[0-9]+$ && $largest_member =~ ^[0-9]+$ ]] || fail 'artifact archive statistics are invalid'
+  validate_extraction_space "$RELEASES_DIR" "$expanded_bytes" "$(stat -c %s "$trusted_artifact")" "$member_count" || fail 'insufficient release filesystem space for expanded data, per-member metadata, and reserve'
+  validate_extraction_inodes "$RELEASES_DIR" "$member_count" || fail 'insufficient release filesystem inodes for archive members and safety margin'
   extract_root=$(mktemp -d "$RELEASES_DIR/.extract.XXXXXX") || fail 'cannot create root-private extraction directory'
   OPERATION_ROOT=$extract_root
   validate_temp_directory "$extract_root" "$RELEASES_DIR" .extract. || fail 'unsafe extraction directory'
@@ -1025,6 +1148,8 @@ main() {
   [[ $EUID -eq 0 ]] || fail 'run this script as root'
   if [[ ${1:-} == --rollback || ${1:-} == --prune ]]; then
     [[ $# -eq 2 ]] || { usage; return 64; }
+  elif [[ ${1:-} == --rotate-invite || ${1:-} == --rotate-session ]]; then
+    [[ $# -eq 1 ]] || { usage; return 64; }
   else
     [[ $# -eq 1 ]] || { usage; return 64; }
   fi
@@ -1036,10 +1161,16 @@ main() {
   cleanup_abandoned_journal_staging "$(dirname -- "$ACTIVATION_DIR")" || fail 'cannot inspect abandoned activation journal staging'
   recover_activation_journal "$ACTIVATION_DIR" || fail "activation recovery failed; inspect $ACTIVATION_DIR"
   validate_host
+  cleanup_abandoned_operation_directories "$UPLOADS_DIR" .upload. || fail 'unsafe abandoned upload staging entry requires operator inspection'
+  cleanup_abandoned_operation_directories "$RELEASES_DIR" .extract. || fail 'unsafe abandoned extraction staging entry requires operator inspection'
   if [[ $1 == --rollback ]]; then
     rollback_to_commit "$2"
   elif [[ $1 == --prune ]]; then
     prune_release "$2"
+  elif [[ $1 == --rotate-invite ]]; then
+    rotate_authentication_secret invite
+  elif [[ $1 == --rotate-session ]]; then
+    rotate_authentication_secret session
   else
     deploy_artifact "$1"
   fi

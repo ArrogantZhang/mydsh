@@ -4,6 +4,10 @@ set -euo pipefail
 readonly NODE_IMAGE='node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975'
 readonly PNPM_TARBALL=https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz
 readonly PNPM_INTEGRITY='sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
+readonly MAX_COMPRESSED_BYTES=1073741824
+readonly MAX_ARCHIVE_MEMBERS=500000
+readonly MAX_MEMBER_BYTES=536870912
+readonly MAX_EXPANDED_BYTES=8589934592
 PACKAGE_ROOT=''
 PAIR_STAGING=''
 PAIR_PARENT=''
@@ -53,6 +57,64 @@ validate_manifest_ref() {
   for component in "${components[@]}"; do
     [[ -n "$component" && $component != .* && $component != *. && $component != *.lock ]] || return 1
   done
+}
+
+validate_archive_members() {
+  local artifact=$1
+  local max_members=${2:-$MAX_ARCHIVE_MEMBERS}
+  local max_member=${3:-$MAX_MEMBER_BYTES}
+  local max_total=${4:-$MAX_EXPANDED_BYTES}
+  python3 - "$artifact" "$max_members" "$max_member" "$max_total" <<'PY'
+import posixpath
+import sys
+import tarfile
+from pathlib import PurePosixPath
+
+archive = sys.argv[1]
+max_members, max_member, max_total = map(int, sys.argv[2:])
+seen = set()
+count = total = largest = 0
+with tarfile.open(archive, "r:gz") as stream:
+    for member in stream:
+        count += 1
+        if count > max_members:
+            raise SystemExit("archive member limit exceeded")
+        if member.size > max_member:
+            raise SystemExit(f"archive member too large: {member.name}")
+        total += member.size
+        largest = max(largest, member.size)
+        if total > max_total:
+            raise SystemExit("archive expanded-size limit exceeded")
+        if getattr(member, "sparse", None):
+            raise SystemExit(f"sparse archive member: {member.name}")
+        path = PurePosixPath(member.name)
+        normalized = posixpath.normpath(member.name)
+        if path.is_absolute() or normalized == ".." or normalized.startswith("../"):
+            raise SystemExit(f"unsafe archive path: {member.name}")
+        key = normalized.removeprefix("./")
+        if key in seen:
+            raise SystemExit(f"duplicate archive path: {member.name}")
+        seen.add(key)
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise SystemExit(f"unsupported archive member: {member.name}")
+        if member.issym() or member.islnk():
+            link = PurePosixPath(member.linkname)
+            if link.is_absolute():
+                raise SystemExit(f"absolute archive link: {member.name}")
+            base = path.parent if member.issym() else PurePosixPath(".")
+            resolved = posixpath.normpath(str(base / link))
+            if resolved == ".." or resolved.startswith("../"):
+                raise SystemExit(f"escaping archive link: {member.name}")
+print(count, total, largest)
+PY
+}
+
+validate_compressed_size() {
+  local artifact=$1
+  local limit=${2:-$MAX_COMPRESSED_BYTES}
+  local size
+  size=$(stat -c %s "$artifact") || return 1
+  [[ $size =~ ^[0-9]+$ && $size -le $limit ]]
 }
 
 resolve_named_ref_commit() {
@@ -128,7 +190,7 @@ main() {
   output_dir=$(realpath -e -- "$2") || fail 'output directory does not exist'
   [[ -d "$output_dir" && ! -L "$output_dir" && -w "$output_dir" ]] || fail 'output directory must be a writable real directory'
   [[ $(realpath -e -- "$output_dir") == "$output_dir" ]] || fail 'output directory must be canonical'
-  for tool in cmp docker git gzip realpath sha256sum sync tar timeout; do command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"; done
+  for tool in cmp docker git gzip python3 realpath sha256sum stat sync tar timeout; do command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"; done
   repository=$(git rev-parse --show-toplevel) || fail 'run from a Git worktree'
   commit=$(resolve_named_ref_commit "$ref" "$repository") || fail 'deployment ref must be an existing fully qualified refs/heads/* or refs/tags/* name'
   docker info >/dev/null 2>&1 || fail 'Docker is required; no host-build fallback is available'
@@ -208,6 +270,8 @@ main() {
   printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975\n' "$commit" "$ref" >"$source_root/.mydsh-release-manifest"
   chmod 0644 "$source_root/.mydsh-release-manifest" || fail 'cannot secure release manifest'
   tar --sort=name --mtime=@0 --owner=0 --group=0 --numeric-owner --exclude=./.builder -C "$source_root" -cf - . | gzip -n >"$PAIR_STAGING/mydsh-linux-amd64.tar.gz"
+  validate_compressed_size "$PAIR_STAGING/mydsh-linux-amd64.tar.gz" || fail 'packaged artifact exceeds the 1 GiB compressed limit'
+  validate_archive_members "$PAIR_STAGING/mydsh-linux-amd64.tar.gz" >/dev/null || fail 'packaged artifact violates server archive limits'
   digest=$(sha256sum "$PAIR_STAGING/mydsh-linux-amd64.tar.gz"); digest=${digest%% *}
   printf '%s  mydsh-linux-amd64.tar.gz\n' "$digest" >"$PAIR_STAGING/mydsh-linux-amd64.tar.gz.sha256"
   publish_artifact_set "$PAIR_STAGING" "$final_dir" "$output_dir" || fail 'artifact-set validation or atomic publication failed'

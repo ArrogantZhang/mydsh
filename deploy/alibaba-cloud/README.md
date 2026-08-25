@@ -49,7 +49,7 @@ The script creates the non-login `mydsh` runtime account, persistent and release
 
 ## Deploy the release
 
-Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, checks that the `/var` filesystem holding `/var/lib/mydsh-deploy/uploads` has room for the full 1 GiB compressed-file cap, a 1 GiB reserve, and 1 MiB of checksum and metadata overhead, then copies both files into persistent root-private new inodes. This fixed worst-case budget does not trust the mutable uploaded file's current size. The helper verifies the strict sidecar and SHA-256 value and enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release-filesystem space for the expanded archive plus its compressed size and a separate 1 GiB reserve. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, platform, runtime outputs, and overlay. Manifest refs use a strict ordinary subset under `refs/heads/` or `refs/tags/`; the Git-free server rejects spaces, control characters, obscure punctuation, dot-prefixed components, `.lock` suffixes, and ambiguous separators. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
+Deploy the prebuilt artifact set through the stable root-installed helper. Under the deployment lock it first removes only canonical root-owned `.upload.*` and `.extract.*` directories left by interrupted operations and refuses unsafe matching entries. It requires the commit-named directory to contain exactly the tarball and sidecar, checks that the `/var` filesystem holding `/var/lib/mydsh-deploy/uploads` has room for the full 1 GiB compressed-file cap, a 1 GiB reserve, and 1 MiB of checksum and metadata overhead, then copies both files into persistent root-private new inodes. This fixed worst-case budget does not trust the mutable uploaded file's current size. The helper verifies the strict sidecar and SHA-256 value and enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. Before extraction it also budgets 4,096 bytes of filesystem metadata per member, 10,000 spare inodes, and the existing 1 GiB release reserve. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release space. The local packager applies the same artifact bounds before atomic publication. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, platform, runtime outputs, and overlay. Manifest refs use a strict ordinary subset under `refs/heads/` or `refs/tags/`; the Git-free server rejects spaces, control characters, obscure punctuation, dot-prefixed components, `.lock` suffixes, and ambiguous separators. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
@@ -133,7 +133,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-releas
 
 The upgrade removes only the exact validated, unpredictable remote staging directory after successful acceptance. A failed upgrade retains that directory and prints its non-secret path for diagnosis.
 
-The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper or journal-format upgrade requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change.
+The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper, journal-format, unit, or Caddy change requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change. Frozen byte comparison makes releases packaged with the old templates ineligible afterward, so package and retain a tested known-good release under the new templates before maintenance; rollback can select only releases carrying the new control-plane bytes.
 
 The deploy script rolls back automatically when restart, listener checks, or public and authenticated acceptance fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same byte comparison, atomic switch, restart, and acceptance checks.
 
@@ -159,38 +159,15 @@ sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 
 ## Rotate authentication secrets
 
-Changing `DSH_INVITE_CODE_SECRET` changes later logins but leaves existing 30-day cookies valid. Changing `DSH_INVITE_SESSION_SECRET` immediately invalidates every cookie. The following root-only helper atomically replaces one value without printing it; run one `rotate` line, then restart the service.
+Changing the invite secret affects later logins but leaves existing 30-day cookies valid. Changing the session secret immediately invalidates every cookie. The stable root helper takes the deployment lock, generates the value on the server, atomically updates and syncs the private environment, restarts DSH, and rolls back the file and process on failed acceptance. Neither command prints a secret.
 
 ```bash
-sudo bash -c '
-set -euo pipefail
-umask 077
-rotate() {
-  key=$1
-  bytes=$2
-  value=$(openssl rand -hex "$bytes")
-  temporary=$(mktemp /etc/mydsh/.mydsh.env.XXXXXX)
-  trap '\''rm -f -- "$temporary"'\'' EXIT
-  found=0
-  while IFS= read -r line; do
-    case "$line" in
-      "$key="*) printf "%s=%s\n" "$key" "$value"; found=1 ;;
-      *) printf "%s\n" "$line" ;;
-    esac
-  done </etc/mydsh/mydsh.env >"$temporary"
-  [[ $found == 1 ]]
-  chown root:root "$temporary"
-  chmod 0600 "$temporary"
-  mv -f -- "$temporary" /etc/mydsh/mydsh.env
-  trap - EXIT
-  unset value
-}
-rotate DSH_INVITE_CODE_SECRET 16
+sudo /usr/local/sbin/mydsh-deploy-release --rotate-invite
 # Use this instead to revoke every cookie:
-# rotate DSH_INVITE_SESSION_SECRET 32
-systemctl restart mydsh
-'
+sudo /usr/local/sbin/mydsh-deploy-release --rotate-session
 ```
+
+After invite rotation, retrieve the new invite directly in the administrator terminal with the earlier `sudo sed` command; do not route its output through an agent or log.
 
 ## Troubleshoot
 

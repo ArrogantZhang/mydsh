@@ -49,7 +49,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳完整的 1 GiB 压缩文件上限、1 GiB 预留空间，以及 1 MiB checksum 与 metadata 开销，再把两个文件复制到持久的 root-private 新 inode。该固定最坏情况预算不信任可变上传文件的当前大小。helper 验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和另一份 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、平台、运行时输出和 overlay。manifest ref 使用 `refs/heads/` 或 `refs/tags/` 下的严格常用子集；不安装 Git 的服务器会拒绝空格、控制字符、生僻标点、点开头的 component、`.lock` 后缀和有歧义的分隔符。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
+通过 root 安装的稳定 helper 部署预构建 artifact set。在部署锁保护下，它先只删除中断操作留下的规范、root 所有 `.upload.*` 与 `.extract.*` 目录，并拒绝不安全的匹配项。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳完整的 1 GiB 压缩文件上限、1 GiB 预留空间，以及 1 MiB checksum 与 metadata 开销，再把两个文件复制到持久的 root-private 新 inode。该固定最坏情况预算不信任可变上传文件的当前大小。helper 验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。解压前还会为每个 member 预算 4,096 字节文件系统 metadata、保留 10,000 个 inode，并保留既有 1 GiB release 余量。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接和不足的 release 空间。本地 packager 也会在原子发布前应用相同 artifact 限制。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、平台、运行时输出和 overlay。manifest ref 使用 `refs/heads/` 或 `refs/tags/` 下的严格常用子集；不安装 Git 的服务器会拒绝空格、控制字符、生僻标点、点开头的 component、`.lock` 后缀和有歧义的分隔符。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
@@ -133,7 +133,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-releas
 
 升级成功通过验收后，只删除经过精确验证且不可预测的远程 staging 目录。升级失败时保留该目录，并打印其非秘密路径供诊断。
 
-已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper 或 journal 格式升级需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。
+已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper、journal 格式、unit 或 Caddy 变更需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。冻结字节比较会让使用旧模板打包的 release 在维护后失去资格，因此必须先使用新模板打包并保留一个经过测试的已知良好 release；回滚只能选择携带新控制平面字节的 release。
 
 重启、监听检查或公开与已认证验收失败时，deploy helper 会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，解析目录的规范化真实路径，并在 helper 执行相同的逐字节比较、原子切换、重启和验收检查之前，证明目录的父路径和 basename 完全匹配。
 
@@ -159,38 +159,15 @@ sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 
 ## 轮换认证密钥
 
-更改 `DSH_INVITE_CODE_SECRET` 会影响后续登录，但现有的 30 天 cookie 仍然有效。更改 `DSH_INVITE_SESSION_SECRET` 会立即使全部 cookie 失效。以下 root-only helper 会原子替换一个值且不打印它；运行其中一行 `rotate`，然后重启服务。
+更改邀请密钥会影响后续登录，但现有的 30 天 cookie 仍然有效。更改会话密钥会立即使全部 cookie 失效。稳定的 root helper 会获取部署锁，在服务器上生成新值，原子更新并同步私有环境文件，重启 DSH，并在验收失败时回滚文件和进程。两个命令都不会打印密钥。
 
 ```bash
-sudo bash -c '
-set -euo pipefail
-umask 077
-rotate() {
-  key=$1
-  bytes=$2
-  value=$(openssl rand -hex "$bytes")
-  temporary=$(mktemp /etc/mydsh/.mydsh.env.XXXXXX)
-  trap '\''rm -f -- "$temporary"'\'' EXIT
-  found=0
-  while IFS= read -r line; do
-    case "$line" in
-      "$key="*) printf "%s=%s\n" "$key" "$value"; found=1 ;;
-      *) printf "%s\n" "$line" ;;
-    esac
-  done </etc/mydsh/mydsh.env >"$temporary"
-  [[ $found == 1 ]]
-  chown root:root "$temporary"
-  chmod 0600 "$temporary"
-  mv -f -- "$temporary" /etc/mydsh/mydsh.env
-  trap - EXIT
-  unset value
-}
-rotate DSH_INVITE_CODE_SECRET 16
+sudo /usr/local/sbin/mydsh-deploy-release --rotate-invite
 # Use this instead to revoke every cookie:
-# rotate DSH_INVITE_SESSION_SECRET 32
-systemctl restart mydsh
-'
+sudo /usr/local/sbin/mydsh-deploy-release --rotate-session
 ```
+
+轮换邀请密钥后，使用前文的 `sudo sed` 命令直接在管理员终端读取新邀请码；不要让 agent 或日志转发其输出。
 
 ## 故障排查
 
