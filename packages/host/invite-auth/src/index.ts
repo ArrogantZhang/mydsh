@@ -240,12 +240,15 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
   if (url.pathname === '/__invite/login' && req.method === 'POST') {
     requireValidOrigin(req)
     const address = clientAddress(req)
+    // The bounded body read must precede the limiter check. The check, code
+    // comparison, and failure record below stay synchronous so concurrent
+    // wrong-code requests cannot share one unrecorded failure allowance.
+    const form = await readUrlEncodedForm(req, runtime.config.maxBodyBytes)
     const retryAfter = runtime.limiter.retryAfterSeconds(address, Date.now())
     if (retryAfter !== undefined) {
       respondEmpty(req, res, 429, { 'retry-after': String(retryAfter) }, true)
       return
     }
-    const form = await readUrlEncodedForm(req, runtime.config.maxBodyBytes)
     const next = safeNextPath(form.get('next'))
     const candidate = form.get('inviteCode')
     if (candidate === null) throw new HttpError(400, 'missing inviteCode', false)

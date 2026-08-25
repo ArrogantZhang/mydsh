@@ -32,7 +32,7 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 会话 token 包含版本、过期时间、随机 nonce 和 HMAC-SHA256 签名。仅限 host 的安全 Cookie 默认有效期为 30 天。更改邀请码只控制之后的登录；轮换签名秘密会撤销所有会话。退出登录只清除浏览器 Cookie，而不会在服务端撤销 token。
 
-登录失败使用有容量限制、位于单个进程内的固定窗口限流器，并以回环 Caddy peer 提供的客户端地址为键。重启会清除计数器，不同 DSH 进程不共享状态，达到容量时会淘汰保留的地址 bucket，而不会让内存无限增长。
+登录失败使用有容量限制、位于单个进程内的固定窗口限流器，并以回环 Caddy peer 提供的客户端地址为键。通过代理 header 校验后，每次登录都会先在 `maxBodyBytes` 上限内完整读取请求体，再查询失败 bucket。限流检查、邀请码比较和失败记录随后同步执行，因此并发流式请求体无法共享同一份尚未记录的失败额度。重启会清除计数器，不同 DSH 进程不共享状态，达到容量时会淘汰保留的地址 bucket，而不会让内存无限增长。
 
 [包 README](../../../../packages/host/invite-auth/README.zh.md)负责当前的配置、HTTP、Cookie、代理 header 和限制细节。[部署设计](../../../../docs/superpowers/specs/2026-08-24-dsh-invite-auth-deployment-design.zh.md)负责完整的宿主和发布布局。
 

@@ -4,7 +4,7 @@
  * disposal; only workspace package resolution uses the Loader import map.
  */
 
-import { createServer } from 'node:http'
+import { createServer, request as sendHttpRequest, type ClientRequest } from 'node:http'
 import { once } from 'node:events'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { connect } from 'node:net'
@@ -62,6 +62,11 @@ interface Result {
   status: number
   headers: Headers
   body: string
+}
+
+interface PendingLogin {
+  complete: () => void
+  status: Promise<number>
 }
 
 const compositions = new Set<Composition>()
@@ -217,6 +222,53 @@ async function login(
       ...options.headers,
     },
   })
+}
+
+/**
+ * Start one streamed login and withhold its bounded form body after the server
+ * sends `100 Continue`, which proves the real HTTP route accepted the headers.
+ */
+async function pendingLogin(
+  composition: Composition,
+  inviteCode: string,
+  address: string,
+): Promise<PendingLogin> {
+  const body = new URLSearchParams({ inviteCode }).toString()
+  let outgoing!: ClientRequest
+  const status = new Promise<number>((resolve, reject) => {
+    outgoing = sendHttpRequest({
+      host: '127.0.0.1',
+      port: composition.port,
+      method: 'POST',
+      path: '/__invite/login',
+      headers: {
+        expect: '100-continue',
+        origin: PUBLIC_ORIGIN,
+        'x-forwarded-proto': 'https',
+        'x-forwarded-host': 'dsh.example',
+        'x-dsh-invite-client-ip': address,
+        'content-type': 'application/x-www-form-urlencoded',
+        'content-length': String(Buffer.byteLength(body)),
+      },
+    }, (incoming) => {
+      incoming.resume()
+      incoming.once('end', () => { resolve(incoming.statusCode ?? 0) })
+      incoming.once('error', reject)
+    })
+    outgoing.once('error', reject)
+    outgoing.setTimeout(2_000, () => outgoing.destroy(new Error('pending login timed out')))
+  })
+  const continued = new Promise<void>((resolve, reject) => {
+    outgoing.once('continue', resolve)
+    outgoing.once('response', () => { reject(new Error('pending login received a final response before its body')) })
+    outgoing.once('error', reject)
+  })
+  outgoing.flushHeaders()
+  await continued
+  return {
+    complete: () => { outgoing.end(body) },
+    status,
+  }
 }
 
 /** Return the Cookie request field represented by a Set-Cookie response. */
@@ -518,19 +570,6 @@ describe('real Loader invite-auth composition', () => {
         testCase.status,
       )
     }
-
-    const blockedAddress = '198.51.100.30'
-    for (let attempt = 0; attempt < 10; attempt++) {
-      expect((await login(composition, 'incorrect-code', { address: blockedAddress })).status).toBe(401)
-    }
-    const blocked = await incompleteKeepAlive(composition, 'POST /__invite/login', {
-      Origin: PUBLIC_ORIGIN,
-      'X-Forwarded-Proto': 'https',
-      'X-Forwarded-Host': 'dsh.example',
-      'X-DSH-Invite-Client-IP': blockedAddress,
-      'Content-Type': 'application/x-www-form-urlencoded',
-    })
-    expectClosedEarly(blocked, 429)
   })
 
   it('limits failures per trusted forwarded address and accepts encoded candidates', { timeout: 60_000 }, async () => {
@@ -555,6 +594,18 @@ describe('real Loader invite-auth composition', () => {
 
     const independent = await login(composition, 'shared+code=123', { address: '198.51.100.21' })
     expect(independent.status).toBe(303)
+  })
+
+  it('counts concurrent slow login failures for one client address', { timeout: 60_000 }, async () => {
+    const composition = await loadComposition({ config: { maxFailuresPerWindow: 1 } })
+    const address = '198.51.100.22'
+    const first = await pendingLogin(composition, 'incorrect-code', address)
+    const second = await pendingLogin(composition, 'incorrect-code', address)
+
+    first.complete()
+    await expect(first.status).resolves.toBe(401)
+    second.complete()
+    await expect(second.status).resolves.toBe(429)
   })
 
   it('rejects invalid secret sources and lengths without retaining the WebServer port', { timeout: 60_000 }, async () => {

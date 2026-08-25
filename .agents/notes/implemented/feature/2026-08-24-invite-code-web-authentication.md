@@ -32,7 +32,7 @@ The SSH-delivered SHA-256 sidecar detects artifact corruption but is not an auth
 
 The session token carries a version, expiry, random nonce, and HMAC-SHA256 signature. The host-only secure cookie defaults to 30 days. Changing the invite code controls future login only; rotating the signing secret revokes all sessions. Logout is browser-side cookie clearing rather than server-side token revocation.
 
-Failed logins use a bounded, process-local fixed-window limiter keyed by the client address that the loopback Caddy peer supplies. Restarts clear its counters, separate DSH processes do not share state, and capacity pressure evicts retained address buckets instead of permitting unbounded memory growth.
+Failed logins use a bounded, process-local fixed-window limiter keyed by the client address that the loopback Caddy peer supplies. After proxy-header validation, each login reads its complete request body within `maxBodyBytes` before consulting the failure bucket. The limiter check, invite-code comparison, and failure record then execute synchronously, so concurrent streamed bodies cannot share one unrecorded failure allowance. Restarts clear counters, separate DSH processes do not share state, and capacity pressure evicts retained address buckets instead of permitting unbounded memory growth.
 
 The [package README](../../../../packages/host/invite-auth/README.md) owns current configuration, HTTP, cookie, proxy-header, and limitation details. The [deployment design](../../../../docs/superpowers/specs/2026-08-24-dsh-invite-auth-deployment-design.md) owns the complete host and release layout.
 

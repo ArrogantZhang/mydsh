@@ -23,7 +23,7 @@ Activation fails loudly before publishing readiness when either environment refe
 | Method | Path | Status | Purpose |
 |---|---|---|---|
 | `GET` | `/__invite/login` | `200` or `303` | Render the Chinese login page, or redirect an already authenticated browser to a safe local `next` path. |
-| `POST` | `/__invite/login` | `303` | Check same-origin proxy headers, rate limits, form bounds, and the invite code; then set the session cookie and redirect to a safe local `next` path. |
+| `POST` | `/__invite/login` | `303` | Check same-origin proxy headers, read the bounded form, enforce rate limits, and compare the invite code; then set the session cookie and redirect to a safe local `next` path. |
 | `GET` | `/__invite/check` | `204`, `303`, or `401` | Authorize Caddy `forward_auth`; unauthenticated `GET` or `HEAD` HTML navigation redirects to login, while other unauthenticated traffic receives `401`. |
 | `POST` | `/__invite/logout` | `303` | Clear the browser cookie and redirect to login after the same-origin proxy-header check. |
 
@@ -41,7 +41,7 @@ The plugin owns exactly one `prefix` registration at `/__invite`. It publishes `
 
 Caddy must proxy `/__invite/*` directly and run `/__invite/check` before forwarding every other HTTP, SSE, or WebSocket request to DSH. For login and logout it preserves one browser `Origin` and sets single-valued `X-Forwarded-Proto` and `X-Forwarded-Host`; HTTPS and exact origin/host agreement are required. It also overwrites `X-DSH-Invite-Client-IP` with one literal client IP. That client header is trusted only from an exact loopback proxy peer; otherwise the direct socket address owns the rate-limit bucket. Exposing DSH port `3080` bypasses Caddy authentication and is unsafe.
 
-The fixed-window failure limiter is process-local and bounded by `maxTrackedAddresses`. At capacity it prunes expired buckets and then evicts the oldest insertion if necessary. A restart clears every bucket, and multiple DSH processes neither share failures nor coordinate capacity.
+The fixed-window failure limiter is process-local and bounded by `maxTrackedAddresses`. After proxy-header validation, each login reads its complete URL-encoded body within `maxBodyBytes` before consulting the limiter; the subsequent limiter check, invite-code comparison, and failure record do not yield, so concurrent streamed requests observe earlier completed failures. This pre-limit read retains at most `maxBodyBytes` per request. At capacity the limiter prunes expired buckets and then evicts the oldest insertion if necessary. A restart clears every bucket, and multiple DSH processes neither share failures nor coordinate capacity.
 
 ## Authorization scope
 

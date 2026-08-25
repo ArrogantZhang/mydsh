@@ -23,7 +23,7 @@
 | 方法 | 路径 | 状态 | 用途 |
 |---|---|---|---|
 | `GET` | `/__invite/login` | `200` 或 `303` | 渲染中文登录页，或将已经认证的浏览器重定向到安全的本地 `next` 路径。 |
-| `POST` | `/__invite/login` | `303` | 检查同源代理 header、限流、表单边界和邀请码，再设置会话 Cookie 并重定向到安全的本地 `next` 路径。 |
+| `POST` | `/__invite/login` | `303` | 检查同源代理 header、读取有界表单、执行限流并比较邀请码，再设置会话 Cookie 并重定向到安全的本地 `next` 路径。 |
 | `GET` | `/__invite/check` | `204`、`303` 或 `401` | 为 Caddy `forward_auth` 授权；未认证的 `GET` 或 `HEAD` HTML 导航重定向到登录页，其他未认证流量收到 `401`。 |
 | `POST` | `/__invite/logout` | `303` | 检查同源代理 header 后清除浏览器 Cookie，并重定向到登录页。 |
 
@@ -41,7 +41,7 @@ Cookie 值为 `v1.<expiry>.<nonce>.<signature>`：Unix 秒级过期时间、随�
 
 Caddy 必须直接代理 `/__invite/*`，并在向 DSH 转发其他所有 HTTP、SSE（Server-Sent Events）或 WebSocket 请求之前执行 `/__invite/check`。对于登录和退出请求，它保留一个浏览器 `Origin`，并设置单值的 `X-Forwarded-Proto` 和 `X-Forwarded-Host`；请求必须使用 HTTPS，且 origin 与 host 必须完全一致。它还会用一个字面量客户端 IP 覆盖 `X-DSH-Invite-Client-IP`。仅当直接代理 peer 是精确的回环地址时才信任该客户端 header；否则直接 socket 地址拥有对应限流 bucket。公开 DSH 的 `3080` 端口会绕过 Caddy 认证，因此不安全。
 
-固定窗口失败限流器位于单个进程内，并受 `maxTrackedAddresses` 约束。达到容量时，它先清除已过期 bucket，必要时再淘汰最早插入的 bucket。重启会清除所有 bucket，多个 DSH 进程既不共享失败记录，也不协调容量。
+固定窗口失败限流器位于单个进程内，并受 `maxTrackedAddresses` 约束。通过代理 header 校验后，每次登录都会先在 `maxBodyBytes` 上限内完整读取 URL 编码的请求体，再查询限流器；随后的限流检查、邀请码比较和失败记录不会让出执行权，因此并发流式请求会观察到先完成请求的失败记录。限流前读取每个请求最多保留 `maxBodyBytes`。达到容量时，限流器会先清理已过期 bucket，随后按需淘汰最早插入的记录。进程重启会清除全部 bucket，多个 DSH 进程既不共享失败计数，也不协调容量。
 
 ## 授权范围
 
