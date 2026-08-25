@@ -924,7 +924,7 @@ EnvironmentFile=/etc/mydsh/public.env
 
 - [ ] **Step 2: Implement idempotent host bootstrap**
 
-`bootstrap-host.sh` accepts exactly one lowercase DNS hostname, refuses non-root execution, installs the NodeSource Node 24 runtime and official Caddy stable apt repository, creates the non-login `mydsh` runtime user and owned data directories, writes `/etc/mydsh/public.env`, and creates `/etc/mydsh/mydsh.env` only when absent. It installs no builder account, pnpm, source checkout, or build cache. Once a release exists, only a byte-identical no-op is allowed; control-plane or hostname changes require separate maintenance.
+`bootstrap-host.sh` accepts exactly one lowercase DNS hostname, refuses non-root execution, and checks `dpkg --print-architecture` is exactly `amd64` before locking, filesystem mutation, or network access. It installs the NodeSource Node 24 runtime and official Caddy stable apt repository, creates the non-login `mydsh` runtime user and owned data directories, writes `/etc/mydsh/public.env`, and creates `/etc/mydsh/mydsh.env` only when absent. It installs no builder account, pnpm, source checkout, or build cache. Once a release exists, only a byte-identical no-op is allowed; control-plane or hostname changes require separate maintenance.
 
 Install the unit files and Caddyfile, run `systemctl daemon-reload`, validate Caddy with the public environment loaded, enable Caddy, and leave `mydsh.service` disabled until a release exists. Trap and remove only temporary files created by this run.
 
@@ -983,9 +983,9 @@ systemctl enable --now caddy.service
 
 - [ ] **Step 3: Implement immutable release activation and rollback**
 
-`package-release.sh` accepts a named reviewed Git ref and output directory, reads only that ref's Git objects, and uses a resource-bounded ephemeral official Node 24 Linux container to install the integrity-pinned pnpm 11.7.0 artifact, install frozen dependencies, run invite-auth tests, build, dump config, and emit a deterministic complete Linux runtime archive, format-1 manifest, and SHA-256 sidecar. Docker is mandatory and there is no host-build fallback.
+`package-release.sh` accepts a named reviewed Git ref and output directory, reads only that ref's Git objects, and uses a resource-bounded ephemeral official Node 24 Linux container to install the integrity-pinned pnpm 11.7.0 artifact, install frozen dependencies, run invite-auth tests, build, and dump config. The container mounts only an unpredictable mode-0700 artifact-set staging directory, never the caller output directory. After it exits, the host validates and syncs the deterministic Linux amd64 runtime archive and SHA-256 sidecar, then publishes both with one atomic rename to `$OUTPUT_DIR/mydsh-release-$commit/`. Docker is mandatory and there is no host-build fallback.
 
-`deploy-release.sh` accepts only the prebuilt artifact and sidecar. Under the shared lock it copies uploads into root-private new inodes, verifies SHA-256, rejects unsafe archive paths and links, validates the manifest, helper-journal compatibility, built CLI, dependencies, overlay, unit, and Caddy configuration, and publishes the root-owned commit directory. It never runs candidate Git, pnpm, hooks, tests, builds, config scripts, or helpers. The stable installed helper is excluded from release transactions.
+`deploy-release.sh` accepts only the atomic commit-named artifact-set directory and requires exactly its archive and sidecar. Under the shared lock it copies both into root-private new inodes, verifies SHA-256, rejects unsafe archive paths and links, validates the manifest, helper-journal compatibility, built CLI, dependencies, overlay, every hardened systemd value exactly once, and Caddy configuration, and publishes the root-owned commit directory. It never runs candidate Git, pnpm, hooks, tests, builds, config scripts, or helpers. The stable installed helper is excluded from release transactions.
 
 Use an atomic symlink switch and retain the previous target:
 
@@ -1032,7 +1032,7 @@ mv "$extract" "$release"
 
 - [ ] **Step 4: Write the bilingual deployment tutorial**
 
-Document prerequisites, local Docker packaging, DNS, security-group ports 22/80/443, initialization-only bootstrap, artifact and checksum upload, release deployment, retrieving the invite code directly over SSH, Kimi setup through Settings → Models, artifact-only upgrades, rollback, stable-helper maintenance limits, secret rotation, journald diagnosis, and all acceptance commands. Link the official NodeSource Node 24 and Caddy package instructions.
+Document prerequisites, local Docker packaging, DNS, security-group ports 22/80/443, initialization-only bootstrap, atomic artifact-set upload, release deployment, retrieving the invite code directly over SSH, Kimi setup through Settings → Models, artifact-set-only upgrades, rollback, stable-helper maintenance limits, secret rotation, journald diagnosis, and all acceptance commands. Link the official NodeSource Node 24 and Caddy package instructions.
 
 - [ ] **Step 5: Validate scripts and record the README pair**
 
@@ -1108,7 +1108,7 @@ Use the repository code-review workflow on `master...HEAD`. Resolve all findings
 
 **Files:**
 
-- Create locally: a commit-named Linux artifact and `.sha256` sidecar under `.artifacts/` (gitignored, not committed)
+- Create locally: an atomically published `mydsh-release-<commit>/` directory containing the Linux amd64 artifact and `.sha256` sidecar under `.artifacts/` (gitignored, not committed)
 - Create remotely: a commit-hash-named directory under `/opt/mydsh/releases/`, `/opt/mydsh/current`, `/etc/mydsh/*`, `/etc/caddy/Caddyfile`, and systemd units
 
 - [ ] **Step 1: Collect only non-secret deployment inputs**
@@ -1117,21 +1117,21 @@ Obtain the exact public subdomain, ECS public IP or SSH hostname, SSH username, 
 
 - [ ] **Step 2: Verify the server and DNS without mutation**
 
-Run `ssh` to inspect `/etc/os-release`, architecture, disk space, active listeners, and whether ports 80/443 are already owned. Run local DNS resolution for the public subdomain. Stop if the host is not Ubuntu 22.04/24.04, if another production service owns 80/443, or if DNS points elsewhere.
+Run `ssh` to inspect `/etc/os-release`, `dpkg --print-architecture`, disk space, active listeners, and whether ports 80/443 are already owned. Run local DNS resolution for the public subdomain. Stop unless the host is Linux amd64 Ubuntu 22.04/24.04, if another production service owns 80/443, or if DNS points elsewhere.
 
 - [ ] **Step 3: Package locally and upload the artifact plus initialization assets**
 
 ```bash
 mkdir -p .artifacts
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" .artifacts
-scp .artifacts/mydsh-*-linux-amd64.tar.gz .artifacts/mydsh-*-linux-amd64.tar.gz.sha256 deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
+scp -r .artifacts/mydsh-release-* deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
 ```
 
 Expected: the bounded official Node 24 container passes install, invite-auth tests, full build, and config dump; the artifact and strict checksum sidecar upload succeeds. The checksum detects corruption but does not authenticate the signer.
 
 - [ ] **Step 4: Bootstrap and activate over SSH**
 
-For initial setup only, run the Git-ref-extracted `bootstrap-host.sh` with `sudo` and the exact public host. Then invoke the installed stable `/usr/local/sbin/mydsh-deploy-release` with the uploaded artifact and checksum. Upgrades upload only those two artifact files and never replace the helper automatically. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
+For initial setup only, run the Git-ref-extracted `bootstrap-host.sh` with `sudo` and the exact public host. Then invoke the installed stable `/usr/local/sbin/mydsh-deploy-release` with the uploaded commit-named artifact-set directory. Upgrades upload only a new atomic artifact set and never replace the helper automatically. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
 
 Expected: both scripts exit 0, `systemctl is-active mydsh caddy` prints `active` twice, and `ss -lntp` shows DSH only on `127.0.0.1:3080` while Caddy owns public 80/443.
 

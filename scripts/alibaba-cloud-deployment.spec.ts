@@ -151,6 +151,9 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('} >"$private_tmp"')
     expect(script).not.toMatch(/(?:invite_code|session_secret)[^\n]*(?:\/dev\/stdout|>&2)/i)
     const bootstrapMain = script.slice(script.indexOf('\nmain() {'))
+    expect(bootstrapMain).toContain('dpkg --print-architecture')
+    expect(bootstrapMain).toContain('architecture == amd64')
+    expect(bootstrapMain.indexOf('dpkg --print-architecture')).toBeLessThan(bootstrapMain.indexOf('acquire_operation_lock'))
     expect(bootstrapMain.indexOf('preflight_managed_paths')).toBeLessThan(bootstrapMain.indexOf('TEMP_DIR=$(mktemp'))
     expect(bootstrapMain.indexOf('preflight_managed_paths')).toBeLessThan(bootstrapMain.indexOf('apt-get update'))
   })
@@ -159,7 +162,7 @@ describe('Alibaba Cloud deployment assets', () => {
     const script = asset('deploy-release.sh')
 
     expect(script).toMatch(/^#!\/usr\/bin\/env bash\n# Managed by DeepSeek Harness Alibaba Cloud deployment\nset -euo pipefail\n/)
-    expect(script).toContain('Usage: sudo %s <prebuilt-linux-artifact.tar.gz> <sha256-sidecar>')
+    expect(script).toContain('Usage: sudo %s <atomic-artifact-set-directory>')
     expect(script).toContain('sudo %s --rollback <40-character-lowercase-commit>')
     expect(script).toContain('sudo %s --prune <40-character-lowercase-commit>')
     expect(script).toMatch(/\[\[ \$# -eq 2 \]\]/)
@@ -169,6 +172,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('verify_artifact_checksum')
     expect(script).toContain('validate_archive_members')
     expect(script).toContain('validate_release_manifest')
+    expect(script).toContain('validate_candidate_unit_contract')
     expect(script).toContain('helper_journal_format=1')
     expect(script).toContain('apps/cli/lib/bin.js')
     expect(script).toContain('apps/web/dist/index.html')
@@ -257,6 +261,12 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('format=1')
     expect(script).toContain('helper_journal_format=1')
     expect(script).toContain('sha256sum')
+    expect(script).toContain('publish_artifact_set')
+    expect(script).toContain('mydsh-release-$commit')
+    expect(script).toContain('.new.XXXXXX')
+    expect(script).toContain('mv -T -- "$staging" "$final_dir"')
+    expect(script).not.toContain('src=$output_dir,dst=/output')
+    expect(script).not.toContain('.mydsh-release.$$.tmp')
     expect(script).not.toMatch(/runuser|systemd-run|DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
 
@@ -330,7 +340,7 @@ if validate_release_target "$root/outside/$commit" "$root/releases"; then exit 9
       expectBashSuccess(`
 set -euo pipefail
 usage_output=$(usage 2>&1)
-grep -F -- '<prebuilt-linux-artifact.tar.gz> <sha256-sidecar>' <<<"$usage_output"
+grep -F -- '<atomic-artifact-set-directory>' <<<"$usage_output"
 grep -F -- '--rollback <40-character-lowercase-commit>' <<<"$usage_output"
 grep -F -- '--prune <40-character-lowercase-commit>' <<<"$usage_output"
 root=$(mktemp -d)
@@ -529,6 +539,52 @@ grep -Fx "$host/etc/systemd/system/mydsh.service" "$root/synced"
 grep -Fx "$host/etc/systemd/system/caddy.service.d/mydsh.conf" "$root/synced"
 grep -Fx "$host/etc/systemd/system/multi-user.target.wants" "$root/synced"
 grep -Fx "$journal" "$root/synced"
+`)
+    })
+
+    it('publishes an artifact set with one directory rename and preserves unrelated output', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+output="$root/output"; mkdir "$output"; printf 'untouched\n' >"$output/sentinel"
+staging=$(mktemp -d "$output/.mydsh-release-${'a'.repeat(40)}.new.XXXXXX")
+final="$output/mydsh-release-${'a'.repeat(40)}"
+printf 'artifact\n' >"$staging/mydsh-linux-amd64.tar.gz"
+if publish_artifact_set "$staging" "$final" "$output"; then exit 90; fi
+[[ ! -e "$final" && $(<"$output/sentinel") == untouched ]]
+digest=$(sha256sum "$staging/mydsh-linux-amd64.tar.gz" | awk '{print $1}')
+printf '%s  mydsh-linux-amd64.tar.gz\n' "$digest" >"$staging/mydsh-linux-amd64.tar.gz.sha256"
+sync() { return 1; }
+if publish_artifact_set "$staging" "$final" "$output"; then exit 91; fi
+[[ ! -e "$final" && -d "$staging" && $(<"$output/sentinel") == untouched ]]
+unset -f sync
+publish_artifact_set "$staging" "$final" "$output"
+[[ -d "$final" && ! -e "$staging" ]]
+[[ -f "$final/mydsh-linux-amd64.tar.gz" && -f "$final/mydsh-linux-amd64.tar.gz.sha256" ]]
+[[ $(<"$output/sentinel") == untouched ]]
+`,'package-release.sh')
+    })
+
+    it('rejects weakened or duplicated candidate systemd settings', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+unit="$root/mydsh.service"
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+validate_candidate_unit_contract "$unit"
+sed -i 's/^User=mydsh$/User=root/' "$unit"
+if validate_candidate_unit_contract "$unit"; then exit 90; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+sed -i '/^ProtectSystem=strict$/d' "$unit"
+if validate_candidate_unit_contract "$unit"; then exit 91; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+printf 'ExecStart=/bin/sh\n' >>"$unit"
+if validate_candidate_unit_contract "$unit"; then exit 92; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+sed -i 's#^ReadWritePaths=.*#ReadWritePaths=/var/lib/mydsh /tmp#' "$unit"
+if validate_candidate_unit_contract "$unit"; then exit 93; fi
 `)
     })
 

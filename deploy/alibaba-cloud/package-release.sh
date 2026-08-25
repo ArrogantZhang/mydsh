@@ -5,8 +5,8 @@ readonly NODE_IMAGE=node:24-bookworm
 readonly PNPM_TARBALL=https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz
 readonly PNPM_INTEGRITY='sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
 PACKAGE_ROOT=''
-OUTPUT_TEMP=''
-CHECKSUM_TEMP=''
+PAIR_STAGING=''
+PAIR_PARENT=''
 
 usage() {
   printf 'Usage: %s <named-reviewed-git-ref> <output-directory>\n' "${0##*/}" >&2
@@ -18,15 +18,55 @@ fail() {
 }
 
 cleanup() {
-  if [[ -n "$OUTPUT_TEMP" && "$OUTPUT_TEMP" == */.mydsh-release.*.tmp ]]; then rm -f -- "$OUTPUT_TEMP" || true; fi
-  if [[ -n "$CHECKSUM_TEMP" && "$CHECKSUM_TEMP" == */.mydsh-release.*.sha256.tmp ]]; then rm -f -- "$CHECKSUM_TEMP" || true; fi
+  if [[ -n "$PAIR_STAGING" && -n "$PAIR_PARENT" && "$PAIR_STAGING" == "$PAIR_PARENT"/.mydsh-release-*.new.* ]]; then rm -rf -- "$PAIR_STAGING" || true; fi
   if [[ -n "$PACKAGE_ROOT" && "$PACKAGE_ROOT" == /tmp/mydsh-package.* ]]; then rm -rf -- "$PACKAGE_ROOT" || true; fi
 }
 
+verify_staged_artifact_set() (
+  local staging=$1
+  local artifact="$staging/mydsh-linux-amd64.tar.gz"
+  local checksum="$artifact.sha256"
+  local actual
+  local digest
+  local entries=()
+  local line
+  [[ -d "$staging" && ! -L "$staging" && $(realpath -e -- "$staging") == "$staging" ]] || return 1
+  shopt -s dotglob nullglob
+  entries=("$staging"/*)
+  [[ ${#entries[@]} -eq 2 ]] || return 1
+  [[ -f "$artifact" && ! -L "$artifact" && -f "$checksum" && ! -L "$checksum" ]] || return 1
+  line=$(<"$checksum") || return 1
+  [[ $line =~ ^([0-9a-f]{64})[[:space:]][[:space:]]mydsh-linux-amd64\.tar\.gz$ ]] || return 1
+  digest=${BASH_REMATCH[1]}
+  actual=$(sha256sum "$artifact") || return 1
+  actual=${actual%% *}
+  [[ $actual == "$digest" ]]
+)
+
+publish_artifact_set() {
+  local staging=$1
+  local final_dir=$2
+  local output_dir=$3
+  local commit=${final_dir##*/mydsh-release-}
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ -d "$output_dir" && ! -L "$output_dir" && $(realpath -e -- "$output_dir") == "$output_dir" ]] || return 1
+  [[ "$staging" == "$output_dir/.mydsh-release-$commit.new."* ]] || return 1
+  [[ "$final_dir" == "$output_dir/mydsh-release-$commit" && ! -e "$final_dir" && ! -L "$final_dir" ]] || return 1
+  verify_staged_artifact_set "$staging" || return 1
+  sync -f "$staging/mydsh-linux-amd64.tar.gz" || return 1
+  sync -f "$staging/mydsh-linux-amd64.tar.gz.sha256" || return 1
+  sync -f "$staging" || return 1
+  mv -T -- "$staging" "$final_dir" || return 1
+  if ! sync -f "$output_dir"; then
+    if mv -T -- "$final_dir" "$staging"; then sync -f "$output_dir" || true; fi
+    return 1
+  fi
+  PAIR_STAGING=''
+}
+
 main() {
-  local artifact_name
-  local checksum_name
   local commit
+  local final_dir
   local output_dir
   local ref
   local repository
@@ -49,17 +89,16 @@ main() {
   commit=$(git -C "$repository" rev-parse --verify "$ref^{commit}") || fail 'cannot resolve deployment ref'
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail 'deployment ref did not resolve to one full commit'
 
-  artifact_name="mydsh-$commit-linux-amd64.tar.gz"
-  checksum_name="$artifact_name.sha256"
-  [[ ! -e "$output_dir/$artifact_name" && ! -L "$output_dir/$artifact_name" ]] || fail "refusing to overwrite $artifact_name"
-  [[ ! -e "$output_dir/$checksum_name" && ! -L "$output_dir/$checksum_name" ]] || fail "refusing to overwrite $checksum_name"
-  OUTPUT_TEMP="$output_dir/.mydsh-release.$$.tmp"
-  CHECKSUM_TEMP="$output_dir/.mydsh-release.$$.sha256.tmp"
-  [[ ! -e "$OUTPUT_TEMP" && ! -L "$OUTPUT_TEMP" && ! -e "$CHECKSUM_TEMP" && ! -L "$CHECKSUM_TEMP" ]] || fail 'output staging path already exists'
+  final_dir="$output_dir/mydsh-release-$commit"
+  [[ ! -e "$final_dir" && ! -L "$final_dir" ]] || fail "refusing to overwrite ${final_dir##*/}"
+  PAIR_PARENT=$output_dir
+  PAIR_STAGING=$(mktemp -d "$output_dir/.mydsh-release-$commit.new.XXXXXX") || fail 'cannot create private artifact-set staging directory'
+  trap cleanup EXIT
+  [[ "$PAIR_STAGING" == "$output_dir/.mydsh-release-$commit.new."* && ! -L "$PAIR_STAGING" && $(realpath -e -- "$PAIR_STAGING") == "$PAIR_STAGING" ]] || fail 'unsafe artifact-set staging directory'
+  chmod 0700 "$PAIR_STAGING" || fail 'cannot secure artifact-set staging directory'
 
   PACKAGE_ROOT=$(mktemp -d /tmp/mydsh-package.XXXXXX) || fail 'cannot create packaging directory'
   [[ -n "$PACKAGE_ROOT" && "$PACKAGE_ROOT" == /tmp/mydsh-package.* && ! -L "$PACKAGE_ROOT" && $(realpath -e -- "$PACKAGE_ROOT") == "$PACKAGE_ROOT" ]] || fail 'unsafe packaging directory'
-  trap cleanup EXIT
   source_root="$PACKAGE_ROOT/source"
   install -d -m 0755 "$source_root"
   git -C "$repository" archive "$commit" | tar -x -C "$source_root"
@@ -81,12 +120,12 @@ main() {
     --env DSH_HOME=/workspace/.builder/dsh-home \
     --env PNPM_TARBALL="$PNPM_TARBALL" \
     --env PNPM_INTEGRITY="$PNPM_INTEGRITY" \
-    --env ARTIFACT_TEMP="/output/${OUTPUT_TEMP##*/}" \
-    --env CHECKSUM_TEMP="/output/${CHECKSUM_TEMP##*/}" \
-    --env ARTIFACT_NAME="$artifact_name" \
+    --env ARTIFACT_TEMP=/output/mydsh-linux-amd64.tar.gz \
+    --env CHECKSUM_TEMP=/output/mydsh-linux-amd64.tar.gz.sha256 \
+    --env ARTIFACT_NAME=mydsh-linux-amd64.tar.gz \
     --env EXPECTED_COMMIT="$commit" \
     --mount "type=bind,src=$source_root,dst=/workspace" \
-    --mount "type=bind,src=$output_dir,dst=/output" \
+    --mount "type=bind,src=$PAIR_STAGING,dst=/output" \
     --workdir /workspace \
     "$NODE_IMAGE" bash -euo pipefail -c '
       git init --quiet
@@ -103,7 +142,11 @@ main() {
       export PATH=/workspace/.builder/npm-prefix/bin:/usr/local/bin:/usr/bin:/bin
       test "$(node --version)" = "v24.${NODE_VERSION#24.}"
       test "$(pnpm --version)" = 11.7.0
-      pnpm install --frozen-lockfile --store-dir /workspace/.builder/store
+      for attempt in 1 2 3; do
+        if pnpm install --frozen-lockfile --store-dir /workspace/.builder/store; then break; fi
+        [[ $attempt -lt 3 ]] || exit 1
+        sleep 5
+      done
       pnpm exec vitest run packages/host/invite-auth/tests
       pnpm run build
       node apps/cli/lib/bin.js web --patch deploy/alibaba-cloud/invite-auth.cordis.yml --dump-config >/dev/null
@@ -117,12 +160,8 @@ main() {
       printf "%s  %s\n" "$digest" "$ARTIFACT_NAME" >"$CHECKSUM_TEMP"
     '
 
-  [[ -f "$OUTPUT_TEMP" && ! -L "$OUTPUT_TEMP" && -f "$CHECKSUM_TEMP" && ! -L "$CHECKSUM_TEMP" ]] || fail 'container did not produce both artifact files'
-  mv -- "$OUTPUT_TEMP" "$output_dir/$artifact_name"
-  OUTPUT_TEMP=''
-  mv -- "$CHECKSUM_TEMP" "$output_dir/$checksum_name"
-  CHECKSUM_TEMP=''
-  printf 'Packaged commit %s as %s with SHA-256 sidecar.\n' "$commit" "$artifact_name"
+  publish_artifact_set "$PAIR_STAGING" "$final_dir" "$output_dir" || fail 'artifact-set validation or atomic publication failed'
+  printf 'Packaged commit %s as atomic artifact set %s.\n' "$commit" "${final_dir##*/}"
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

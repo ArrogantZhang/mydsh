@@ -6,7 +6,7 @@
 
 ## 前置条件
 
-使用一台全新的 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
+使用一台全新的 Linux amd64 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。bootstrap 会在获取锁或执行任何网络和文件系统变更前检查 `dpkg --print-architecture`，并拒绝 `amd64` 之外的架构。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
 
 宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。打包需要开发机安装 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
@@ -23,19 +23,17 @@ REMOTE=ecs-admin@203.0.113.10
 LOCAL_STAGE=$(mktemp -d)
 trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$LOCAL_STAGE"
-ARTIFACT=$(find "$LOCAL_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
-[[ -f $ARTIFACT ]]
-CHECKSUM="$ARTIFACT.sha256"
-ARTIFACT_NAME=${ARTIFACT##*/}
-CHECKSUM_NAME=${CHECKSUM##*/}
+ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
+[[ -d $ARTIFACT_SET ]]
+ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
 git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 [[ $REMOTE_STAGE == */mydsh-deploy.* ]]
 scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
-scp "$ARTIFACT" "$CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
+scp -r "$ARTIFACT_SET" "$REMOTE:$REMOTE_STAGE/"
 ```
 
-第一个 `scp` 将全部 5 个初始化文件与 artifact 上传到同一个不可预测、由 SSH 用户拥有的目录。SHA-256 sidecar 能发现传输损坏，但不能证明签名者身份。信任来自精确的已评审本地 ref；使用签名 tag 或 commit 时，还来自打包前对签名的验证。artifact 包含 overlay、构建产物、依赖、release manifest 和 release 配置，不包含宿主绝对路径或生产密钥。
+第一个 `scp` 将全部 5 个初始化文件上传到一个不可预测、由 SSH 用户拥有的目录，并在旁边上传一个原子发布的 artifact-set 目录，其中包含 tarball 和 SHA-256 sidecar。sidecar 能发现传输损坏，但不能证明签名者身份。信任来自精确的已评审本地 ref；使用签名 tag 或 commit 时，还来自打包前对签名的验证。artifact 包含 overlay、构建产物、依赖、release manifest 和 release 配置，不包含宿主绝对路径或生产密钥。
 
 ## 初始化主机
 
@@ -49,13 +47,13 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact。helper 会把两个上传文件复制到 root-private 新 inode，验证严格 sidecar 与 SHA-256 值，拒绝不安全 tar 路径和越界链接，在 root-private 目录中解压，验证 manifest 格式 `1`、helper journal 兼容版本 `1`、commit、ref 标签、平台、必要依赖、已构建 CLI、overlay、unit 和 Caddy 配置，再发布 commit 目录。它绝不会运行 Git、pnpm、安装 hook、测试、构建命令、配置脚本或 artifact 中的 helper。激活会将 unit、Caddy 文件、release 链接和服务启用状态作为一个事务；稳定 helper 本身不属于 release 事务。
+通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，把两个文件复制到 root-private 新 inode，验证严格 sidecar 与 SHA-256 值，拒绝不安全 tar 路径和越界链接，在 root-private 目录中解压，验证 manifest 格式 `1`、helper journal 兼容版本 `1`、commit、ref 标签、平台、必要依赖、已构建 CLI、overlay、精确强化 unit 约束和 Caddy 配置，再发布 commit 目录。它绝不会运行 Git、pnpm、安装 hook、测试、构建命令、配置脚本或 artifact 中的 helper。激活会将 unit、Caddy 文件、release 链接和服务启用状态作为一个事务；稳定 helper 本身不属于 release 事务。
 
 ```bash
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_NAME' './$CHECKSUM_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-远程命令只在成功后删除上传目录。更新失败时，它会保留确切的 artifact 和 checksum，恢复上一个 `current` 目标、配置、监听状态和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
+远程命令只在成功后删除上传目录。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标、配置、监听状态和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
 
 ## 验证 HTTPS 和登录
 
@@ -122,11 +120,10 @@ printf "Authenticated smoke passed.\n"
 UPGRADE_STAGE=$(mktemp -d)
 trap 'rm -rf -- "$UPGRADE_STAGE"' EXIT
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$UPGRADE_STAGE"
-UPGRADE_ARTIFACT=$(find "$UPGRADE_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
-UPGRADE_CHECKSUM="$UPGRADE_ARTIFACT.sha256"
+UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
-scp "$UPGRADE_ARTIFACT" "$UPGRADE_CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_ARTIFACT##*/}' './${UPGRADE_CHECKSUM##*/}'"
+scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'"
 ```
 
 已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper 或 journal 格式升级需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。

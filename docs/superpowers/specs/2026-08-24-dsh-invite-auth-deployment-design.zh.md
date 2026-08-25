@@ -97,9 +97,9 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器只安装 Node.js 24 运行时和 Caddy，不存在 builder 账户、pnpm、源码 checkout、依赖生命周期执行、测试运行器或构建缓存。在开发机上，`package-release.sh` 归档精确的具名 Git ref，并在受资源限制的临时官方 Node 24 Linux 容器中使用全新状态和固定 pnpm tarball integrity，执行冻结依赖安装、invite-auth 测试、完整构建和配置转储。生成的确定性 archive 包含完整 Linux 运行时 tree、依赖、已构建前端和库、部署数据，以及记录格式、commit、具名 ref、平台、Node、pnpm 和 helper journal 兼容版本的 manifest。
+Linux amd64 服务器只安装 Node.js 24 运行时和 Caddy；bootstrap 会在加锁或变更前拒绝其他任何 `dpkg` 架构，宿主也不存在 builder 账户、pnpm、源码 checkout、依赖生命周期执行、测试运行器或构建缓存。在开发机上，`package-release.sh` 归档精确的具名 Git ref，并在受资源限制的临时官方 Node 24 Linux 容器中使用全新状态和固定 pnpm tarball integrity，执行冻结依赖安装、invite-auth 测试、完整构建和配置转储。容器只能看到精确源码 tree 和不可预测、模式为 0700 的 artifact-set staging 目录，绝不能看到调用者输出目录。容器退出后，宿主验证并同步 tarball 与 checksum，再把它们共同的单个 commit 命名父目录原子重命名到输出位置。生成的确定性 archive 包含完整 Linux amd64 运行时 tree、依赖、已构建前端和库、部署数据，以及记录格式、commit、具名 ref、平台、Node、pnpm 和 helper journal 兼容版本的 manifest。
 
-稳定的宿主 helper 会把 artifact 和 checksum 复制到 root-private 新 inode，验证 SHA-256，拒绝绝对路径、父目录穿越、特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
+稳定的宿主 helper 要求原子 artifact-set 目录中恰好只有 tarball 和 checksum，把两者复制到 root-private 新 inode，验证 SHA-256，拒绝绝对路径、父目录穿越、特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。激活前，它还会逐项且仅一次验证所有安全相关 systemd 值，包括运行时身份、工作目录、环境文件、命令、重启策略、mask、强化设置、可写路径和安装目标。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 

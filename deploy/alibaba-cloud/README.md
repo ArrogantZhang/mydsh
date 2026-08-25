@@ -6,7 +6,7 @@ This tutorial deploys one invite-protected DeepSeek Harness Web process on an Al
 
 ## Prerequisites
 
-Use a fresh Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
+Use a fresh Linux amd64 Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. Bootstrap checks `dpkg --print-architecture` before taking its lock or performing any network or filesystem mutation and rejects anything except `amd64`. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
 
 The host bootstrap installs only the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
 
@@ -23,19 +23,17 @@ REMOTE=ecs-admin@203.0.113.10
 LOCAL_STAGE=$(mktemp -d)
 trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$LOCAL_STAGE"
-ARTIFACT=$(find "$LOCAL_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
-[[ -f $ARTIFACT ]]
-CHECKSUM="$ARTIFACT.sha256"
-ARTIFACT_NAME=${ARTIFACT##*/}
-CHECKSUM_NAME=${CHECKSUM##*/}
+ARTIFACT_SET=$(find "$LOCAL_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
+[[ -d $ARTIFACT_SET ]]
+ARTIFACT_SET_NAME=${ARTIFACT_SET##*/}
 git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 [[ $REMOTE_STAGE == */mydsh-deploy.* ]]
 scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
-scp "$ARTIFACT" "$CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
+scp -r "$ARTIFACT_SET" "$REMOTE:$REMOTE_STAGE/"
 ```
 
-The first `scp` uploads all five initialization assets to the same unpredictable, SSH-user-owned directory as the artifact. The SHA-256 sidecar detects corruption during transfer but does not establish signer identity. Trust comes from the exact reviewed local ref and, when used, verification of its signed tag or commit before packaging. The artifact contains the overlay, built outputs, dependencies, release manifest, and release configuration; it contains no host absolute path or production secret.
+The first `scp` uploads all five initialization assets beside one atomically published artifact-set directory containing the tarball and SHA-256 sidecar. The sidecar detects corruption during transfer but does not establish signer identity. Trust comes from the exact reviewed local ref and, when used, verification of its signed tag or commit before packaging. The artifact contains the overlay, built outputs, dependencies, release manifest, and release configuration; it contains no host absolute path or production secret.
 
 ## Bootstrap the host
 
@@ -49,13 +47,13 @@ The script creates the non-login `mydsh` runtime account, persistent and release
 
 ## Deploy the release
 
-Deploy the prebuilt artifact through the stable root-installed helper. It copies both uploads into root-private new inodes, verifies the strict sidecar and SHA-256 value, rejects unsafe tar paths and escaping links, extracts into a root-private directory, validates manifest format `1`, helper journal compatibility `1`, commit, ref label, platform, required dependencies, built CLI, overlay, unit, and Caddy configuration, and publishes the commit directory. It never runs Git, pnpm, install hooks, tests, build commands, config scripts, or a helper from the artifact. Activation journals and transacts the unit, Caddy files, release link, and service enablement; the stable helper itself is not part of the release transaction.
+Deploy the prebuilt artifact set through the stable root-installed helper. It requires the commit-named directory to contain exactly the tarball and sidecar, copies both files into root-private new inodes, verifies the strict sidecar and SHA-256 value, rejects unsafe tar paths and escaping links, extracts into a root-private directory, validates manifest format `1`, helper journal compatibility `1`, commit, ref label, platform, required dependencies, built CLI, overlay, the exact hardened unit contract, and Caddy configuration, and publishes the commit directory. It never runs Git, pnpm, install hooks, tests, build commands, config scripts, or a helper from the artifact. Activation journals and transacts the unit, Caddy files, release link, and service enablement; the stable helper itself is not part of the release transaction.
 
 ```bash
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_NAME' './$CHECKSUM_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-The remote command removes the upload only after success. A failed update retains the exact artifact and checksum, restores the previous `current` target, configuration, listener state, and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
+The remote command removes the upload only after success. A failed update retains the exact artifact set, restores the previous `current` target, configuration, listener state, and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
 
 ## Verify HTTPS and login
 
@@ -122,11 +120,10 @@ For an upgrade, run `package-release.sh` for the new reviewed ref, create a fres
 UPGRADE_STAGE=$(mktemp -d)
 trap 'rm -rf -- "$UPGRADE_STAGE"' EXIT
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$UPGRADE_STAGE"
-UPGRADE_ARTIFACT=$(find "$UPGRADE_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
-UPGRADE_CHECKSUM="$UPGRADE_ARTIFACT.sha256"
+UPGRADE_SET=$(find "$UPGRADE_STAGE" -maxdepth 1 -type d -name 'mydsh-release-*')
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
-scp "$UPGRADE_ARTIFACT" "$UPGRADE_CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_ARTIFACT##*/}' './${UPGRADE_CHECKSUM##*/}'"
+scp -r "$UPGRADE_SET" "$REMOTE:$REMOTE_STAGE/"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_SET##*/}'"
 ```
 
 The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper or journal-format upgrade requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change.

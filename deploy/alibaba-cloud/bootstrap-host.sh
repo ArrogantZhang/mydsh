@@ -404,6 +404,7 @@ configure_package_repositories() {
 }
 
 main() {
+  local architecture
   local public_host
   local node_version
   readonly HOST_PATTERN='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
@@ -415,6 +416,9 @@ main() {
   }
   public_host=$1
   [[ ${#public_host} -le 253 && $public_host =~ $HOST_PATTERN ]] || fail 'hostname must be one lowercase DNS name such as dsh.example.com'
+  command -v dpkg >/dev/null 2>&1 || fail 'dpkg is required to verify the host architecture'
+  architecture=$(dpkg --print-architecture) || fail 'cannot determine host architecture'
+  [[ $architecture == amd64 ]] || fail "this deployment supports Linux amd64 only; found $architecture"
   acquire_operation_lock
   preflight_managed_paths \
     /opt/mydsh \

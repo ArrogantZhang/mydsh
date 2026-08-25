@@ -22,9 +22,9 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。该稳定 helper 拥有 journal 格式 1，并被排除在自动 release 更新之外；更改它需要单独评审的维护流程。共享的非阻塞宿主锁将 bootstrap、部署、回滚和清理串行化。helper 会在变更前于 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` 恢复 journal，其中包含之前的链接、root 所有的宿主文件备份和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复并同步该状态，直到恢复成功；接受激活会验证监听与认证行为、启用服务、同步受影响文件系统，并在清理前记录 `committed`。
 
-候选 release 绝不会在生产宿主上构建。`package-release.sh` 读取精确的具名 Git ref，在使用全新本地状态且没有生产环境的受资源限制临时官方 Node 24 Linux 容器中，执行固定 pnpm 安装、冻结依赖、invite-auth 测试、完整构建和配置转储，并生成完整的确定性 Linux 运行时 archive 与 checksum。服务器没有 builder 身份、pnpm、源码 checkout、生命周期执行、测试运行器或候选构建缓存。
+候选 release 绝不会在生产宿主上构建。`package-release.sh` 读取精确的具名 Git ref，在使用全新本地状态且没有生产环境的受资源限制临时官方 Node 24 Linux 容器中，执行固定 pnpm 安装、冻结依赖、invite-auth 测试、完整构建和配置转储。容器只能写入精确源码 tree 和不可预测的私有 artifact-set staging 目录，不能接触调用者输出目录。容器退出后，宿主验证并同步 archive 与 checksum，再通过一次目录重命名发布这对文件。服务器仅支持 Linux amd64，没有 builder 身份、pnpm、源码 checkout、生命周期执行、测试运行器或候选构建缓存。
 
-通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。宿主 helper 会把上传文件复制到 root-private 新 inode，拒绝不安全 archive member 和越界链接，验证 manifest 格式、commit、具名 ref、Linux 平台、运行时输出和 helper journal 兼容版本，并且只把 unit 和 Caddy 文件当作数据。它绝不会执行 release 内的控制流。
+通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。宿主 helper 要求以 commit 命名的 artifact-set 目录中恰好只有 archive 和 checksum，把两者复制到 root-private 新 inode，拒绝不安全 archive member 和越界链接，验证 manifest 格式、commit、具名 ref、Linux amd64 平台、运行时输出、helper journal 兼容版本和所有安全相关 systemd 值恰好一次，并且只把 unit 和 Caddy 文件当作数据。它绝不会执行 release 内的控制流。
 
 ## 会话和滥用控制
 

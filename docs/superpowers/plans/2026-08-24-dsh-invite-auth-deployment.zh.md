@@ -924,7 +924,7 @@ EnvironmentFile=/etc/mydsh/public.env
 
 - [ ] **步骤 2：实现幂等 Host bootstrap**
 
-`bootstrap-host.sh` 正好接受一个小写 DNS hostname，拒绝非 root 执行，安装 NodeSource Node 24 运行时和官方 Caddy stable apt 仓库，创建不可登录的 `mydsh` 运行时用户和归属正确的数据目录，写入 `/etc/mydsh/public.env`，并仅在文件不存在时创建 `/etc/mydsh/mydsh.env`。它不安装 builder 账户、pnpm、源码 checkout 或构建缓存。release 存在后只允许逐字节一致的无操作；控制平面或 hostname 变更需要单独维护。
+`bootstrap-host.sh` 正好接受一个小写 DNS hostname，拒绝非 root 执行，并在加锁、文件系统变更或网络访问前检查 `dpkg --print-architecture` 恰好为 `amd64`。它安装 NodeSource Node 24 运行时和官方 Caddy stable apt 仓库，创建不可登录的 `mydsh` 运行时用户和归属正确的数据目录，写入 `/etc/mydsh/public.env`，并仅在文件不存在时创建 `/etc/mydsh/mydsh.env`。它不安装 builder 账户、pnpm、源码 checkout 或构建缓存。release 存在后只允许逐字节一致的无操作；控制平面或 hostname 变更需要单独维护。
 
 安装单元文件与 Caddyfile，运行 `systemctl daemon-reload`，加载公共环境后验证 Caddy，启用 Caddy，并在 release 存在前保持 `mydsh.service` 未启用。trap 只能移除本次运行创建的临时文件。
 
@@ -983,9 +983,9 @@ systemctl enable --now caddy.service
 
 - [ ] **步骤 3：实现不可变 release 激活与回滚**
 
-`package-release.sh` 接受具名的已评审 Git ref 和输出目录，只读取该 ref 的 Git 对象，并使用受资源限制的临时官方 Node 24 Linux 容器安装经过 integrity 固定的 pnpm 11.7.0 artifact、安装冻结依赖、运行 invite-auth 测试、构建、转储配置，再生成确定性的完整 Linux 运行时 archive、格式 1 manifest 和 SHA-256 sidecar。Docker 是强制依赖，不存在宿主构建回退。
+`package-release.sh` 接受具名的已评审 Git ref 和输出目录，只读取该 ref 的 Git 对象，并使用受资源限制的临时官方 Node 24 Linux 容器安装经过 integrity 固定的 pnpm 11.7.0 artifact、安装冻结依赖、运行 invite-auth 测试、构建并转储配置。容器只挂载不可预测、模式为 0700 的 artifact-set staging 目录，绝不挂载调用者输出目录。容器退出后，宿主验证并同步确定性的 Linux amd64 运行时 archive 与 SHA-256 sidecar，再通过一次原子重命名把两者发布到 `$OUTPUT_DIR/mydsh-release-$commit/`。Docker 是强制依赖，不存在宿主构建回退。
 
-`deploy-release.sh` 只接受预构建 artifact 与 sidecar。在共享锁下，它把上传文件复制到 root-private 新 inode，验证 SHA-256，拒绝不安全 archive 路径和链接，验证 manifest、helper journal 兼容版本、已构建 CLI、依赖、overlay、unit 和 Caddy 配置，再发布 root 所有的 commit 目录。它绝不会运行候选 Git、pnpm、hook、测试、构建、配置脚本或 helper。稳定的已安装 helper 不属于 release 事务。
+`deploy-release.sh` 只接受原子发布、以 commit 命名的 artifact-set 目录，并要求其中恰好只有 archive 与 sidecar。在共享锁下，它把两者复制到 root-private 新 inode，验证 SHA-256，拒绝不安全 archive 路径和链接，验证 manifest、helper journal 兼容版本、已构建 CLI、依赖、overlay、每个强化 systemd 值恰好一次和 Caddy 配置，再发布 root 所有的 commit 目录。它绝不会运行候选 Git、pnpm、hook、测试、构建、配置脚本或 helper。稳定的已安装 helper 不属于 release 事务。
 
 使用原子符号链接切换并保留此前目标：
 
@@ -1032,7 +1032,7 @@ mv "$extract" "$release"
 
 - [ ] **步骤 4：编写双语部署教程**
 
-记录前置条件、本地 Docker 打包、DNS、安全组端口 22/80/443、只用于初始化的 bootstrap、artifact 与 checksum 上传、release 部署、直接通过 SSH 获取邀请码、通过设置 → 模型配置 Kimi、仅上传 artifact 的升级、回滚、稳定 helper 维护限制、秘密轮换、journald 诊断和所有验收命令。链接 NodeSource Node 24 与 Caddy 包的官方说明。
+记录前置条件、本地 Docker 打包、DNS、安全组端口 22/80/443、只用于初始化的 bootstrap、原子 artifact-set 上传、release 部署、直接通过 SSH 获取邀请码、通过设置 → 模型配置 Kimi、仅上传 artifact set 的升级、回滚、稳定 helper 维护限制、秘密轮换、journald 诊断和所有验收命令。链接 NodeSource Node 24 与 Caddy 包的官方说明。
 
 - [ ] **步骤 5：验证脚本并记录 README 对**
 
@@ -1108,7 +1108,7 @@ git grep -n 'invite-auth' packages/bundle/web-app/cordis.patch.yml
 
 **文件：**
 
-- 本地新建：`.artifacts/` 下以 commit 命名的 Linux artifact 和 `.sha256` sidecar（被 gitignore，不提交）
+- 本地新建：`.artifacts/` 下原子发布的 `mydsh-release-<commit>/` 目录，其中包含 Linux amd64 artifact 和 `.sha256` sidecar（被 gitignore，不提交）
 - 远端新建：`/opt/mydsh/releases/` 下以 commit hash 命名的目录、`/opt/mydsh/current`、`/etc/mydsh/*`、`/etc/caddy/Caddyfile` 和 systemd 单元
 
 - [ ] **步骤 1：只收集非秘密部署输入**
@@ -1117,21 +1117,21 @@ git grep -n 'invite-auth' packages/bundle/web-app/cordis.patch.yml
 
 - [ ] **步骤 2：只读验证服务器与 DNS**
 
-通过 `ssh` 检查 `/etc/os-release`、架构、磁盘空间、活动 listener，以及端口 80/443 是否已有 owner。在本地解析公网子域名。若 Host 不是 Ubuntu 22.04/24.04、其他生产服务占用 80/443，或 DNS 指向别处，则停止。
+通过 `ssh` 检查 `/etc/os-release`、`dpkg --print-architecture`、磁盘空间、活动 listener，以及端口 80/443 是否已有 owner。在本地解析公网子域名。若 Host 不是 Linux amd64 Ubuntu 22.04/24.04、其他生产服务占用 80/443，或 DNS 指向别处，则停止。
 
 - [ ] **步骤 3：在本地打包并上传 artifact 与初始化资产**
 
 ```bash
 mkdir -p .artifacts
 bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" .artifacts
-scp .artifacts/mydsh-*-linux-amd64.tar.gz .artifacts/mydsh-*-linux-amd64.tar.gz.sha256 deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
+scp -r .artifacts/mydsh-release-* deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
 ```
 
 预期：受限制的官方 Node 24 容器通过安装、invite-auth 测试、完整构建和配置转储；artifact 与严格 checksum sidecar 上传成功。checksum 能发现损坏，但不能认证签名者。
 
 - [ ] **步骤 4：通过 SSH bootstrap 并激活**
 
-仅在首次设置时，用 `sudo` 和精确公网 Host 运行从 Git ref 提取的 `bootstrap-host.sh`。然后使用上传的 artifact 与 checksum 调用已安装的稳定 `/usr/local/sbin/mydsh-deploy-release`。升级只上传这两个 artifact 文件，绝不自动替换 helper。这些命令会安装 OS 包，并写入 `/etc`、`/opt`、`/var/lib` 和 systemd 状态；只能在已检查的 ECS 目标上执行。
+仅在首次设置时，用 `sudo` 和精确公网 Host 运行从 Git ref 提取的 `bootstrap-host.sh`。然后使用上传、以 commit 命名的 artifact-set 目录调用已安装的稳定 `/usr/local/sbin/mydsh-deploy-release`。升级只上传新的原子 artifact set，绝不自动替换 helper。这些命令会安装 OS 包，并写入 `/etc`、`/opt`、`/var/lib` 和 systemd 状态；只能在已检查的 ECS 目标上执行。
 
 预期：两个脚本均以 0 退出，`systemctl is-active mydsh caddy` 打印两次 `active`，`ss -lntp` 显示 DSH 只监听 `127.0.0.1:3080`，Caddy 占有公网 80/443。
 

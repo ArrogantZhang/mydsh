@@ -25,7 +25,7 @@ MANIFEST_COMMIT=''
 MANIFEST_REF=''
 
 usage() {
-  printf 'Usage: sudo %s <prebuilt-linux-artifact.tar.gz> <sha256-sidecar>\n' "${0##*/}" >&2
+  printf 'Usage: sudo %s <atomic-artifact-set-directory>\n' "${0##*/}" >&2
   printf '       sudo %s --rollback <40-character-lowercase-commit>\n' "${0##*/}" >&2
   printf '       sudo %s --prune <40-character-lowercase-commit>\n' "${0##*/}" >&2
 }
@@ -302,14 +302,7 @@ validate_candidate_configs() {
   grep -Fqx "$MANAGED_MARKER" "$caddy_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$unit_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$dropin_candidate" || return 1
-  grep -Fqx 'User=mydsh' "$unit_candidate" || return 1
-  grep -Fqx 'Group=mydsh' "$unit_candidate" || return 1
-  grep -Fqx 'NoNewPrivileges=true' "$unit_candidate" || return 1
-  grep -Fqx 'ProtectSystem=strict' "$unit_candidate" || return 1
-  grep -Fqx 'ProtectHome=true' "$unit_candidate" || return 1
-  # systemd, not this validation shell, expands the public-host variable.
-  # shellcheck disable=SC2016
-  grep -Fqx 'ExecStart=/usr/bin/node /opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}' "$unit_candidate" || return 1
+  validate_candidate_unit_contract "$unit_candidate" || return 1
   [[ $(grep -Fvc "$MANAGED_MARKER" "$dropin_candidate") == 2 ]] || return 1
   grep -Fqx '[Service]' "$dropin_candidate" || return 1
   grep -Fqx 'EnvironmentFile=/etc/mydsh/public.env' "$dropin_candidate" || return 1
@@ -327,6 +320,43 @@ validate_candidate_configs() {
     return 1
   fi
   rm -rf -- "$verify_root" || return 1
+}
+
+require_unit_value_once() {
+  local unit=$1
+  local key=$2
+  local expected=$3
+  local lines=()
+  mapfile -t lines < <(grep -E "^${key}=" "$unit")
+  [[ ${#lines[@]} -eq 1 && ${lines[0]} == "$key=$expected" ]]
+}
+
+validate_candidate_unit_contract() {
+  local unit=$1
+  local environment_files=()
+  [[ -f "$unit" && ! -L "$unit" ]] || return 1
+  require_unit_value_once "$unit" Type simple || return 1
+  require_unit_value_once "$unit" User mydsh || return 1
+  require_unit_value_once "$unit" Group mydsh || return 1
+  require_unit_value_once "$unit" WorkingDirectory /srv/mydsh/workspace || return 1
+  require_unit_value_once "$unit" Environment NODE_ENV=production || return 1
+  mapfile -t environment_files < <(grep -E '^EnvironmentFile=' "$unit")
+  [[ ${#environment_files[@]} -eq 2 ]] || return 1
+  [[ $(printf '%s\n' "${environment_files[@]}" | grep -Fxc 'EnvironmentFile=/etc/mydsh/public.env') == 1 ]] || return 1
+  [[ $(printf '%s\n' "${environment_files[@]}" | grep -Fxc 'EnvironmentFile=/etc/mydsh/mydsh.env') == 1 ]] || return 1
+  # systemd, not this validation shell, expands the public-host variable.
+  # shellcheck disable=SC2016
+  require_unit_value_once "$unit" ExecStart '/usr/bin/node /opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}' || return 1
+  require_unit_value_once "$unit" Restart on-failure || return 1
+  require_unit_value_once "$unit" RestartSec 5s || return 1
+  require_unit_value_once "$unit" TimeoutStopSec 30s || return 1
+  require_unit_value_once "$unit" UMask 0077 || return 1
+  require_unit_value_once "$unit" NoNewPrivileges true || return 1
+  require_unit_value_once "$unit" PrivateTmp true || return 1
+  require_unit_value_once "$unit" ProtectSystem strict || return 1
+  require_unit_value_once "$unit" ProtectHome true || return 1
+  require_unit_value_once "$unit" ReadWritePaths '/var/lib/mydsh /srv/mydsh/workspace' || return 1
+  require_unit_value_once "$unit" WantedBy multi-user.target || return 1
 }
 
 validate_temp_directory() {
@@ -365,6 +395,15 @@ verify_artifact_checksum() {
   actual=${actual%% *}
   [[ $actual == "$digest" ]] || return 1
 }
+
+validate_artifact_set_directory() (
+  local artifact_set=$1
+  local entries=()
+  [[ -d "$artifact_set" && ! -L "$artifact_set" && $(realpath -e -- "$artifact_set") == "$artifact_set" ]] || return 1
+  shopt -s dotglob nullglob
+  entries=("$artifact_set"/*)
+  [[ ${#entries[@]} -eq 2 ]]
+)
 
 validate_archive_members() {
   local artifact=$1
@@ -871,21 +910,27 @@ prune_release() {
 }
 
 deploy_artifact() {
-  local artifact_input=$1
-  local checksum_input=$2
+  local artifact_set_input=$1
+  local artifact_set
   local artifact_path
   local checksum_path
   local commit
+  local expected_commit
   local extract_root
   local previous
   local target
   local trusted_artifact
   local trusted_checksum
 
-  [[ -f "$artifact_input" && ! -L "$artifact_input" && -r "$artifact_input" ]] || fail 'artifact must be a readable regular non-symlink file'
-  [[ -f "$checksum_input" && ! -L "$checksum_input" && -r "$checksum_input" ]] || fail 'checksum sidecar must be a readable regular non-symlink file'
-  artifact_path=$(realpath -e -- "$artifact_input") || fail 'cannot resolve artifact path'
-  checksum_path=$(realpath -e -- "$checksum_input") || fail 'cannot resolve checksum path'
+  [[ -d "$artifact_set_input" && ! -L "$artifact_set_input" ]] || fail 'artifact set must be a real directory'
+  artifact_set=$(realpath -e -- "$artifact_set_input") || fail 'cannot resolve artifact-set directory'
+  expected_commit=${artifact_set##*/mydsh-release-}
+  [[ $expected_commit =~ ^[0-9a-f]{40}$ && $artifact_set == "${artifact_set%/*}/mydsh-release-$expected_commit" ]] || fail 'artifact-set directory name must contain one full commit'
+  artifact_path="$artifact_set/mydsh-linux-amd64.tar.gz"
+  checksum_path="$artifact_path.sha256"
+  validate_artifact_set_directory "$artifact_set" || fail 'artifact set must contain exactly the artifact and checksum'
+  [[ -f "$artifact_path" && ! -L "$artifact_path" && -r "$artifact_path" ]] || fail 'artifact set is missing its readable regular artifact'
+  [[ -f "$checksum_path" && ! -L "$checksum_path" && -r "$checksum_path" ]] || fail 'artifact set is missing its readable regular checksum sidecar'
   previous=$(current_release) || fail 'current release link is unsafe'
   TRUST_ROOT=$(mktemp -d /run/mydsh-artifact.XXXXXX) || fail 'cannot create root-private artifact directory'
   validate_temp_directory "$TRUST_ROOT" /run mydsh-artifact. || fail 'unsafe root-private artifact directory'
@@ -904,6 +949,7 @@ deploy_artifact() {
   validate_release_manifest "$extract_root" || fail 'release manifest is invalid or incompatible'
   validate_required_release_outputs "$extract_root" || fail 'artifact is missing required built runtime outputs'
   commit=$MANIFEST_COMMIT
+  [[ $commit == "$expected_commit" ]] || fail 'artifact-set directory commit does not match its manifest'
   target="$RELEASES_DIR/$commit"
   [[ ! -e "$target" && ! -L "$target" ]] || fail "release already exists: $commit"
   load_public_environment
@@ -917,7 +963,11 @@ deploy_artifact() {
 
 main() {
   [[ $EUID -eq 0 ]] || fail 'run this script as root'
-  [[ $# -eq 2 ]] || { usage; return 64; }
+  if [[ ${1:-} == --rollback || ${1:-} == --prune ]]; then
+    [[ $# -eq 2 ]] || { usage; return 64; }
+  else
+    [[ $# -eq 1 ]] || { usage; return 64; }
+  fi
   [[ $(realpath -e -- "$0") == /usr/local/sbin/mydsh-deploy-release ]] || fail 'run the root-installed deployment helper'
   acquire_operation_lock
   trap cleanup_operation EXIT
@@ -931,7 +981,7 @@ main() {
   elif [[ $1 == --prune ]]; then
     prune_release "$2"
   else
-    deploy_artifact "$1" "$2"
+    deploy_artifact "$1"
   fi
 }
 
