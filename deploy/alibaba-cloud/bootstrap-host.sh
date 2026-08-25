@@ -8,6 +8,8 @@ readonly CADDY_FINGERPRINT=65760C51EDEA2017CEA2CA15155B6D79CA56EA34
 readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
 DEPLOY_LOCK_FD=''
 TEMP_DIR=''
+CREATED_TEMP_FILE=''
+REGISTERED_TEMP_FILES=()
 
 usage() {
   printf 'Usage: sudo %s <lowercase-dns-hostname>\n' "${0##*/}" >&2
@@ -19,9 +21,62 @@ fail() {
 }
 
 cleanup() {
+  cleanup_registered_temp_files
   if [[ -n "$TEMP_DIR" && "$TEMP_DIR" == /tmp/mydsh-bootstrap.* ]]; then
     rm -rf -- "$TEMP_DIR" || true
   fi
+}
+
+registered_temp_path_is_safe() {
+  local path=$1
+  local parent
+  local name
+  parent=$(dirname -- "$path") || return 1
+  name=${path##*/}
+  [[ $name =~ ^\.mydsh-tmp\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ $(realpath -e -- "$parent") == "$parent" ]] || return 1
+}
+
+unregister_temp_file() {
+  local target=$1
+  local retained=()
+  local path
+  for path in "${REGISTERED_TEMP_FILES[@]}"; do [[ $path == "$target" ]] || retained+=("$path"); done
+  REGISTERED_TEMP_FILES=("${retained[@]}")
+}
+
+discard_registered_temp_file() {
+  local path=$1
+  registered_temp_path_is_safe "$path" || return 1
+  rm -f -- "$path" || return 1
+  unregister_temp_file "$path"
+}
+
+cleanup_registered_temp_files() {
+  local path
+  for path in "${REGISTERED_TEMP_FILES[@]}"; do
+    if registered_temp_path_is_safe "$path"; then rm -f -- "$path" || true; fi
+  done
+  REGISTERED_TEMP_FILES=()
+}
+
+create_registered_temp_file() {
+  local parent=$1
+  local attempt
+  local candidate
+
+  [[ $(realpath -e -- "$parent") == "$parent" ]] || return 1
+  for attempt in {1..20}; do
+    candidate="$parent/.mydsh-tmp.$$.$RANDOM"
+    REGISTERED_TEMP_FILES+=("$candidate")
+    if (umask 077; set -o noclobber; : >"$candidate") 2>/dev/null; then
+      CREATED_TEMP_FILE=$candidate
+      return 0
+    fi
+    unregister_temp_file "$candidate"
+  done
+  CREATED_TEMP_FILE=''
+  return 1
 }
 
 acquire_operation_lock() {
@@ -100,12 +155,14 @@ install_managed_file() {
   if [[ -e "$target" || -L "$target" ]]; then
     validate_existing_managed_file "$target"
   fi
-  temporary=$(mktemp "${target_dir}/.${target##*/}.XXXXXX")
-  install -o root -g root -m "$mode" -- "$source" "$temporary"
+  create_registered_temp_file "$target_dir" || return 1
+  temporary=$CREATED_TEMP_FILE
+  install -o root -g root -m "$mode" -- "$source" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   mv -f -- "$temporary" "$target" || {
-    rm -f -- "$temporary" || true
+    discard_registered_temp_file "$temporary" || true
     return 1
   }
+  unregister_temp_file "$temporary"
 }
 
 write_managed_file() {
@@ -120,14 +177,16 @@ write_managed_file() {
   if [[ -e "$target" || -L "$target" ]]; then
     validate_existing_managed_file "$target"
   fi
-  temporary=$(mktemp "${target_dir}/.${target##*/}.XXXXXX")
-  printf '%s\n' "$MANAGED_MARKER" "$content" >"$temporary"
-  chown root:root "$temporary"
-  chmod "$mode" "$temporary"
+  create_registered_temp_file "$target_dir" || return 1
+  temporary=$CREATED_TEMP_FILE
+  printf '%s\n' "$MANAGED_MARKER" "$content" >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  chown root:root "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  chmod "$mode" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   mv -f -- "$temporary" "$target" || {
-    rm -f -- "$temporary" || true
+    discard_registered_temp_file "$temporary" || true
     return 1
   }
+  unregister_temp_file "$temporary"
 }
 
 install_root_data_file() {
@@ -144,12 +203,14 @@ install_root_data_file() {
     owner=$(stat -c '%U:%G' -- "$target") || fail "cannot read repository key ownership: $target"
     [[ $resolved == "$target" && $owner == root:root ]] || fail "repository key target is not a root-owned canonical file: $target"
   fi
-  temporary=$(mktemp "$(dirname -- "$target")/.${target##*/}.XXXXXX")
-  install -o root -g root -m 0644 -- "$source" "$temporary"
+  create_registered_temp_file "$(dirname -- "$target")" || return 1
+  temporary=$CREATED_TEMP_FILE
+  install -o root -g root -m 0644 -- "$source" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   mv -f -- "$temporary" "$target" || {
-    rm -f -- "$temporary" || true
+    discard_registered_temp_file "$temporary" || true
     return 1
   }
+  unregister_temp_file "$temporary"
 }
 
 key_fingerprints() {
@@ -234,22 +295,28 @@ write_environment_files() {
     validate_existing_managed_file /etc/mydsh/mydsh.env
     chmod 0600 /etc/mydsh/mydsh.env
   else
-    private_tmp=$(mktemp /etc/mydsh/.mydsh.env.XXXXXX)
+    create_registered_temp_file /etc/mydsh || return 1
+    private_tmp=$CREATED_TEMP_FILE
     invite_code=$(openssl rand -hex 16)
     session_secret=$(openssl rand -hex 32)
-    {
+    if ! {
       printf '%s\n' "$MANAGED_MARKER"
       printf 'DSH_HOME=/var/lib/mydsh\n'
       printf 'DSH_INVITE_CODE_SECRET=%s\n' "$invite_code"
       printf 'DSH_INVITE_SESSION_SECRET=%s\n' "$session_secret"
-    } >"$private_tmp"
+    } >"$private_tmp"; then discard_registered_temp_file "$private_tmp" || true; return 1; fi
     unset invite_code session_secret
-    chown root:root "$private_tmp"
-    chmod 0600 "$private_tmp"
+    chown root:root "$private_tmp" || { discard_registered_temp_file "$private_tmp" || true; return 1; }
+    chmod 0600 "$private_tmp" || { discard_registered_temp_file "$private_tmp" || true; return 1; }
     mv -n -- "$private_tmp" /etc/mydsh/mydsh.env || {
-      rm -f -- "$private_tmp" || true
+      discard_registered_temp_file "$private_tmp" || true
       return 1
     }
+    if [[ -e "$private_tmp" || -L "$private_tmp" ]]; then
+      discard_registered_temp_file "$private_tmp" || true
+      return 1
+    fi
+    unregister_temp_file "$private_tmp"
   fi
 }
 
@@ -274,7 +341,8 @@ main() {
   public_host=$1
   [[ ${#public_host} -le 253 && $public_host =~ $HOST_PATTERN ]] || fail 'hostname must be one lowercase DNS name such as dsh.example.com'
   acquire_operation_lock
-  TEMP_DIR=$(mktemp -d /tmp/mydsh-bootstrap.XXXXXX)
+  TEMP_DIR=$(mktemp -d /tmp/mydsh-bootstrap.XXXXXX) || fail 'cannot create bootstrap temporary directory'
+  [[ -n "$TEMP_DIR" && "$TEMP_DIR" == /tmp/mydsh-bootstrap.* && $(realpath -e -- "$TEMP_DIR") == "$TEMP_DIR" ]] || fail 'unsafe bootstrap temporary directory'
   trap cleanup EXIT
 
   apt-get update

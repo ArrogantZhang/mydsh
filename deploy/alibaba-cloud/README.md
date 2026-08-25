@@ -124,19 +124,14 @@ target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
 sudo /usr/local/sbin/mydsh-deploy-release --rollback "$commit"
 ```
 
-Inspect disk usage with `sudo du -sh /opt/mydsh/releases/*` before pruning. Never remove `/opt/mydsh/current` or the selected rollback release. For any other candidate, require a full lowercase commit, resolve it under the release root, and compare it with the active release before removing exactly that directory.
+Inspect disk usage with `sudo du -sh /opt/mydsh/releases/*` before pruning. Never choose the active commit or the release retained for operator-selected rollback. The root helper takes the same deployment lock, requires one full lowercase commit, proves canonical confinement, refuses the active target, and removes only that exact inactive release; retaining the selected rollback remains the operator's responsibility.
 
 ```bash
 set -euo pipefail
 candidate=0123456789abcdef0123456789abcdef01234567
 [[ $candidate =~ ^[0-9a-f]{40}$ ]]
-target=$(sudo realpath -e -- "/opt/mydsh/releases/$candidate")
-[[ ${target%/*} == /opt/mydsh/releases ]]
-[[ ${target##*/} == "$candidate" ]]
-current=$(sudo realpath -e -- /opt/mydsh/current)
-[[ $target != "$current" ]]
 # Confirm that $candidate is not the selected rollback release, then run:
-sudo rm -rf -- "$target"
+sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 ```
 
 ## Rotate authentication secrets

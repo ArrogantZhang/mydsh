@@ -124,19 +124,14 @@ target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
 sudo /usr/local/sbin/mydsh-deploy-release --rollback "$commit"
 ```
 
-清理前先使用 `sudo du -sh /opt/mydsh/releases/*` 检查磁盘占用。绝不能删除 `/opt/mydsh/current` 或选定的回滚 release。对于其他候选目录，必须要求完整的小写 commit，在 release 根目录内解析其真实路径，并在精确删除该目录前与活动 release 比较。
+清理前先使用 `sudo du -sh /opt/mydsh/releases/*` 检查磁盘占用。绝不能选择活动 commit 或为操作员选定回滚保留的 release。root helper 会获取同一个部署锁，要求一个完整的小写 commit，证明其规范化真实路径受限于 release 根目录，拒绝活动目标，并且只删除该精确的非活动 release；保留选定的回滚 release 仍由操作员负责。
 
 ```bash
 set -euo pipefail
 candidate=0123456789abcdef0123456789abcdef01234567
 [[ $candidate =~ ^[0-9a-f]{40}$ ]]
-target=$(sudo realpath -e -- "/opt/mydsh/releases/$candidate")
-[[ ${target%/*} == /opt/mydsh/releases ]]
-[[ ${target##*/} == "$candidate" ]]
-current=$(sudo realpath -e -- /opt/mydsh/current)
-[[ $target != "$current" ]]
 # Confirm that $candidate is not the selected rollback release, then run:
-sudo rm -rf -- "$target"
+sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 ```
 
 ## 轮换认证密钥

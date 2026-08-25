@@ -14,6 +14,9 @@ readonly PRIVATE_ENV=/etc/mydsh/mydsh.env
 DEPLOY_LOCK_FD=''
 STAGING_ROOT=''
 TRUST_ROOT=''
+ACTIVATION_BACKUP=''
+CREATED_TEMP_FILE=''
+REGISTERED_TEMP_FILES=()
 
 usage() {
   printf 'Usage: sudo %s <git-bundle-file> <ref>\n' "${0##*/}" >&2
@@ -74,6 +77,7 @@ cleanup_staging() {
 }
 
 cleanup_operation() {
+  cleanup_registered_temp_files
   cleanup_staging || true
   if [[ -n "$TRUST_ROOT" ]]; then
     case "$TRUST_ROOT" in
@@ -81,6 +85,55 @@ cleanup_operation() {
       *) printf 'mydsh-deploy-release: refusing unsafe trust-root cleanup: %s\n' "$TRUST_ROOT" >&2 ;;
     esac
   fi
+  if [[ -n "$ACTIVATION_BACKUP" ]]; then cleanup_activation_backup "$ACTIVATION_BACKUP" "$(dirname -- "$ACTIVATION_BACKUP")" || true; fi
+}
+
+registered_temp_path_is_safe() {
+  local path=$1
+  local parent
+  local name
+  parent=$(dirname -- "$path") || return 1
+  name=${path##*/}
+  [[ $name =~ ^\.mydsh-tmp\.[0-9]+\.[0-9]+$ ]] || return 1
+  [[ $(realpath -e -- "$parent") == "$parent" ]] || return 1
+}
+
+unregister_temp_file() {
+  local target=$1
+  local retained=()
+  local path
+  for path in "${REGISTERED_TEMP_FILES[@]}"; do [[ $path == "$target" ]] || retained+=("$path"); done
+  REGISTERED_TEMP_FILES=("${retained[@]}")
+}
+
+discard_registered_temp_file() {
+  local path=$1
+  registered_temp_path_is_safe "$path" || return 1
+  rm -f -- "$path" || return 1
+  unregister_temp_file "$path"
+}
+
+cleanup_registered_temp_files() {
+  local path
+  for path in "${REGISTERED_TEMP_FILES[@]}"; do
+    if registered_temp_path_is_safe "$path"; then rm -f -- "$path" || true; fi
+  done
+  REGISTERED_TEMP_FILES=()
+}
+
+create_registered_temp_file() {
+  local parent=$1
+  local attempt
+  local candidate
+  [[ $(realpath -e -- "$parent") == "$parent" ]] || return 1
+  for attempt in {1..20}; do
+    candidate="$parent/.mydsh-tmp.$$.$RANDOM"
+    REGISTERED_TEMP_FILES+=("$candidate")
+    if (umask 077; set -o noclobber; : >"$candidate") 2>/dev/null; then CREATED_TEMP_FILE=$candidate; return 0; fi
+    unregister_temp_file "$candidate"
+  done
+  CREATED_TEMP_FILE=''
+  return 1
 }
 
 validate_release_target() {
@@ -144,12 +197,14 @@ install_managed_file() {
   if [[ -e "$target" || -L "$target" ]]; then
     validate_existing_managed_file "$target" || return 1
   fi
-  temporary=$(mktemp "$(dirname -- "$target")/.${target##*/}.XXXXXX")
-  install -o root -g root -m "$mode" -- "$source" "$temporary" || return 1
+  create_registered_temp_file "$(dirname -- "$target")" || return 1
+  temporary=$CREATED_TEMP_FILE
+  install -o root -g root -m "$mode" -- "$source" "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   mv -f -- "$temporary" "$target" || {
-    rm -f -- "$temporary" || true
+    discard_registered_temp_file "$temporary" || true
     return 1
   }
+  unregister_temp_file "$temporary"
 }
 
 atomic_replace_link() {
@@ -228,18 +283,27 @@ validate_candidate_configs() {
   grep -Fqx "$MANAGED_MARKER" "$unit_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$dropin_candidate" || return 1
   caddy validate --config "$caddy_candidate" --adapter caddyfile || return 1
-  verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX)
-  mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib"
-  install -m 0644 "$unit_candidate" "$verify_root/etc/systemd/system/mydsh.service"
-  install -m 0644 "$dropin_candidate" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf"
-  printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service"
-  touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env"
-  chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js"
+  verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX) || return 1
+  validate_temp_directory "$verify_root" /run mydsh-systemd-verify. || return 1
+  mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib" || { rm -rf -- "$verify_root" || true; return 1; }
+  install -m 0644 "$unit_candidate" "$verify_root/etc/systemd/system/mydsh.service" || { rm -rf -- "$verify_root" || true; return 1; }
+  install -m 0644 "$dropin_candidate" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { rm -rf -- "$verify_root" || true; return 1; }
+  printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service" || { rm -rf -- "$verify_root" || true; return 1; }
+  touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
+  chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" || { rm -rf -- "$verify_root" || true; return 1; }
   if ! systemd-analyze --root="$verify_root" verify --recursive-errors=no mydsh.service caddy.service; then
     rm -rf -- "$verify_root" || true
     return 1
   fi
   rm -rf -- "$verify_root" || return 1
+}
+
+validate_temp_directory() {
+  local path=$1
+  local parent=$2
+  local prefix=$3
+  [[ -n "$path" && "$path" == "$parent/$prefix"* && -d "$path" && ! -L "$path" ]] || return 1
+  [[ $(realpath -e -- "$path") == "$path" ]] || return 1
 }
 
 host_path() {
@@ -251,10 +315,19 @@ host_path() {
 backup_host_configs() {
   local backup=$1
   local host_root=${2:-}
-  install -d -o root -g root -m 0700 "$backup"
+  install -d -o root -g root -m 0700 "$backup" || return 1
   cp -a -- "$(host_path "$host_root" "$CADDY_CONFIG")" "$backup/Caddyfile" || return 1
   cp -a -- "$(host_path "$host_root" "$DSH_UNIT")" "$backup/mydsh.service" || return 1
   cp -a -- "$(host_path "$host_root" "$CADDY_DROPIN")" "$backup/caddy-mydsh.conf" || return 1
+}
+
+cleanup_activation_backup() {
+  local backup=$1
+  local parent=$2
+  validate_temp_directory "$backup" "$parent" mydsh-activation. || return 1
+  rm -rf -- "$backup" || return 1
+  if [[ $ACTIVATION_BACKUP == "$backup" ]]; then ACTIVATION_BACKUP=''; fi
+  return 0
 }
 
 stage_candidate_configs() {
@@ -291,7 +364,7 @@ health_check() {
         fi
       fi
     fi
-    sleep 1
+    sleep 1 || return 1
   done
   return 1
 }
@@ -315,8 +388,9 @@ authenticated_acceptance() (
   local get_status
 
   # shellcheck disable=SC1090 -- bootstrap owns this root-controlled file.
-  source "$PRIVATE_ENV"
-  cookie_jar=$(mktemp /run/mydsh-cookie.XXXXXX)
+  source "$PRIVATE_ENV" || return 1
+  cookie_jar=$(mktemp /run/mydsh-cookie.XXXXXX) || return 1
+  [[ -n "$cookie_jar" && "$cookie_jar" == /run/mydsh-cookie.* && -f "$cookie_jar" && ! -L "$cookie_jar" ]] || return 1
   trap 'rm -f -- "$cookie_jar"' EXIT
   if ! post_status=$(printf 'inviteCode=%s' "$DSH_INVITE_CODE_SECRET" | curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header 'Content-Type: application/x-www-form-urlencoded' --data-binary @- "$base/__invite/login"); then
     return 1
@@ -348,7 +422,7 @@ restore_failed_activation() {
   local restored=0
   local installed_caddy
 
-  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG")
+  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
 
   if restore_host_configs "$backup" "$host_root" && systemctl daemon-reload; then
     if [[ -n "$previous" ]]; then
@@ -371,15 +445,24 @@ activate_transaction() {
   local installed_caddy
 
   validate_candidate_configs "$target" || return 1
-  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG")
-  backup=$(mktemp -d "$backup_parent/mydsh-activation.XXXXXX")
-  backup_host_configs "$backup" "$host_root" || { rm -rf -- "$backup" || true; return 1; }
+  installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
+  backup=$(mktemp -d "$backup_parent/mydsh-activation.XXXXXX") || return 1
+  validate_temp_directory "$backup" "$backup_parent" mydsh-activation. || return 1
+  ACTIVATION_BACKUP=$backup
+  if ! backup_host_configs "$backup" "$host_root"; then
+    if ! cleanup_activation_backup "$backup" "$backup_parent"; then
+      printf 'mydsh-deploy-release: incomplete activation backup remains at %s; remove it manually after inspection\n' "$backup" >&2
+    fi
+    return 1
+  fi
   if stage_candidate_configs "$target" "$host_root" && systemctl daemon-reload; then
     if atomic_replace_link "$current_path" "$target" && systemctl restart mydsh; then
       if health_check "$target"; then
         if caddy validate --config "$installed_caddy" --adapter caddyfile && systemctl reload caddy; then
           if public_acceptance && authenticated_acceptance && systemctl enable mydsh; then
-            rm -rf -- "$backup" || return 1
+            if ! cleanup_activation_backup "$backup" "$backup_parent"; then
+              printf 'mydsh-deploy-release: activation accepted but temporary backup remains at %s; remove it manually after inspection\n' "$backup" >&2
+            fi
             return 0
           fi
         fi
@@ -387,7 +470,7 @@ activate_transaction() {
     fi
   fi
   restore_failed_activation "$previous" "$target" "$backup" "$host_root" "$current_path" || true
-  rm -rf -- "$backup" || true
+  cleanup_activation_backup "$backup" "$backup_parent" || true
   return 1
 }
 
@@ -402,6 +485,25 @@ rollback_to_commit() {
   load_public_environment
   activate_transaction "$target" "$previous" || return 1
   printf 'Rolled back to release %s after public and authenticated acceptance.\n' "$commit"
+}
+
+prune_release() {
+  local commit=$1
+  local releases_root=${2:-$RELEASES_DIR}
+  local current_path=${3:-$CURRENT_LINK}
+  local target
+  local active=''
+
+  [[ $commit =~ ^[0-9a-f]{40}$ ]] || return 1
+  target="$releases_root/$commit"
+  validate_release_target "$target" "$releases_root" || return 1
+  if [[ -e "$current_path" || -L "$current_path" ]]; then
+    [[ -L "$current_path" ]] || return 1
+    active=$(realpath -e -- "$current_path") || return 1
+  fi
+  [[ $target != "$active" ]] || return 1
+  rm -rf -- "$target" || return 1
+  printf 'Pruned inactive release %s.\n' "$commit"
 }
 
 deploy_bundle() {
@@ -424,7 +526,8 @@ deploy_bundle() {
   git check-ref-format --branch "$ref" >/dev/null || git check-ref-format "$ref" >/dev/null || fail 'invalid deployment ref'
   clone_ref=${ref#refs/heads/}
   clone_ref=${clone_ref#refs/tags/}
-  TRUST_ROOT=$(mktemp -d /run/mydsh-bundle.XXXXXX)
+  TRUST_ROOT=$(mktemp -d /run/mydsh-bundle.XXXXXX) || fail 'cannot create trusted bundle directory'
+  validate_temp_directory "$TRUST_ROOT" /run mydsh-bundle. || fail 'unsafe trusted bundle directory'
   trap cleanup_operation EXIT
   trusted_bundle="$TRUST_ROOT/release.bundle"
   trusted_repository="$TRUST_ROOT/repository.git"
@@ -433,7 +536,8 @@ deploy_bundle() {
   git -C "$trusted_repository" bundle verify "$trusted_bundle"
   git -C "$trusted_repository" fetch --quiet "$trusted_bundle" "$ref"
   trusted_commit=$(git -C "$trusted_repository" rev-parse 'FETCH_HEAD^{commit}') || fail 'cannot resolve the trusted bundle ref'
-  STAGING_ROOT=$(mktemp -d /opt/mydsh/releases/.staging.XXXXXX)
+  STAGING_ROOT=$(mktemp -d /opt/mydsh/releases/.staging.XXXXXX) || fail 'cannot create release staging directory'
+  validate_temp_directory "$STAGING_ROOT" /opt/mydsh/releases .staging. || fail 'unsafe release staging directory'
   chown mydsh-build:mydsh-build "$STAGING_ROOT"
   chmod 0700 "$STAGING_ROOT"
   verify_repository="$STAGING_ROOT/verify.git"
@@ -475,8 +579,15 @@ main() {
   [[ $# -eq 2 ]] || { usage; return 64; }
   [[ $(realpath -e -- "$0") == /usr/local/sbin/mydsh-deploy-release ]] || fail 'run the root-installed deployment helper'
   acquire_operation_lock
+  trap cleanup_operation EXIT
   validate_host
-  if [[ $1 == --rollback ]]; then rollback_to_commit "$2"; else deploy_bundle "$1" "$2"; fi
+  if [[ $1 == --rollback ]]; then
+    rollback_to_commit "$2"
+  elif [[ $1 == --prune ]]; then
+    prune_release "$2"
+  else
+    deploy_bundle "$1" "$2"
+  fi
 }
 
 if [[ ${BASH_SOURCE[0]} == "$0" ]]; then

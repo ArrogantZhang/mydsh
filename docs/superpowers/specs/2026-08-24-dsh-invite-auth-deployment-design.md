@@ -6,7 +6,7 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment-design.zh.md)
 
 This design defines a DeepSeek Harness Web deployment for a small group of trusted users: the application runs on an Alibaba Cloud Hong Kong or overseas Ubuntu 22.04/24.04 ECS instance, serves HTTPS on a dedicated subdomain, and requires each visitor to enter one shared invite code. A browser remains authenticated for 30 days after successful verification.
 
-The deployment uses the latest `master` from `deepseek-ai/deepseek-harness` fetched at implementation time and keeps the local extension in isolated commits. Model configuration does not enter source control or deployment automation; an administrator adds Kimi as a custom OpenAI-compatible provider in the Web UI.
+Each deployment uses an explicit reviewed branch or signed tag recorded as `DEPLOY_REF`; unattended upstream updates are excluded. Model configuration does not enter source control or deployment automation; an administrator adds Kimi as a custom OpenAI-compatible provider in the Web UI.
 
 Every authorized visitor shares one DSH instance, its sessions, its workspace, and the service account's permissions. This design applies only to the administrator and fully trusted users; it does not provide multi-tenant isolation.
 
@@ -91,10 +91,13 @@ When DSH is unavailable, Caddy returns `502`, and systemd restores the service a
 - `/opt/mydsh/current` points to the active release.
 - `/var/lib/mydsh` is the persistent `DSH_HOME`, independent of releases.
 - `/srv/mydsh/workspace` is the systemd working directory and default DSH workspace.
+- `/usr/local/sbin/mydsh-deploy-release` is the root-owned deployment, rollback, and pruning control helper; release content never supplies root control flow.
+- `/var/lib/mydsh-build` and `/var/cache/mydsh-build/pnpm` belong to the separate non-login builder identity and cannot expose runtime state or workspace data.
+- `/run/lock/mydsh-deploy.lock` serializes bootstrap, deployment, rollback, and pruning.
 - `/etc/mydsh/public.env` stores the non-secret `DSH_PUBLIC_HOST` for both systemd services.
 - `/etc/mydsh/mydsh.env` stores root-only secrets and the persistent `DSH_HOME` path.
 
-The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. Each release runs `pnpm install --frozen-lockfile` and `pnpm run build`. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as a dedicated, non-login `mydsh` user from `/srv/mydsh/workspace`, so the source tree does not become the default workspace. Caddy reads only the public environment file.
+The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. `mydsh-build` runs clone, frozen dependency installation, lifecycle scripts, tests, build, and config dump under `env -i` with its own HOME, cache, and scratch `DSH_HOME`; it cannot read `/var/lib/mydsh`, `/srv/mydsh/workspace`, or the root-only environment files. The helper compares privileged deployment inputs with a root-only copy of the trusted bundle before root makes the completed release immutable. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as the separate non-login `mydsh` runtime user from `/srv/mydsh/workspace`. Caddy reads only the public environment file.
 
 Caddy listens on ports 80 and 443, obtains and renews certificates automatically, and proxies to `127.0.0.1:3080`. `caddy validate` must pass before configuration reload.
 
@@ -102,7 +105,7 @@ Caddy listens on ports 80 and 443, obtains and renews certificates automatically
 
 The local repository retains the DeepSeek upstream remote and the invite-code extension commits. An upgrade fetches the latest `master` and merges the local commits into a new deployment branch. Because upstream is a developer preview, every upgrade is an explicit release that requires renewed verification.
 
-Deployment places a candidate in a new release directory, runs dependency installation, build, configuration checks, and a local smoke test, then atomically switches the `current` symlink and restarts the systemd service. A failed external acceptance test switches back to the previous symlink and restarts. `DSH_HOME` does not roll back with code; any future upstream release that requires data migration receives a separate backward-compatibility assessment before deployment.
+The root-installed helper validates candidate Caddy and systemd files before activation, backs up the current managed host files, atomically installs the candidate unit, Caddyfile, and Caddy drop-in, reloads systemd, switches `current`, and restarts DSH. It then verifies the active PID belongs to `mydsh`, the link names the candidate, loopback login is ready, public unauthenticated HTML and API responses fail closed, and a real invite-code login reaches the guarded application. Any failure restores the previous link and all three host files, reloads systemd, restarts the previous service, and reloads the previous Caddy configuration; first-deployment failure removes the candidate link, stops DSH, and restores bootstrap configuration. `DSH_HOME` does not roll back with code, so any future data migration requires a separate backward-compatibility assessment.
 
 ## Testing and acceptance
 
@@ -112,7 +115,7 @@ Plugin integration tests use a temporary loopback port from `dsh-host-webserver`
 
 Implementation adds the package README, its Chinese counterpart, and an Agent Note as required by the repository. It runs the focused unit and integration tests, typecheck, build, configuration checks, doc-sync, and `git diff --check`. Because the login page is product-visible behavior, implementation also adds a real Web composition snapshot that requires no model credentials.
 
-Server acceptance must prove that the Caddy configuration is valid, the systemd service is active, port 3080 listens only on loopback, the public certificate is valid, unauthenticated requests cannot reach the home page, API, SSE, or WebSocket, a correct invite code loads DSH, logout invalidates access immediately, reopening the browser within 30 days reuses the cookie, a tampered cookie is rejected, and release rollback preserves `DSH_HOME` data.
+Server acceptance must prove that the candidate and installed Caddy configurations are valid, the candidate systemd unit and drop-in verify, the active MainPID belongs to `mydsh`, `current` names the candidate, and port 3080 listens only on loopback. Bounded public HTTPS checks require unauthenticated HTML to redirect and API traffic to return `401`; the root helper also performs an authenticated login without printing the invite code, cookie, or response headers. Manual acceptance additionally proves the public certificate, SSE and WebSocket denial, logout, 30-day browser reuse, tamper rejection, serialized rollback, and preserved `DSH_HOME` data.
 
 The administrator finally configures Kimi as a custom OpenAI-compatible provider in the Web UI and verifies the model connection with one real conversation. This verification never writes the API key to tests, deployment logs, or the repository.
 

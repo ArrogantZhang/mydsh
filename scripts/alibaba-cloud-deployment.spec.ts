@@ -123,6 +123,8 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('validate_lock_path')
     expect(script).toContain('ensure_managed_directory')
     expect(script).toContain('validate_existing_managed_file')
+    expect(script).toContain('create_registered_temp_file')
+    expect(script).toContain('cleanup_registered_temp_files')
     expect(script).toMatch(/caddy validate --config \/etc\/caddy\/Caddyfile --adapter caddyfile/)
     expect(script).toContain('systemctl enable caddy')
     expect(script).toContain('systemctl restart caddy')
@@ -195,6 +197,11 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('public_acceptance')
     expect(script).toContain('authenticated_acceptance')
     expect(script).toContain('cmp -- "$TRUST_ROOT/$candidate_path"')
+    expect(script).toContain('create_registered_temp_file')
+    expect(script).toContain('cleanup_registered_temp_files')
+    expect(script).toContain('activation accepted but temporary backup remains')
+    expect(script).toContain('[[ $1 == --prune ]]')
+    expect(script).toContain('prune_release')
     expect(script).not.toMatch(/rm -rf -- \/opt\/mydsh\/releases(?:\s|$)/m)
     expect(script).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET[^\n]*(?:>&2|\/dev\/stdout)/)
   })
@@ -282,6 +289,20 @@ if (validate_existing_managed_file "$root/unmanaged"); then exit 92; fi
 `, 'bootstrap-host.sh')
     })
 
+    it('removes registered target-directory temps when atomic rename fails', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+chown() { return 0; }
+chmod() { return 0; }
+mv() { return 1; }
+if write_managed_file "$root/private.env" 0600 'DSH_INVITE_CODE_SECRET=not-a-real-secret'; then exit 90; fi
+if compgen -G "$root/.mydsh-tmp.*" >/dev/null; then exit 91; fi
+if grep -R -F 'not-a-real-secret' "$root" >/dev/null 2>&1; then exit 92; fi
+`, 'bootstrap-host.sh')
+    })
+
     it('refuses a second operation while the shared lock is held', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -364,6 +385,80 @@ if activate_transaction "$candidate" '' "$host" "$root/current" "$root"; then ex
 grep -Fx old "$host/etc/caddy/Caddyfile"
 `)
     })
+
+    it('keeps an accepted activation successful when backup cleanup fails', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'command rm -rf -- "$root"' EXIT
+host="$root/host"
+candidate="$root/candidate"
+previous="$root/${'a'.repeat(40)}"
+mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$candidate/deploy/alibaba-cloud" "$previous"
+for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf'; do
+  name=\${spec%%:*}; path=\${spec#*:}
+  printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"
+  printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/$name"
+done
+validate_candidate_configs() { return 0; }
+validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
+install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
+systemctl() { return 0; }
+caddy() { return 0; }
+health_check() { return 0; }
+public_acceptance() { return 0; }
+authenticated_acceptance() { return 0; }
+rm() { [[ "\${*: -1}" == *mydsh-activation.* ]] && return 1; command rm "$@"; }
+ln -s "$previous" "$root/current"
+activate_transaction "$candidate" "$previous" "$host" "$root/current" "$root" 2>"$root/warning"
+[[ $(readlink "$root/current") == "$candidate" ]]
+grep -Fx new "$host/etc/caddy/Caddyfile"
+grep -F 'activation accepted but temporary backup remains' "$root/warning"
+`)
+    })
+
+    it('fails safely when transaction temp creation fails', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+candidate="$root/candidate"
+mkdir -p "$candidate/deploy/alibaba-cloud"
+for name in Caddyfile mydsh.service caddy-mydsh.conf; do printf '%s\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/$name"; done
+caddy() { return 0; }
+mktemp() { return 1; }
+mkdir() { printf 'touched\n' >>"$root/commands"; return 0; }
+install() { printf 'touched\n' >>"$root/commands"; return 0; }
+if validate_candidate_configs "$candidate"; then exit 90; fi
+[[ ! -e "$root/commands" ]]
+validate_candidate_configs() { return 0; }
+stage_candidate_configs() { printf 'touched\n' >>"$root/commands"; return 0; }
+if activate_transaction "$candidate" '' "$root/host" "$root/current" "$root"; then exit 91; fi
+[[ ! -e "$root/commands" ]]
+`)
+    })
+
+    it('prunes only an inactive exact release under the operation lock', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+active=${'e'.repeat(40)}
+inactive=${'f'.repeat(40)}
+mkdir -p "$root/releases/$active" "$root/releases/$inactive"
+ln -s "$root/releases/$active" "$root/current"
+if prune_release "$active" "$root/releases" "$root/current"; then exit 90; fi
+[[ -d "$root/releases/$active" ]]
+(exec 9>"$root/lock"; flock -n 9; touch "$root/held"; sleep 2) &
+holder=$!
+for attempt in {1..20}; do [[ -e "$root/held" ]] && break; sleep 0.05; done
+if (acquire_operation_lock "$root/lock" "$(id -un):$(id -gn)"; prune_release "$inactive" "$root/releases" "$root/current"); then exit 91; fi
+[[ -d "$root/releases/$inactive" ]]
+wait "$holder"
+(acquire_operation_lock "$root/lock" "$(id -un):$(id -gn)"; prune_release "$inactive" "$root/releases" "$root/current")
+[[ ! -e "$root/releases/$inactive" ]]
+`)
+    })
   })
 
   it('validates and reloads Caddy only after the switched DSH release is healthy', () => {
@@ -407,6 +502,8 @@ grep -Fx old "$host/etc/caddy/Caddyfile"
       expect(readme).toMatch(/selected rollback|选定的回滚/)
       expect(readme).toContain('rm -rf')
       expect(readme).toContain('if [[ \\$status == 0 ]]')
+      expect(readme).toContain('/usr/local/sbin/mydsh-deploy-release --prune "$candidate"')
+      expect(readme).not.toContain('sudo rm -rf -- "$target"')
     }
   })
 
@@ -424,6 +521,22 @@ grep -Fx old "$host/etc/caddy/Caddyfile"
       expect(note).toMatch(/release-contained|release 中的|release 内/)
       expect(note).toMatch(/runtime-user|运行时用户/)
       expect(note).toMatch(/code-only rollback|仅代码回滚/)
+    }
+  })
+
+  it('keeps the deployment design aligned with the trusted control plane', () => {
+    const designRoot = resolve(import.meta.dirname, '../docs/superpowers/specs')
+    for (const name of [
+      '2026-08-24-dsh-invite-auth-deployment-design.md',
+      '2026-08-24-dsh-invite-auth-deployment-design.zh.md',
+    ]) {
+      const design = readFileSync(resolve(designRoot, name), 'utf8')
+      expect(design).toContain('/usr/local/sbin/mydsh-deploy-release')
+      expect(design).toContain('mydsh-build')
+      expect(design).toContain('/run/lock/mydsh-deploy.lock')
+      expect(design).toMatch(/systemd.*Caddy|systemd.*Caddy/)
+      expect(design).toMatch(/public.*authenticated|公开.*认证/)
+      expect(design).not.toMatch(/builds? as `mydsh`|以 `mydsh` 身份.*构建/)
     }
   })
 })

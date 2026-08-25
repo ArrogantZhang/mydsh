@@ -6,7 +6,7 @@
 
 本设计定义一套面向小范围可信用户的 DeepSeek Harness Web 部署：应用运行在阿里云香港或海外 Ubuntu 22.04/24.04 ECS 上，通过独立子域名提供 HTTPS 访问，并要求访问者先输入一个共享邀请码。浏览器通过验证后保持登录 30 天。
 
-部署使用实施时获取的 `deepseek-ai/deepseek-harness` 最新 `master`，将本地扩展保持为独立提交。模型配置不进入源码或部署自动化；管理员在 Web UI 中把 Kimi 添加为自定义 OpenAI 兼容提供方。
+每次部署都使用记录在 `DEPLOY_REF` 中的显式已评审分支或签名 tag；不允许无人值守的上游更新。模型配置不进入源码或部署自动化；管理员在 Web UI 中把 Kimi 添加为自定义 OpenAI 兼容提供方。
 
 所有获准访问者共享同一个 DSH 实例、会话、工作区和服务账号权限。本设计只适用于管理员本人及完全信任的人，不提供多租户隔离。
 
@@ -91,10 +91,13 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/opt/mydsh/current` 指向当前 release。
 - `/var/lib/mydsh` 是持久化 `DSH_HOME`，独立于 release。
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
+- `/usr/local/sbin/mydsh-deploy-release` 是 root 所有的部署、回滚和清理控制 helper；release 内容绝不提供 root 控制流。
+- `/var/lib/mydsh-build` 和 `/var/cache/mydsh-build/pnpm` 属于独立的非登录 builder 身份，无法暴露运行时状态或 workspace 数据。
+- `/run/lock/mydsh-deploy.lock` 将 bootstrap、部署、回滚和清理串行化。
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。每个 release 运行 `pnpm install --frozen-lockfile` 与 `pnpm run build`。systemd 读取 `/etc/mydsh/public.env` 和私密环境文件，然后以不可登录的低权限 `mydsh` 用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}`，因此源码路径不成为默认 workspace。Caddy 只读取公共环境文件。
+服务器使用 Node.js 24 和仓库 `packageManager` 声明的 pnpm 版本。`mydsh-build` 在 `env -i` 下使用自己的 HOME、缓存和临时 `DSH_HOME` 执行 clone、冻结依赖安装、生命周期脚本、测试、构建和配置转储；它无法读取 `/var/lib/mydsh`、`/srv/mydsh/workspace` 或仅 root 可读的环境文件。helper 会将特权部署输入与可信 bundle 的 root-only 副本比较，之后 root 才将完成的 release 设为不可变。systemd 读取 `/etc/mydsh/public.env` 和私密环境文件，然后以独立的非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动 `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}`。Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 
@@ -102,7 +105,7 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 本地仓库保留 DeepSeek 上游 remote 和邀请码扩展提交。升级先获取最新 `master`，再把本地提交合并到新的部署分支。上游处于 developer preview，因此每次升级都视为需要重新验证的显式发布。
 
-部署把候选版本放入新的 release 目录，完成依赖安装、构建、配置检查和本机 smoke test 后，原子切换 `current` 符号链接并重启 systemd 服务。外网验收失败时切回上一条符号链接并重启。`DSH_HOME` 不随代码回滚；任何未来需要数据迁移的上游版本必须在发布前单独评估其向后兼容性。
+root 安装的 helper 会在激活前验证候选 Caddy 和 systemd 文件，备份当前受管理的宿主文件，原子安装候选 unit、Caddyfile 和 Caddy drop-in，重新加载 systemd，切换 `current` 并重启 DSH。随后它会验证活动 PID 属于 `mydsh`、符号链接指向候选 release、回环登录已就绪、公开未认证 HTML 和 API 响应保持失败关闭，并且真实邀请码登录能够进入受保护应用。任何失败都会恢复之前的符号链接和全部 3 个宿主文件，重新加载 systemd，重启之前的服务并重新加载之前的 Caddy 配置；首次部署失败会移除候选链接、停止 DSH 并恢复 bootstrap 配置。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
 
 ## 测试与验收
 
@@ -112,7 +115,7 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 实现按仓库规则增加对应包 README、中文配对文档与 Agent Note，并运行相关单元/集成测试、类型检查、构建、配置检查、文档同步检查和 `git diff --check`。登录页面属于产品可见行为，因此增加一个无需模型密钥的真实 Web 组合快照。
 
-服务器验收必须证明：Caddy 配置有效；systemd 服务处于 active；3080 仅监听回环地址；公网证书有效；未登录请求无法访问首页、API、SSE 或 WebSocket；正确邀请码可加载 DSH；退出后立即失效；重启浏览器后仍可在 30 天内复用 Cookie；篡改 Cookie 被拒绝；release 回滚不丢失 `DSH_HOME` 数据。
+服务器验收必须证明候选和已安装 Caddy 配置有效、候选 systemd unit 和 drop-in 通过验证、活动 MainPID 属于 `mydsh`、`current` 指向候选 release，并且 3080 仅监听回环地址。有界的公开 HTTPS 检查要求未认证 HTML 重定向且 API 流量返回 `401`；root helper 还会执行认证登录，且不打印邀请码、Cookie 或响应头。手动验收还会证明公网证书、SSE 和 WebSocket 拒绝、退出登录、30 天浏览器复用、篡改拒绝、串行化回滚以及 `DSH_HOME` 数据保留。
 
 管理员最后在 Web UI 中配置 Kimi 自定义 OpenAI 兼容提供方，并以一次真实对话验证模型连接。该验证不把 API key 写入测试、部署日志或仓库。
 
