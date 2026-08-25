@@ -481,7 +481,7 @@ main() {
   trap cleanup EXIT
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring git gnupg gzip iproute2 openssl python3 tar
+  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring gnupg gzip iproute2 openssl python3 tar
   create_accounts_and_directories
   configure_package_repositories
   install_managed_file "$SCRIPT_DIR/Caddyfile" /etc/caddy/Caddyfile 0644

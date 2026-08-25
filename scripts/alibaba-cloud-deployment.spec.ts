@@ -136,7 +136,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('validate_active_managed_state')
     expect(script).toContain('validate_existing_managed_file "$host_root/etc/mydsh/mydsh.env" 600')
     expect(script).toContain('validate_existing_managed_file "$host_root/usr/local/sbin/mydsh-deploy-release" 755')
-    expect(script).toMatch(/apt-get install -y[^\n]*\bgit\b/)
+    expect(script).not.toMatch(/apt-get install -y[^\n]*\bgit\b/)
     expect(script).toContain('create_registered_temp_file')
     expect(script).toContain('cleanup_registered_temp_files')
     expect(script).toMatch(/caddy validate --config \/etc\/caddy\/Caddyfile --adapter caddyfile/)
@@ -184,10 +184,13 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('head -c "$((limit + 1))"')
     expect(script).toContain('validate_extraction_space')
     expect(script).toContain('validate_upload_space')
+    expect(script).toContain('UPLOAD_METADATA_BYTES')
     expect(script).toContain('validate_managed_host_state')
     expect(script).toContain('validate_existing_managed_file "$(host_path "$host_root" "$PRIVATE_ENV")" 600')
     expect(script).toContain('validate_existing_managed_file "$(host_path "$host_root" "$ROOT_HELPER")" 755')
     expect(script).toContain('validate_release_manifest')
+    expect(script).toContain('validate_manifest_ref')
+    expect(script).not.toMatch(/command -v git|git check-ref-format/)
     expect(script).toContain('validate_candidate_unit_contract')
     expect(script).toContain('cmp -- "$asset_root/Caddyfile" "$installed_caddy"')
     expect(script).toContain('cmp -- "$asset_root/mydsh.service" "$installed_unit"')
@@ -264,6 +267,8 @@ describe('Alibaba Cloud deployment assets', () => {
     const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('TRUST_ROOT=$(mktemp'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('copy_bounded_upload'))
+    expect(deploy).toContain('validate_upload_space "$UPLOADS_DIR"')
+    expect(deploy).not.toContain('validate_upload_space "$UPLOADS_DIR" "$compressed_bytes"')
     expect(deploy.indexOf('validate_archive_members')).toBeLessThan(deploy.indexOf('tar -xzf'))
     expect(deploy.indexOf('validate_candidate_configs')).toBeLessThan(deploy.indexOf('publish_extracted_release'))
   })
@@ -498,7 +503,7 @@ if validate_extraction_space "$root" 1024 1024 1024; then exit 94; fi
 `)
     })
 
-    it('checks persistent upload space before creating a private copy', () => {
+    it('reserves worst-case persistent upload space before any copy', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
@@ -506,12 +511,18 @@ trap 'rm -rf -- "$root"' EXIT
 mkdir "$root/var" "$root/opt"
 df() {
   if [[ "\${*: -1}" == "$root/var" ]]; then
-    printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100 99 1 99%% /var\n'
+    printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 4096 1025 3071 26%% /var\n'
   else
     printf 'Filesystem 1-blocks Used Available Use%% Mounted on\nproof 100000 1 99999 1%% /opt\n'
   fi
 }
-if validate_upload_space "$root/var" 1024 1024; then exit 90; fi
+printf small >"$root/source"
+copy_bounded_upload() { touch "$root/copied"; }
+if validate_upload_space "$root/var" 1024 1024 1024; then
+  truncate -s 1024 "$root/source"
+  copy_bounded_upload "$root/source" "$root/copied" 1024
+fi
+[[ ! -e "$root/copied" ]]
 [[ -z $(find "$root/var" -mindepth 1 -print -quit) ]]
 validate_extraction_space "$root/opt" 1024 1024 1024
 `)
@@ -533,7 +544,8 @@ git -C "$root/repo" tag reviewed
 branch_commit=$(resolve_named_ref_commit refs/heads/reviewed "$root/repo")
 tag_commit=$(resolve_named_ref_commit refs/tags/reviewed "$root/repo")
 [[ $branch_commit =~ ^[0-9a-f]{40}$ && $tag_commit == "$branch_commit" ]]
-for invalid in reviewed HEAD refs/tags/foo..bar 'refs/heads/@{bad}'; do
+invalid_refs=(reviewed HEAD refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?' 'refs/tags/back\\slash')
+for invalid in "\${invalid_refs[@]}"; do
   if resolve_named_ref_commit "$invalid" "$root/repo" >/dev/null 2>&1; then exit 90; fi
 done
 `, 'package-release.sh')
@@ -693,7 +705,32 @@ touch "$release/apps/web/dist/index.html"
 for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do touch "$release/deploy/alibaba-cloud/$name"; done
 printf 'format=1\ncommit=%s\nref=refs/tags/reviewed\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=%s\n' "${'d'.repeat(40)}" "$NODE_IMAGE_DIGEST" >"$release/.mydsh-release-manifest"
 validate_release_manifest "$release"
-for invalid_ref in reviewed refs/tags/foo..bar 'refs/heads/@{bad}'; do
+validate_manifest_ref refs/heads/release/v1
+validate_manifest_ref refs/tags/release-1.2.3
+invalid_refs=(
+  reviewed
+  refs/tags/foo..bar
+  'refs/heads/@{bad}'
+  refs/heads/.hidden
+  refs/tags/release.lock
+  refs/heads/trailing.
+  refs/heads//double
+  refs/heads/trailing/
+  'refs/heads/has space'
+  'refs/heads/til~de'
+  'refs/heads/caret^'
+  'refs/heads/co:lon'
+  'refs/heads/what?'
+  'refs/heads/star*'
+  'refs/heads/open['
+  'refs/heads/close]'
+  'refs/tags/back\\slash'
+  $'refs/heads/control\\001'
+)
+for invalid_ref in "\${invalid_refs[@]}"; do
+  if validate_manifest_ref "$invalid_ref"; then exit 88; fi
+done
+for invalid_ref in reviewed refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?'; do
   sed -i "s#^ref=.*#ref=$invalid_ref#" "$release/.mydsh-release-manifest"
   if validate_release_manifest "$release"; then exit 89; fi
 done

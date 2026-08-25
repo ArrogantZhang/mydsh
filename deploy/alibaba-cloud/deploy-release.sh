@@ -16,6 +16,7 @@ readonly DEPLOY_STATE_ROOT=/var/lib/mydsh-deploy
 readonly UPLOADS_DIR=/var/lib/mydsh-deploy/uploads
 readonly ACTIVATION_DIR=/var/lib/mydsh-deploy/activation
 readonly MAX_COMPRESSED_BYTES=1073741824
+readonly UPLOAD_METADATA_BYTES=1048576
 readonly MAX_ARCHIVE_MEMBERS=500000
 readonly MAX_MEMBER_BYTES=536870912
 readonly MAX_EXPANDED_BYTES=8589934592
@@ -191,7 +192,7 @@ validate_existing_managed_file() {
 
 require_host_tools() {
   local tool
-  for tool in awk bash caddy cmp curl df flock getent git head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
+  for tool in awk bash caddy cmp curl df flock getent head install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
   done
 }
@@ -517,12 +518,31 @@ validate_extraction_space() {
 
 validate_upload_space() {
   local path=$1
-  local compressed=$2
+  local maximum=${2:-$MAX_COMPRESSED_BYTES}
   local reserve=${3:-1073741824}
+  local overhead=${4:-$UPLOAD_METADATA_BYTES}
   local available
   available=$(df -PB1 "$path" | awk 'NR == 2 { print $4 }') || return 1
   [[ $available =~ ^[0-9]+$ ]] || return 1
-  (( available >= compressed + reserve ))
+  (( available >= maximum + reserve + overhead ))
+}
+
+validate_manifest_ref() {
+  local ref=$1
+  local remainder
+  local component
+  local components=()
+  case "$ref" in
+    refs/heads/*) remainder=${ref#refs/heads/} ;;
+    refs/tags/*) remainder=${ref#refs/tags/} ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$remainder" && $ref =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ $remainder != /* && $remainder != */ && $remainder != *..* && $remainder != *//* && $remainder != *'@{'* ]] || return 1
+  IFS=/ read -r -a components <<<"$remainder"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && $component != .* && $component != *. && $component != *.lock ]] || return 1
+  done
 }
 
 validate_release_manifest() {
@@ -544,8 +564,7 @@ validate_release_manifest() {
   [[ ${fields[format]:-} == "$RELEASE_FORMAT" ]] || return 1
   [[ ${fields[helper_journal_format]:-} == "$HELPER_JOURNAL_FORMAT" ]] || return 1
   [[ ${fields[commit]:-} =~ ^[0-9a-f]{40}$ ]] || return 1
-  [[ ${fields[ref]:-} =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]] || return 1
-  git check-ref-format "${fields[ref]}" >/dev/null || return 1
+  validate_manifest_ref "${fields[ref]:-}" || return 1
   [[ ${fields[platform]:-} == linux-amd64 && ${fields[node_major]:-} == 24 && ${fields[pnpm_version]:-} == 11.7.0 ]] || return 1
   [[ ${fields[node_image_digest]:-} == "$NODE_IMAGE_DIGEST" ]] || return 1
   MANIFEST_COMMIT=${fields[commit]}
@@ -947,7 +966,6 @@ deploy_artifact() {
   local artifact_path
   local checksum_path
   local commit
-  local compressed_bytes
   local expected_commit
   local expanded_bytes
   local extract_root
@@ -968,9 +986,8 @@ deploy_artifact() {
   [[ -f "$artifact_path" && ! -L "$artifact_path" && -r "$artifact_path" ]] || fail 'artifact set is missing its readable regular artifact'
   [[ -f "$checksum_path" && ! -L "$checksum_path" && -r "$checksum_path" ]] || fail 'artifact set is missing its readable regular checksum sidecar'
   validate_compressed_size "$artifact_path" || fail 'compressed artifact exceeds the 1 GiB limit'
-  compressed_bytes=$(stat -c %s "$artifact_path") || fail 'cannot read compressed artifact size'
   [[ $(stat -c %s "$checksum_path") -le 4096 ]] || fail 'checksum sidecar is too large'
-  validate_upload_space "$UPLOADS_DIR" "$compressed_bytes" || fail 'insufficient persistent upload filesystem space for artifact copy and 1 GiB reserve'
+  validate_upload_space "$UPLOADS_DIR" || fail 'insufficient persistent upload space for the 1 GiB artifact cap, 1 GiB reserve, and 1 MiB checksum and metadata overhead'
   previous=$(current_release) || fail 'current release link is unsafe'
   TRUST_ROOT=$(mktemp -d "$UPLOADS_DIR/.upload.XXXXXX") || fail 'cannot create persistent root-private artifact directory'
   validate_temp_directory "$TRUST_ROOT" "$UPLOADS_DIR" .upload. || fail 'unsafe root-private artifact directory'

@@ -8,7 +8,7 @@
 
 使用一台全新的 Linux amd64 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。bootstrap 会在获取锁或执行任何网络和文件系统变更前检查 `dpkg --print-architecture`，并拒绝 `amd64` 之外的架构。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
 
-宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。打包需要开发机安装 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
+宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy；它不安装 Git。打包需要开发机安装 Git 和 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
 下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的具名 ref 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标和已评审 ref；如果条件允许，优先使用已验证的签名 tag。`DEPLOY_REF` 必须是已存在且完整的 `refs/heads/*` 或 `refs/tags/*` 名称；脚本会拒绝简写和有歧义的 revision。
 
@@ -49,7 +49,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳压缩 artifact 和 1 GiB 预留空间，再把两个文件复制到持久的 root-private 新 inode。它验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和另一份 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、语法有效且以 `refs/heads/` 或 `refs/tags/` 开头的完整 ref 标签、平台、运行时输出和 overlay。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
+通过 root 安装的稳定 helper 部署预构建 artifact set。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳完整的 1 GiB 压缩文件上限、1 GiB 预留空间，以及 1 MiB checksum 与 metadata 开销，再把两个文件复制到持久的 root-private 新 inode。该固定最坏情况预算不信任可变上传文件的当前大小。helper 验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接，以及无法容纳展开大小、压缩大小和另一份 1 GiB 预留空间的 release 文件系统。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、平台、运行时输出和 overlay。manifest ref 使用 `refs/heads/` 或 `refs/tags/` 下的严格常用子集；不安装 Git 的服务器会拒绝空格、控制字符、生僻标点、点开头的 component、`.lock` 后缀和有歧义的分隔符。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"

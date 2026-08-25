@@ -924,7 +924,7 @@ EnvironmentFile=/etc/mydsh/public.env
 
 - [ ] **步骤 2：实现幂等 Host bootstrap**
 
-`bootstrap-host.sh` 正好接受一个小写 DNS hostname，拒绝非 root 执行，并在加锁、文件系统变更或网络访问前检查 `dpkg --print-architecture` 恰好为 `amd64`。它安装 NodeSource Node 24 运行时和官方 Caddy stable apt 仓库，创建不可登录的 `mydsh` 运行时用户和归属正确的数据目录，写入 `/etc/mydsh/public.env`，并仅在文件不存在时创建 `/etc/mydsh/mydsh.env`。它不安装 builder 账户、pnpm、源码 checkout 或构建缓存。release 存在后只允许逐字节一致的无操作；控制平面或 hostname 变更需要单独维护。
+`bootstrap-host.sh` 正好接受一个小写 DNS hostname，拒绝非 root 执行，并在加锁、文件系统变更或网络访问前检查 `dpkg --print-architecture` 恰好为 `amd64`。它安装 NodeSource Node 24 运行时和官方 Caddy stable apt 仓库，创建不可登录的 `mydsh` 运行时用户和归属正确的数据目录，写入 `/etc/mydsh/public.env`，并仅在文件不存在时创建 `/etc/mydsh/mydsh.env`。它不安装 Git、builder 账户、pnpm、源码 checkout 或构建缓存。release 存在后只允许逐字节一致的无操作；控制平面或 hostname 变更需要单独维护。
 
 安装单元文件与 Caddyfile，运行 `systemctl daemon-reload`，加载公共环境后验证 Caddy，启用 Caddy，并在 release 存在前保持 `mydsh.service` 未启用。trap 只能移除本次运行创建的临时文件。
 
@@ -934,7 +934,7 @@ EnvironmentFile=/etc/mydsh/public.env
 
 `package-release.sh` 接受具名的已评审 Git ref 和输出目录，验证当前运行脚本来自该 ref，并在 Docker 启动前创建可信 Git 解压目录。它固定精确的 Node 24 Bookworm 镜像 digest 和 pnpm 11.7.0 integrity，限制 CPU、内存、进程数和运行时间，并以全新状态执行冻结安装、invite-auth 测试、构建和配置转储；网络与磁盘使用量不受限。Docker 只挂载私有源码副本，绝不挂载调用者输出目录。容器退出后，宿主拒绝 unit、Caddyfile、drop-in 或 overlay 的任何变更，生成 manifest 与 SHA-256 sidecar，再通过一次原子重命名把完整 artifact-set 目录发布到 `$OUTPUT_DIR/mydsh-release-$commit/`。
 
-`deploy-release.sh` 只接受原子发布、以 commit 命名的 artifact-set 目录，并要求其中恰好只有 archive 与 sidecar。在共享锁下，它把两者复制到持久的 root-private 新 inode，验证 SHA-256，执行文档规定的压缩大小、member 数量、单个 member、展开大小和可用空间限制，拒绝不安全 archive 条目，并验证 manifest、镜像 digest、helper journal 兼容版本、已构建 CLI、依赖和 overlay。候选 systemd unit、Caddyfile 和 drop-in 必须与已安装、受管理的控制平面逐字节相同。helper 只发布并激活代码；它绝不会运行候选命令，也不会更新稳定 helper、unit 或 Caddy 文件。
+`deploy-release.sh` 只接受原子发布、以 commit 命名的 artifact-set 目录，并要求其中恰好只有 archive 与 sidecar。在共享锁下，它会在复制任一文件前预留压缩上限与固定上传余量，把两者复制到持久的 root-private 新 inode，验证 SHA-256，执行文档规定的压缩大小、member 数量、单个 member、展开大小和可用空间限制，拒绝不安全 archive 条目，并验证 manifest、镜像 digest、helper journal 兼容版本、已构建 CLI、依赖和 overlay。纯 Bash ref 验证器接受 packager 生成的常用子集，无需在生产环境安装或运行 Git。候选 systemd unit、Caddyfile 和 drop-in 必须与已安装、受管理的控制平面逐字节相同。helper 只发布并激活代码；它绝不会运行候选命令，也不会更新稳定 helper、unit 或 Caddy 文件。
 
 实现由 `deploy/alibaba-cloud/deploy-release.sh` 负责；它将部署、回滚、恢复和清理串行化，在变更前记录之前的链接和启用状态，原子切换符号链接，验证运行时身份、回环 listener、公开拒绝和认证访问，并持久提交或恢复之前的代码状态。正常 release 激活绝不会重新加载冻结的 Caddy 或 systemd 配置。永远不要自动删除旧 release，也不要打印任一秘密。
 
