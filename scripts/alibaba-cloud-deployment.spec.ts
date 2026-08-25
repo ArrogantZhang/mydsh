@@ -1,5 +1,6 @@
 /** Contract tests for the single-host Alibaba Cloud deployment assets. */
 
+import { spawnSync } from 'node:child_process'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
@@ -8,6 +9,28 @@ const deploymentRoot = resolve(import.meta.dirname, '../deploy/alibaba-cloud')
 
 function asset(name: string): string {
   return readFileSync(resolve(deploymentRoot, name), 'utf8')
+}
+
+function wslPath(path: string): string {
+  const match = /^([A-Za-z]):[\\/](.*)$/.exec(path)
+  if (match === null) throw new Error(`cannot project Windows path into WSL: ${path}`)
+  return `/mnt/${match[1]!.toLowerCase()}/${match[2]!.replaceAll('\\', '/')}`
+}
+
+function runBash(body: string): ReturnType<typeof spawnSync> {
+  const deploymentScript = resolve(deploymentRoot, 'deploy-release.sh')
+  const command = process.platform === 'win32' ? 'wsl.exe' : 'bash'
+  const shellPath = process.platform === 'win32' ? wslPath(deploymentScript) : deploymentScript
+  const sourceCommand = `source '${shellPath.replaceAll("'", "'\\''")}'\n${body}`
+  const args = process.platform === 'win32' ? ['bash', '-s'] : ['-s']
+  return spawnSync(command, args, { encoding: 'utf8', input: sourceCommand })
+}
+
+function expectBashSuccess(body: string): void {
+  const result = runBash(body)
+  const stderr = typeof result.stderr === 'string' ? result.stderr : result.stderr?.toString()
+  expect(result.error).toBeUndefined()
+  expect(result.status, stderr).toBe(0)
 }
 
 describe('Alibaba Cloud deployment assets', () => {
@@ -88,7 +111,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('DSH_HOME=/var/lib/mydsh')
     expect(script).toContain('DSH_INVITE_CODE_SECRET=')
     expect(script).toContain('DSH_INVITE_SESSION_SECRET=')
-    expect(script).toMatch(/install -d -o root -g root -m 0755 \/opt\/mydsh\/releases \/etc\/mydsh/)
+    expect(script).toMatch(/install -d -o root -g root -m 0755 \/opt\/mydsh \/opt\/mydsh\/releases \/etc\/mydsh/)
     expect(script).toContain('install -d -o mydsh -g mydsh -m 0700 /var/lib/mydsh')
     expect(script).toContain('install -d -o mydsh -g mydsh -m 0750 /srv/mydsh/workspace /var/cache/mydsh-pnpm')
     expect(script).toMatch(/caddy validate --config \/etc\/caddy\/Caddyfile --adapter caddyfile/)
@@ -112,9 +135,9 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('git bundle verify')
     expect(script).toContain('git check-ref-format --branch')
     expect(script).toContain('/opt/mydsh/releases/.staging.XXXXXX')
-    expect(script).toContain('STAGED_BUNDLE="$STAGING_ROOT/release.bundle"')
-    expect(script).toMatch(/install .*"\$BUNDLE_PATH" "\$STAGED_BUNDLE"/)
-    expect(script).toMatch(/runuser -u mydsh -- git clone --branch .* --single-branch "\$STAGED_BUNDLE"/)
+    expect(script).toContain('staged_bundle="$STAGING_ROOT/release.bundle"')
+    expect(script).toMatch(/install .*"\$bundle_path" "\$staged_bundle"/)
+    expect(script).toMatch(/runuser -u mydsh -- git clone --branch .* --single-branch "\$staged_bundle"/)
     expect(script).toMatch(/git .*rev-parse HEAD/)
     expect(script).toContain('pnpm install --frozen-lockfile --store-dir /var/cache/mydsh-pnpm')
     expect(script).toMatch(/vitest run packages\/host\/invite-auth\/tests/)
@@ -123,14 +146,114 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('chown -R root:root')
     expect(script).toContain('chmod -R go-w')
     expect(script).toContain('caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile')
-    expect(script).toMatch(/ln -s .*\/opt\/mydsh\/current\.next/)
-    expect(script).toContain('mv -Tf /opt/mydsh/current.next /opt/mydsh/current')
+    expect(script).toContain('local next_path="${current_path}.next"')
+    expect(script).toContain('ln -s -- "$target" "$next_path"')
+    expect(script).toContain('mv -Tf -- "$next_path" "$current_path"')
     expect(script).toMatch(/for .* in \{1\.\.30\}/)
     expect(script).toContain('http://127.0.0.1:3080/__invite/login')
     expect(script).toMatch(/if health_check; then/)
-    expect(script).toMatch(/rollback[\s\S]*systemctl restart mydsh/)
+    expect(script).toMatch(/recover_activation[\s\S]*systemctl restart mydsh/)
     expect(script).toContain('systemctl reload caddy')
+    expect(script).toContain('/etc/systemd/system/caddy.service.d/mydsh.conf')
+    expect(script).toContain('mydsh_uid=$(id -u mydsh)')
+    expect(script).toContain('[[ $mydsh_uid != 0 ]]')
+    expect(script).toContain('getent passwd mydsh')
+    expect(script).toContain('nologin')
+    expect(script).toContain('if [[ ${BASH_SOURCE[0]} == "$0" ]]')
     expect(script).not.toMatch(/rm -rf -- \/opt\/mydsh\/releases(?:\s|$)/m)
     expect(script).not.toMatch(/(?:echo|printf)[^\n]*DSH_INVITE_(?:CODE|SESSION)_SECRET/)
+  })
+
+  it('atomically replaces the current link with an adjacent next link', () => {
+    expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+old="$root/${'a'.repeat(40)}"
+new="$root/${'b'.repeat(40)}"
+mkdir "$old" "$new"
+ln -s "$old" "$root/current"
+atomic_replace_link "$root/current" "$new"
+[[ $(readlink "$root/current") == "$new" ]]
+[[ ! -e "$root/current.next" && ! -L "$root/current.next" ]]
+`)
+  })
+
+  it('refuses a non-symlink next path without changing current', () => {
+    expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+old="$root/${'a'.repeat(40)}"
+new="$root/${'b'.repeat(40)}"
+mkdir "$old" "$new" "$root/current.next"
+ln -s "$old" "$root/current"
+if atomic_replace_link "$root/current" "$new"; then exit 90; fi
+[[ $(readlink "$root/current") == "$old" ]]
+[[ -d "$root/current.next" ]]
+`)
+  })
+
+  it('leaves current unchanged and cleans next when link creation fails', () => {
+    expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+old="$root/${'a'.repeat(40)}"
+new="$root/${'b'.repeat(40)}"
+mkdir "$old" "$new"
+ln -s "$old" "$root/current"
+ln() { return 42; }
+if atomic_replace_link "$root/current" "$new"; then exit 90; fi
+[[ $(readlink "$root/current") == "$old" ]]
+[[ ! -e "$root/current.next" && ! -L "$root/current.next" ]]
+`)
+  })
+
+  it('rejects a commit directory outside the canonical releases root', () => {
+    expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+commit=${'c'.repeat(40)}
+mkdir -p "$root/releases/$commit" "$root/outside/$commit"
+validate_release_target "$root/releases/$commit" "$root/releases"
+if validate_release_target "$root/outside/$commit" "$root/releases"; then exit 90; fi
+`)
+  })
+
+  it('activates Caddy only after the switched DSH release is healthy', () => {
+    const script = asset('deploy-release.sh')
+    const start = script.indexOf('activate_release() {')
+    const end = script.indexOf('\nrollback_to_commit()', start)
+    const activation = script.slice(start, end)
+
+    expect(start).toBeGreaterThanOrEqual(0)
+    expect(end).toBeGreaterThan(start)
+    expect(activation.indexOf('atomic_replace_link "$CURRENT_LINK" "$target"')).toBeLessThan(activation.indexOf('systemctl restart mydsh'))
+    expect(activation.indexOf('systemctl restart mydsh')).toBeLessThan(activation.indexOf('health_check'))
+    expect(activation.indexOf('health_check')).toBeLessThan(activation.indexOf('caddy validate'))
+    expect(activation.indexOf('caddy validate')).toBeLessThan(activation.indexOf('systemctl reload caddy'))
+    expect(activation).toMatch(/if caddy validate[\s\S]*if systemctl reload caddy[\s\S]*recover_activation/)
+  })
+
+  it('documents complete acceptance and a confined rollback command', () => {
+    for (const name of ['README.md', 'README.zh.md']) {
+      const readme = asset(name)
+      expect(readme).toContain('home_unauth_status')
+      expect(readme).toContain('[[ $home_unauth_status == 303 ]]')
+      expect(readme).toContain('/api/events.mux')
+      expect(readme).toContain('[[ $api_unauth_status == 401 ]]')
+      expect(readme).toContain('cookie_expiry')
+      expect(readme).toContain('tampered_jar')
+      expect(readme).toContain('[[ $tampered_status == 303 ]]')
+      expect(readme).toContain('/__invite/logout')
+      expect(readme).toContain('[[ $after_logout_status == 303 ]]')
+      expect(readme).toContain('[[ $commit =~ ^[0-9a-f]{40}$ ]]')
+      expect(readme).toContain('target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")')
+      expect(readme).toContain('[[ ${target%/*} == /opt/mydsh/releases ]]')
+      expect(readme).toContain('[[ ${target##*/} == "$commit" ]]')
+      expect(readme).toContain('deploy-release.sh --rollback "$commit"')
+    }
   })
 })

@@ -41,7 +41,7 @@ The script creates the `mydsh` system account, persistent and release directorie
 
 ## Deploy the release
 
-Deploy the exact branch carried by the bundle. The script verifies the bundle, installs frozen dependencies as `mydsh`, runs the invite-auth tests, builds the repository, dumps the composed configuration, publishes a commit-named immutable directory, switches `/opt/mydsh/current` atomically, and accepts the release only after a bounded local health check.
+Deploy the exact branch carried by the bundle. The script verifies the bundle, installs frozen dependencies as `mydsh`, runs the invite-auth tests, builds the repository, dumps the composed configuration, publishes a commit-named immutable directory, switches `/opt/mydsh/current` atomically, restarts DSH, waits for a bounded local health check, then validates and reloads Caddy. Failure in any activation step restores the previous release.
 
 ```bash
 sudo bash ./deploy-release.sh ./mydsh.bundle feat/invite-auth-deployment
@@ -66,7 +66,7 @@ An administrator may retrieve the initial invite code directly over SSH. Run thi
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. The following server-side smoke test exercises the HTTPS proxy, stores the cookie only in a temporary file, suppresses response bodies, headers, and cookie values, and requires login `303` followed by authenticated home-page `200`.
+Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. Close every browser window, reopen the site, and confirm the 30-day cookie still authenticates the browser; then log out and confirm the login page returns. The following server-side smoke test exercises the same acceptance path without printing secrets, response bodies, headers, or cookie values: unauthenticated HTML receives `303`, unauthenticated API traffic receives `401`, login receives `303`, a new client process reuses a cookie whose expiry is at least 29 days away, tampering is rejected, and logout denies access again.
 
 ```bash
 sudo bash -c '
@@ -74,13 +74,28 @@ set -euo pipefail
 source /etc/mydsh/public.env
 source /etc/mydsh/mydsh.env
 cookie_jar=$(mktemp)
-trap '\''rm -f -- "$cookie_jar"'\'' EXIT
+tampered_jar=$(mktemp)
+trap '\''rm -f -- "$cookie_jar" "$tampered_jar"'\'' EXIT
 base="https://$DSH_PUBLIC_HOST"
 resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
-post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --fail-with-body --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
+home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
+[[ $home_unauth_status == 303 ]]
+api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
+[[ $api_unauth_status == 401 ]]
+post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
 [[ $post_status == 303 ]]
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
+cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
+[[ $cookie_expiry =~ ^[0-9]+$ ]]
+(( cookie_expiry >= $(date +%s) + 2505600 ))
+awk -F "\t" '\''BEGIN { OFS="\t" } NF == 7 { $7=$7 "x" } { print }'\'' "$cookie_jar" >"$tampered_jar"
+tampered_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$tampered_jar" --header "Accept: text/html" "$base/")
+[[ $tampered_status == 303 ]]
+logout_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" --cookie-jar "$cookie_jar" --header "Origin: $base" --data "" "$base/__invite/logout")
+[[ $logout_status == 303 ]]
+after_logout_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" --header "Accept: text/html" "$base/")
+[[ $after_logout_status == 303 ]]
 printf "Authenticated smoke passed.\n"
 '
 ```
@@ -95,18 +110,16 @@ Keep model keys in the DSH credential store. Never add them to this directory, a
 
 Create a new bundle from a reviewed deployment branch, upload it beside the five assets, and run `deploy-release.sh` with that bundle and its exact branch. Each full commit receives one directory under `/opt/mydsh/releases`; the script refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
 
-The deploy script rolls back automatically when restart or health acceptance fails. For an operator-directed rollback, first choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`, then atomically replace the symlink and verify health.
+The deploy script rolls back automatically when restart, health acceptance, Caddy validation, or Caddy reload fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same validation, atomic switch, restart, health check, and Caddy activation.
 
 ```bash
 set -euo pipefail
-previous=0123456789abcdef0123456789abcdef01234567
-test -d "/opt/mydsh/releases/$previous"
-sudo test ! -e /opt/mydsh/current.next -o -L /opt/mydsh/current.next
-sudo rm -f -- /opt/mydsh/current.next
-sudo ln -s "/opt/mydsh/releases/$previous" /opt/mydsh/current.next
-sudo mv -Tf /opt/mydsh/current.next /opt/mydsh/current
-sudo systemctl restart mydsh
-curl --fail --silent --show-error --output /dev/null https://dsh.example.com/__invite/login
+commit=0123456789abcdef0123456789abcdef01234567
+[[ $commit =~ ^[0-9a-f]{40}$ ]]
+target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
+[[ ${target%/*} == /opt/mydsh/releases ]]
+[[ ${target##*/} == "$commit" ]]
+sudo bash /opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh --rollback "$commit"
 ```
 
 ## Rotate authentication secrets

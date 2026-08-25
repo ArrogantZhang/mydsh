@@ -41,7 +41,7 @@ sudo bash ./bootstrap-host.sh dsh.example.com
 
 ## 部署 release
 
-部署 bundle 携带的确切分支。脚本会验证 bundle，以 `mydsh` 身份安装锁定依赖并运行 invite-auth 测试，构建仓库，转储组合配置，发布以 commit 命名的不可变目录，原子切换 `/opt/mydsh/current`，并仅在有界的本机健康检查通过后接受 release。
+部署 bundle 携带的确切分支。脚本会验证 bundle，以 `mydsh` 身份安装锁定依赖并运行 invite-auth 测试，构建仓库，转储组合配置，发布以 commit 命名的不可变目录，原子切换 `/opt/mydsh/current`，重启 DSH，等待有界的本机健康检查，然后验证并重新加载 Caddy。任何激活步骤失败都会恢复上一个 release。
 
 ```bash
 sudo bash ./deploy-release.sh ./mydsh.bundle feat/invite-auth-deployment
@@ -66,7 +66,7 @@ openssl s_client -connect dsh.example.com:443 -servername dsh.example.com </dev/
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。以下服务端冒烟测试会检查 HTTPS 代理，只将 cookie 存入临时文件，抑制响应正文、响应头和 cookie 值，并要求登录返回 `303`，随后已认证主页返回 `200`。
+打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。关闭全部浏览器窗口，重新打开站点，并确认 30 天 cookie 仍能认证浏览器；随后退出登录，并确认登录页再次出现。以下服务端冒烟测试会检查相同的验收路径，同时不打印密钥、响应正文、响应头或 cookie 值：未认证 HTML 返回 `303`，未认证 API 流量返回 `401`，登录返回 `303`，新客户端进程复用有效期至少还剩 29 天的 cookie，篡改会被拒绝，退出登录后访问也会再次被拒绝。
 
 ```bash
 sudo bash -c '
@@ -74,13 +74,28 @@ set -euo pipefail
 source /etc/mydsh/public.env
 source /etc/mydsh/mydsh.env
 cookie_jar=$(mktemp)
-trap '\''rm -f -- "$cookie_jar"'\'' EXIT
+tampered_jar=$(mktemp)
+trap '\''rm -f -- "$cookie_jar" "$tampered_jar"'\'' EXIT
 base="https://$DSH_PUBLIC_HOST"
 resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
-post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --fail-with-body --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
+home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
+[[ $home_unauth_status == 303 ]]
+api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
+[[ $api_unauth_status == 401 ]]
+post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
 [[ $post_status == 303 ]]
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
+cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
+[[ $cookie_expiry =~ ^[0-9]+$ ]]
+(( cookie_expiry >= $(date +%s) + 2505600 ))
+awk -F "\t" '\''BEGIN { OFS="\t" } NF == 7 { $7=$7 "x" } { print }'\'' "$cookie_jar" >"$tampered_jar"
+tampered_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$tampered_jar" --header "Accept: text/html" "$base/")
+[[ $tampered_status == 303 ]]
+logout_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" --cookie-jar "$cookie_jar" --header "Origin: $base" --data "" "$base/__invite/logout")
+[[ $logout_status == 303 ]]
+after_logout_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" --header "Accept: text/html" "$base/")
+[[ $after_logout_status == 303 ]]
 printf "Authenticated smoke passed.\n"
 '
 ```
@@ -95,18 +110,16 @@ printf "Authenticated smoke passed.\n"
 
 从经过评审的部署分支创建新 bundle，将其上传到 5 个部署文件所在目录，然后使用该 bundle 及其确切分支运行 `deploy-release.sh`。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；脚本拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
 
-重启或健康检查验收失败时，deploy 脚本会自动回滚。如果操作员要主动回滚，先从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit，再原子替换符号链接并验证健康状态。
+重启、健康检查验收、Caddy 验证或 Caddy 重新加载失败时，deploy 脚本会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，以 canonical 路径解析目录，并在脚本执行相同的验证、原子切换、重启、健康检查和 Caddy 激活之前，证明目录的父路径和 basename 完全匹配。
 
 ```bash
 set -euo pipefail
-previous=0123456789abcdef0123456789abcdef01234567
-test -d "/opt/mydsh/releases/$previous"
-sudo test ! -e /opt/mydsh/current.next -o -L /opt/mydsh/current.next
-sudo rm -f -- /opt/mydsh/current.next
-sudo ln -s "/opt/mydsh/releases/$previous" /opt/mydsh/current.next
-sudo mv -Tf /opt/mydsh/current.next /opt/mydsh/current
-sudo systemctl restart mydsh
-curl --fail --silent --show-error --output /dev/null https://dsh.example.com/__invite/login
+commit=0123456789abcdef0123456789abcdef01234567
+[[ $commit =~ ^[0-9a-f]{40}$ ]]
+target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
+[[ ${target%/*} == /opt/mydsh/releases ]]
+[[ ${target##*/} == "$commit" ]]
+sudo bash /opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh --rollback "$commit"
 ```
 
 ## 轮换认证密钥

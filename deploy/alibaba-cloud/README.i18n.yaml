@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write deploy/alibaba-cloud/README.md
-README.md: 8288e21e564ca14dd4437caf15e97d418acd4eaa
-README.zh.md: ed2b6d51cdf3fd08218a1934a22846f30f6f43bc
+README.md: c342437ce9defc76eac25aa2f1fd79a82a6a421c
+README.zh.md: 23f10c1188757df2cf0bd87871240f2b3ce340f3

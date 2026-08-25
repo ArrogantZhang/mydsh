@@ -92,7 +92,7 @@ if ! id mydsh >/dev/null 2>&1; then
 fi
 [[ $(id -u mydsh) != 0 ]] || fail 'the mydsh service account must not be root'
 
-install -d -o root -g root -m 0755 /opt/mydsh/releases /etc/mydsh
+install -d -o root -g root -m 0755 /opt/mydsh /opt/mydsh/releases /etc/mydsh
 install -d -o mydsh -g mydsh -m 0700 /var/lib/mydsh
 install -d -o mydsh -g mydsh -m 0750 /srv/mydsh/workspace /var/cache/mydsh-pnpm
 install -d -o root -g root -m 0755 /etc/systemd/system/caddy.service.d
