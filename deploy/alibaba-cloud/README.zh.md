@@ -42,11 +42,11 @@ scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-脚本创建相互独立的 `mydsh` 运行时账户和 `mydsh-build` 构建账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 要求该范围、非 root UID、不同的 group 和 nologin shell。每个候选 release 都使用新的 builder HOME、XDG 目录、缓存、临时 `DSH_HOME` 和 checkout；候选之间不会复用这些内容，瞬态 systemd 构建服务及其 descendant cgroup 停止并且发布正常完成或失败后，helper 会将其删除。运行时数据、工作区、私有环境文件和密钥保持不可访问。存在活动 release 时，bootstrap 要么逐字节确认无需操作，要么拒绝并要求通过普通部署更新。
+脚本创建相互独立的 `mydsh` 运行时账户和 `mydsh-build` 构建账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 要求该范围、非 root UID、不同的 group 和 nologin shell。每个候选 release 都使用新的 builder HOME、包含运行时状态的 XDG 目录、私有 `TMPDIR`、缓存、临时 `DSH_HOME` 和 checkout；候选之间不会复用这些内容，瞬态 systemd 构建服务及其 descendant cgroup 停止并且发布正常完成或失败后，helper 会将其删除。运行时数据、工作区、私有环境文件和密钥保持不可访问。存在活动 release 时，bootstrap 要么逐字节确认无需操作，要么拒绝并要求通过普通部署更新。
 
 ## 部署 release
 
-通过 root 安装的 helper 部署 bundle 携带的确切 ref。一个瞬态 systemd 服务以 `mydsh-build` 身份在空白的单次操作环境下执行 clone、依赖生命周期脚本、测试、构建和配置转储；systemd 会终止并等待整个 descendant cgroup。之后 root 才将完成的 tree 以禁用 reflink 的方式复制到新的私有 inode 中并发布。激活会在更改 helper、unit、Caddy 文件或 release 链接前持久保存 root-only `prepared` 恢复 journal。任何失败都会保留或重放该 journal，直到恢复之前的一致状态；接受激活会先记录 `committed` 再清理，因此后续清理绝不会将其回滚。
+通过 root 安装的 helper 部署 bundle 携带的确切 ref。一个启用 `PrivateTmp` 的瞬态 systemd 服务以 `mydsh-build` 身份在空白的单次操作环境下执行 clone、commit 验证、依赖生命周期脚本、测试、构建和配置转储；systemd 会终止并等待整个 descendant cgroup。builder 把验证后的 commit 写入普通 marker，root 用可信 Git 提取结果校验该 marker，而不在 builder 所有的 checkout 上调用 Git；之后 root 才将完成的 tree 以禁用 reflink 的方式复制到新的私有 inode 中并发布。激活先在同级 staging 目录中构建完整的 root-only `prepared` 恢复 journal，记录服务之前的启用状态，再原子重命名到正式位置，然后才更改 helper、unit、Caddy 文件、release 链接或启用状态。任何失败都会保留或重放该 journal，直到恢复之前的一致状态；接受激活会启用服务并先记录 `committed` 再清理，因此后续清理绝不会将其回滚。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"

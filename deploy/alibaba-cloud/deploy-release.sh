@@ -255,32 +255,67 @@ run_builder() {
   local operation_root=$1
   local bundle=$2
   local ref=$3
-  local checkout=$4
+  local expected_commit=$4
+  local checkout=$5
   local unit="mydsh-build-$$"
   systemd-run --wait --collect --pipe \
     --unit="$unit" \
     --uid=mydsh-build --gid=mydsh-build \
-    --property=Type=exec --property=KillMode=control-group --property=TimeoutStopSec=30s \
+    --property=Type=exec --property=KillMode=control-group --property=PrivateTmp=yes --property=TimeoutStopSec=30s \
     /usr/bin/env -i \
     HOME="$operation_root/home" \
+    TMPDIR="$operation_root/tmp" \
     XDG_CONFIG_HOME="$operation_root/xdg-config" \
     XDG_CACHE_HOME="$operation_root/xdg-cache" \
+    XDG_RUNTIME_DIR="$operation_root/xdg-runtime" \
     NPM_CONFIG_USERCONFIG=/dev/null \
     NPM_CONFIG_GLOBALCONFIG=/dev/null \
     GIT_CONFIG_NOSYSTEM=1 \
     GIT_CONFIG_GLOBAL=/dev/null \
     PATH=/usr/local/bin:/usr/bin:/bin \
     DSH_HOME="$operation_root/dsh-home" \
-    /usr/local/sbin/mydsh-deploy-release --internal-build "$bundle" "$ref" "$checkout" "$operation_root/cache" || return 1
+    /usr/local/sbin/mydsh-deploy-release --internal-build "$bundle" "$ref" "$expected_commit" "$checkout" "$operation_root/cache" "$operation_root/result.commit" || return 1
   if systemctl is-active --quiet "$unit"; then return 1; fi
+}
+
+write_builder_commit_marker() {
+  local checkout=$1
+  local expected_commit=$2
+  local marker=$3
+  local commit
+  local temporary="${marker}.new"
+  commit=$(git -C "$checkout" rev-parse HEAD) || return 1
+  [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$expected_commit" ]] || return 1
+  [[ ! -e "$marker" && ! -L "$marker" && ! -e "$temporary" && ! -L "$temporary" ]] || return 1
+  printf '%s\n' "$commit" >"$temporary" || return 1
+  mv -- "$temporary" "$marker" || { rm -f -- "$temporary" || true; return 1; }
+}
+
+read_builder_commit_marker() {
+  local marker=$1
+  local expected_commit=$2
+  local commit
+  local resolved
+  local line_count
+  [[ -f "$marker" && ! -L "$marker" ]] || return 1
+  resolved=$(realpath -e -- "$marker") || return 1
+  [[ $resolved == "$marker" ]] || return 1
+  line_count=$(wc -l <"$marker") || return 1
+  [[ $line_count == 1 ]] || return 1
+  commit=$(<"$marker") || return 1
+  [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$expected_commit" ]] || return 1
+  printf '%s\n' "$commit"
 }
 
 internal_build() {
   local bundle=$1
   local ref=$2
-  local checkout=$3
-  local cache=$4
+  local expected_commit=$3
+  local checkout=$4
+  local cache=$5
+  local marker=$6
   git clone --branch "$ref" --single-branch "$bundle" "$checkout"
+  write_builder_commit_marker "$checkout" "$expected_commit" "$marker"
   pnpm --dir "$checkout" install --frozen-lockfile --store-dir "$cache"
   pnpm --dir "$checkout" exec vitest run packages/host/invite-auth/tests
   pnpm --dir "$checkout" run build
@@ -446,7 +481,7 @@ write_journal_value() {
   local name=$2
   local value=$3
   local temporary
-  [[ $name == previous || $name == target ]] || return 1
+  [[ $name == previous || $name == target || $name == service-enabled ]] || return 1
   create_registered_temp_file "$journal" || return 1
   temporary=$CREATED_TEMP_FILE
   printf '%s\n' "$value" >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
@@ -460,14 +495,54 @@ write_journal_state() {
   local journal=$1
   local state=$2
   local temporary
+  if [[ $state == committed ]]; then grep -Fqx 'state=prepared' "$journal/state" || return 1; fi
   create_registered_temp_file "$journal" || return 1
   temporary=$CREATED_TEMP_FILE
   printf 'state=%s\n' "$state" >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
   mv -f -- "$temporary" "$journal/state" || { discard_registered_temp_file "$temporary" || true; return 1; }
   unregister_temp_file "$temporary"
+  if ! sync -f "$journal"; then
+    if [[ $state == committed ]]; then restore_prepared_journal_state "$journal" || return 2; fi
+    return 1
+  fi
+}
+
+restore_prepared_journal_state() {
+  local journal=$1
+  local temporary
+  create_registered_temp_file "$journal" || return 1
+  temporary=$CREATED_TEMP_FILE
+  printf 'state=prepared\n' >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  mv -f -- "$temporary" "$journal/state" || { discard_registered_temp_file "$temporary" || true; return 1; }
+  unregister_temp_file "$temporary"
   sync -f "$journal" || return 1
 }
+
+discard_journal_staging() {
+  local staging=$1
+  local parent=$2
+  validate_temp_directory "$staging" "$parent" activation.new. || return 1
+  rm -rf -- "$staging" || return 1
+}
+
+cleanup_abandoned_journal_staging() (
+  local parent=$1
+  local staging
+  [[ -d "$parent" && ! -L "$parent" && $(realpath -e -- "$parent") == "$parent" ]] || return 1
+  shopt -s nullglob
+  for staging in "$parent"/activation.new.*; do
+    if validate_temp_directory "$staging" "$parent" activation.new.; then
+      if ! rm -rf -- "$staging"; then
+        printf 'mydsh-deploy-release: abandoned journal staging retained for inspection at %s\n' "$staging" >&2
+      fi
+    else
+      printf 'mydsh-deploy-release: unsafe journal staging retained for inspection at %s\n' "$staging" >&2
+    fi
+  done
+  return 0
+)
 
 prepare_activation_journal() {
   local journal=$1
@@ -475,18 +550,33 @@ prepare_activation_journal() {
   local previous=$3
   local asset_root=$4
   local host_root=${5:-}
+  local previous_enabled=$6
+  local parent
+  local staging
+  [[ $previous_enabled == enabled || $previous_enabled == disabled ]] || return 1
+  parent=$(dirname -- "$journal") || return 1
+  [[ $journal == "$parent/activation" && -d "$parent" && ! -L "$parent" && $(realpath -e -- "$parent") == "$parent" ]] || return 1
   [[ ! -e "$journal" && ! -L "$journal" ]] || return 1
-  install -d -o root -g root -m 0700 "$journal" || return 1
-  backup_host_configs "$journal/backup" "$host_root" || return 1
-  install -d -o root -g root -m 0700 "$journal/candidate" || return 1
-  copy_durable_file "$asset_root/Caddyfile" "$journal/candidate/Caddyfile" || return 1
-  copy_durable_file "$asset_root/mydsh.service" "$journal/candidate/mydsh.service" || return 1
-  copy_durable_file "$asset_root/caddy-mydsh.conf" "$journal/candidate/caddy-mydsh.conf" || return 1
-  copy_durable_file "$asset_root/deploy-release.sh" "$journal/candidate/deploy-release.sh" || return 1
-  sync -f "$journal/candidate" || return 1
-  write_journal_value "$journal" previous "${previous:-none}" || return 1
-  write_journal_value "$journal" target "$target" || return 1
-  write_journal_state "$journal" prepared
+  staging=$(mktemp -d "$parent/activation.new.XXXXXX") || return 1
+  validate_temp_directory "$staging" "$parent" activation.new. || return 1
+  chmod 0700 "$staging" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  backup_host_configs "$staging/backup" "$host_root" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  install -d -o root -g root -m 0700 "$staging/candidate" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  copy_durable_file "$asset_root/Caddyfile" "$staging/candidate/Caddyfile" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  copy_durable_file "$asset_root/mydsh.service" "$staging/candidate/mydsh.service" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  copy_durable_file "$asset_root/caddy-mydsh.conf" "$staging/candidate/caddy-mydsh.conf" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  copy_durable_file "$asset_root/deploy-release.sh" "$staging/candidate/deploy-release.sh" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  sync -f "$staging/candidate" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_value "$staging" previous "${previous:-none}" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_value "$staging" target "$target" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_value "$staging" service-enabled "$previous_enabled" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_state "$staging" prepared || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  sync -f "$staging" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  mv -T -- "$staging" "$journal" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  if ! sync -f "$parent"; then
+    if mv -T -- "$journal" "$staging"; then discard_journal_staging "$staging" "$parent" || true; fi
+    return 1
+  fi
 }
 
 remove_activation_journal() {
@@ -503,6 +593,7 @@ recover_activation_journal() {
   local current_path=${3:-$CURRENT_LINK}
   local state
   local previous
+  local previous_enabled
   local target
   local installed_caddy
   [[ ! -e "$journal" && ! -L "$journal" ]] && return 0
@@ -515,6 +606,8 @@ recover_activation_journal() {
   [[ $state == prepared ]] || return 1
   previous=$(<"$journal/previous") || return 1
   target=$(<"$journal/target") || return 1
+  previous_enabled=$(<"$journal/service-enabled") || return 1
+  [[ $previous_enabled == enabled || $previous_enabled == disabled ]] || return 1
   installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
   if ! restore_host_configs "$journal/backup" "$host_root" || ! systemctl daemon-reload; then
     printf 'mydsh-deploy-release: recovery failed; journal retained at %s\n' "$journal" >&2
@@ -528,9 +621,32 @@ recover_activation_journal() {
     systemctl restart mydsh || return 1
     health_check "$previous" || return 1
   fi
+  restore_service_enable_state "$previous_enabled" || return 1
   caddy validate --config "$installed_caddy" --adapter caddyfile || return 1
   systemctl reload caddy || return 1
   remove_activation_journal "$journal" || return 1
+}
+
+service_enable_state() {
+  local state
+  if state=$(systemctl is-enabled mydsh 2>/dev/null); then
+    [[ $state == enabled ]] || return 1
+    printf 'enabled\n'
+  else
+    [[ $state == disabled ]] || return 1
+    printf 'disabled\n'
+  fi
+}
+
+restore_service_enable_state() {
+  local state=$1
+  if [[ $state == enabled ]]; then
+    systemctl enable mydsh || return 1
+  elif [[ $state == disabled ]]; then
+    systemctl disable mydsh || return 1
+  else
+    return 1
+  fi
 }
 
 stage_candidate_configs() {
@@ -627,10 +743,12 @@ activate_transaction() {
   local current_path=${5:-$CURRENT_LINK}
   local journal=${6:-$ACTIVATION_DIR}
   local installed_caddy
+  local previous_enabled
 
   validate_candidate_configs "$asset_root" || return 1
   installed_caddy=$(host_path "$host_root" "$CADDY_CONFIG") || return 1
-  prepare_activation_journal "$journal" "$target" "$previous" "$asset_root" "$host_root" || return 1
+  previous_enabled=$(service_enable_state) || return 1
+  prepare_activation_journal "$journal" "$target" "$previous" "$asset_root" "$host_root" "$previous_enabled" || return 1
   if stage_candidate_configs "$journal/candidate" "$host_root" && systemctl daemon-reload; then
     if atomic_replace_link "$current_path" "$target" && systemctl restart mydsh; then
       if health_check "$target"; then
@@ -640,6 +758,9 @@ activate_transaction() {
               if ! remove_activation_journal "$journal"; then
                 printf 'mydsh-deploy-release: activation accepted but committed journal cleanup was not durable at %s; the next operation will retry if it remains\n' "$journal" >&2
               fi
+              return 0
+            elif grep -Fqx 'state=committed' "$journal/state"; then
+              printf 'mydsh-deploy-release: activation accepted with committed journal retained at %s; cleanup will retry next operation\n' "$journal" >&2
               return 0
             fi
           fi
@@ -699,7 +820,6 @@ deploy_bundle() {
   local staged_bundle
   local target
   local trusted_bundle
-  local builder_commit
   local trusted_commit
   local trusted_repository
   local candidate_path
@@ -731,15 +851,14 @@ deploy_bundle() {
   validate_temp_directory "$operation_root" "$RELEASES_DIR" .build. || fail 'unsafe per-operation builder root'
   checkout="$operation_root/checkout"
   staged_bundle="$operation_root/release.bundle"
-  for candidate_path in home xdg-config xdg-cache dsh-home cache; do install -d -o mydsh-build -g mydsh-build -m 0700 "$operation_root/$candidate_path"; done
+  for candidate_path in home tmp xdg-config xdg-cache xdg-runtime dsh-home cache; do install -d -o mydsh-build -g mydsh-build -m 0700 "$operation_root/$candidate_path"; done
   chown mydsh-build:mydsh-build "$operation_root"
   chmod 0700 "$operation_root"
   install -o mydsh-build -g mydsh-build -m 0400 -- "$trusted_bundle" "$staged_bundle"
-  run_builder "$operation_root" "$staged_bundle" "$clone_ref" "$checkout" || fail 'transient builder service failed or did not quiesce'
+  run_builder "$operation_root" "$staged_bundle" "$clone_ref" "$trusted_commit" "$checkout" || fail 'transient builder service failed or did not quiesce'
   [[ -d "$checkout" && ! -L "$checkout" && $(realpath -e -- "$checkout") == "$checkout" ]] || fail 'builder checkout is not a canonical real directory'
-  builder_commit=$(env -i PATH=/usr/local/bin:/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" rev-parse HEAD) || fail 'cannot resolve the quiesced builder checkout commit'
-  [[ $builder_commit == "$trusted_commit" ]] || fail 'builder checkout commit does not match the trusted bundle ref'
-  commit=$(trusted_git -C "$trusted_repository" rev-parse 'FETCH_HEAD^{commit}') || fail 'cannot resolve candidate commit'
+  read_builder_commit_marker "$operation_root/result.commit" "$trusted_commit" >/dev/null || fail 'builder commit marker does not match the trusted bundle ref'
+  commit=$trusted_commit
   [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$trusted_commit" ]] || fail 'candidate commit does not match the trusted bundle ref'
   target="$RELEASES_DIR/$commit"
   [[ ! -e "$target" && ! -L "$target" ]] || fail "release already exists: $commit"
@@ -760,8 +879,9 @@ deploy_bundle() {
 
 main() {
   if [[ ${1:-} == --internal-build ]]; then
-    [[ $# -eq 5 ]] || return 64
-    internal_build "$2" "$3" "$4" "$5"
+    [[ $# -eq 7 ]] || return 64
+    [[ $(id -un) == mydsh-build ]] || fail '--internal-build requires the mydsh-build identity'
+    internal_build "$2" "$3" "$4" "$5" "$6" "$7"
     return
   fi
   [[ $EUID -eq 0 ]] || fail 'run this script as root'
@@ -771,6 +891,7 @@ main() {
   trap cleanup_operation EXIT
   validate_recovery_prerequisites
   load_public_environment
+  cleanup_abandoned_journal_staging "$(dirname -- "$ACTIVATION_DIR")" || fail 'cannot inspect abandoned activation journal staging'
   recover_activation_journal "$ACTIVATION_DIR" || fail "activation recovery failed; inspect $ACTIVATION_DIR"
   validate_host
   if [[ $1 == --rollback ]]; then

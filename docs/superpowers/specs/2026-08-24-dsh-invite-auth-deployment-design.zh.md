@@ -97,7 +97,7 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器使用 Node.js 24 和具有固定 tarball integrity 的 pnpm 11.7.0。一个 transient service 在 `env -i` 下以 `mydsh-build` 身份使用单次操作 HOME、XDG 目录、缓存、临时 `DSH_HOME` 和 checkout，执行 clone、冻结依赖安装、生命周期脚本、测试、构建和配置转储。`KillMode=control-group` 让 systemd 在 root 禁用 reflink、将完成的 tree 复制到新的私有 inode 前，终止并等待每个 descendant。helper 将特权部署输入与 root-only 的可信 Git 提取内容比较。之后 systemd 以独立的非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
+服务器使用 Node.js 24 和具有固定 tarball integrity 的 pnpm 11.7.0。一个启用 `PrivateTmp` 的 transient service 在 `env -i` 下以 `mydsh-build` 身份使用单次操作 HOME、包含 `XDG_RUNTIME_DIR` 的 XDG 目录、私有 `TMPDIR`、缓存、临时 `DSH_HOME` 和 checkout，执行 clone、commit 验证、冻结依赖安装、生命周期脚本、测试、构建和配置转储。`KillMode=control-group` 让 systemd 终止并等待每个 descendant；之后 root 读取普通 commit marker，在不对 builder 所有 tree 运行 Git 的情况下用可信 commit 校验 marker，再禁用 reflink、将完成的 tree 复制到新的私有 inode。helper 从 root-only 的可信 Git 提取目录取得特权部署输入。之后 systemd 以独立的非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 
@@ -105,7 +105,7 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 本地仓库保留 DeepSeek 上游 remote 和邀请码扩展提交。升级先获取最新 `master`，再把本地提交合并到新的已评审部署 ref。上游处于 developer preview，因此每次升级都视为需要重新验证的显式发布。
 
-root 安装的 helper 会在安装候选 helper、unit、Caddyfile 和 Caddy drop-in 前，写入包含之前链接和宿主文件备份的持久 `prepared` journal。它会重新加载 systemd，切换 `current`，重启 DSH，并执行回环、公开和认证验收。任何中断或失败都会保留 journal，供下一次加锁操作恢复；恢复失败会保留它并阻止新工作。接受激活会在清理前原子记录 `committed`，因此清理失败只会留下供下一次操作删除且绝不会触发回滚的 journal。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
+root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构建完整的 `prepared` journal，其中包含之前的链接、宿主文件备份和服务之前的启用状态；完成 fsync 后，helper 将其原子重命名为 `activation`，然后才安装候选 helper、unit、Caddyfile 和 Caddy drop-in。部署锁保护下会删除经过验证的遗留同级目录；不安全的条目会保留供检查，但不会成为恢复状态。helper 随后重新加载 systemd，切换 `current`，重启 DSH，执行回环、公开和认证验收，启用服务，最后才原子记录 `committed`。在该提交前发生的任何中断或失败都会恢复之前的链接、宿主文件、进程状态以及启用或禁用状态；恢复失败会保留完整 journal 并阻止新工作。已提交 journal 的清理失败只会留下供下一次操作删除且不会触发回滚的状态。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
 
 ## 测试与验收
 

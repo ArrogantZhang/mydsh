@@ -20,9 +20,9 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 该认证模型面向共享同一 DSH 实例的小规模可信群体。有效 Cookie 传递实例既有的浏览器权限；它不会创建身份、按用户划分的工作区、会话所有权或命令隔离。
 
-阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。共享的非阻塞宿主锁将 bootstrap、部署、回滚和清理串行化。helper 会在变更前将 `prepared` 恢复 journal 持久保存到 `/var/lib/mydsh-deploy/activation`，其中包含之前的链接和 root 所有的宿主文件备份。失败会保留或重放该 journal，直到恢复成功；接受激活会先记录 `committed` 再清理，因此清理失败绝不会回滚已上线且已接受的 release。
+阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。共享的非阻塞宿主锁将 bootstrap、部署、回滚和清理串行化。helper 会在变更前于 root-only 的同级 `activation.new.*` 目录中构建完整的 `prepared` 恢复 journal，其中包含之前的链接、root 所有的宿主文件备份和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复或重放该 journal，包括之前的启用或禁用状态，直到恢复成功；接受激活会启用服务并先记录 `committed` 再清理，因此清理失败绝不会回滚已上线且已接受的 release。
 
-`mydsh-build` 为每次操作获得新的 HOME、XDG 配置和缓存、pnpm 缓存、临时 `DSH_HOME` 以及 checkout。一个 transient service 使用 `KillMode=control-group` 运行完整构建流水线；systemd 会终止并等待全部 descendant，之后 root 才禁用 reflink，把结果复制到新的 root-private inode 中。builder 无法在已发布 tree 中保留可写 inode 或打开的文件描述符，也无法读取运行时状态、工作区文件、私有环境文件或认证密钥。
+`mydsh-build` 为每次操作获得新的 HOME、XDG 配置、缓存和运行时目录、私有 `TMPDIR`、pnpm 缓存、临时 `DSH_HOME` 以及 checkout。一个启用 `PrivateTmp` 的 transient service 使用 `KillMode=control-group` 运行完整构建流水线；systemd 会终止并等待全部 descendant，之后 root 才用可信提取结果校验 builder 写入的普通 commit marker，并禁用 reflink，把结果复制到新的 root-private inode 中。root 绝不会在 builder 所有的 checkout 中调用 Git。builder 无法在已发布 tree 中保留可写 inode 或打开的文件描述符，也无法读取运行时状态、工作区文件、私有环境文件或认证密钥。
 
 Git bundle 是传输格式，不是真实性证明：`git bundle verify` 检查结构、前置对象和对象连通性。部署信任管理员经过评审的本地 checkout，以及创建 bundle 时另行验证的签名 ref。helper 会保留该 bundle 的 root-only 副本，从可信 commit 的 root-only 提取目录取得每项特权部署资产，并先拒绝存在差异的 builder 侧副本，再验证候选宿主配置以及公开和认证行为。
 

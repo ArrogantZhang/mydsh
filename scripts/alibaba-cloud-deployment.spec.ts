@@ -175,9 +175,11 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toMatch(/install .*"\$trusted_bundle" "\$staged_bundle"/)
     expect(script).toContain('git clone --branch "$ref" --single-branch "$bundle" "$checkout"')
     expect(script).toContain("rev-parse 'FETCH_HEAD^{commit}'")
-    expect(script).toContain('builder_commit=$(env -i')
-    expect(script).toContain('GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" rev-parse HEAD')
-    expect(script).toContain('[[ $builder_commit == "$trusted_commit" ]]')
+    expect(script).toContain('git -C "$checkout" rev-parse HEAD')
+    expect(script).toContain('write_builder_commit_marker')
+    expect(script).toContain('read_builder_commit_marker')
+    expect(script).toContain('[[ $(id -un) == mydsh-build ]]')
+    expect(script).not.toMatch(/builder_commit=\$\(env -i[^\n]*git -C "\$checkout"/)
     expect(script).toContain('install --frozen-lockfile --store-dir "$cache"')
     expect(script).toMatch(/vitest run packages\/host\/invite-auth\/tests/)
     expect(script).toContain('pnpm --dir "$checkout" run build')
@@ -207,7 +209,10 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('run_builder')
     expect(script).toContain('systemd-run --wait --collect --pipe')
     expect(script).toContain('KillMode=control-group')
+    expect(script).toContain('PrivateTmp=yes')
     expect(script).toContain('HOME="$operation_root/home"')
+    expect(script).toContain('TMPDIR="$operation_root/tmp"')
+    expect(script).toContain('XDG_RUNTIME_DIR="$operation_root/xdg-runtime"')
     expect(script).toContain('XDG_CONFIG_HOME="$operation_root/xdg-config"')
     expect(script).toContain('XDG_CACHE_HOME="$operation_root/xdg-cache"')
     expect(script).toContain('NPM_CONFIG_USERCONFIG=/dev/null')
@@ -217,9 +222,14 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('cp -a --reflink=never')
     expect(script).toContain('install_trusted_release_assets')
     expect(script).toContain('/var/lib/mydsh-deploy/activation')
+    expect(script).toContain('activation.new.XXXXXX')
+    expect(script).toContain('mv -T -- "$staging" "$journal"')
+    expect(script).toContain('cleanup_abandoned_journal_staging')
     expect(script).toContain('recover_activation_journal')
-    expect(script).toContain('write_journal_state "$journal" prepared')
+    expect(script).toContain('write_journal_state "$staging" prepared')
     expect(script).toContain('write_journal_state "$journal" committed')
+    expect(script).toContain('service-enabled')
+    expect(script).toContain('restore_service_enable_state')
     expect(script).toContain('root-helper')
     expect(script).not.toMatch(/runuser -u mydsh -- (?:git|pnpm|env|node)/)
     expect(script).not.toContain('DSH_HOME=/var/lib/mydsh /usr/bin/node')
@@ -244,6 +254,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(main.indexOf('recover_activation_journal "$ACTIVATION_DIR"')).toBeLessThan(main.indexOf('\n  validate_host'))
     const deploy = script.slice(script.indexOf('\ndeploy_bundle() {'), script.indexOf('\nmain() {'))
     expect(deploy.indexOf('validate_candidate_configs "$trusted_assets"')).toBeLessThan(deploy.indexOf('publish_builder_checkout'))
+    expect(deploy).not.toContain('git -C "$checkout"')
   })
 
   it('limits GNU filesystem integration to Linux CI', () => {
@@ -477,11 +488,14 @@ trap 'rm -rf -- "$root"' EXIT
 operation_root="$root/operation"; mkdir -p "$operation_root"
 systemd-run() { printf '%s\n' "$*" >"$root/argv"; }
 systemctl() { return 1; }
-run_builder "$operation_root" "$root/bundle" reviewed-ref "$operation_root/checkout"
+run_builder "$operation_root" "$root/bundle" reviewed-ref ${'a'.repeat(40)} "$operation_root/checkout"
 grep -F -- '--wait --collect --pipe' "$root/argv"
 grep -F -- '--uid=mydsh-build --gid=mydsh-build' "$root/argv"
 grep -F -- 'KillMode=control-group' "$root/argv"
+grep -F -- 'PrivateTmp=yes' "$root/argv"
 grep -F -- "HOME=$operation_root/home" "$root/argv"
+grep -F -- "TMPDIR=$operation_root/tmp" "$root/argv"
+grep -F -- "XDG_RUNTIME_DIR=$operation_root/xdg-runtime" "$root/argv"
 grep -F -- 'NPM_CONFIG_USERCONFIG=/dev/null' "$root/argv"
 grep -F -- 'NPM_CONFIG_GLOBALCONFIG=/dev/null' "$root/argv"
 grep -F -- 'GIT_CONFIG_NOSYSTEM=1' "$root/argv"
@@ -506,10 +520,38 @@ systemd-run() {
   printf 'quiesced\n' >"$root/quiesced"
 }
 systemctl() { return 1; }
-run_builder "$root/operation" "$root/bundle" reviewed-ref "$root/operation/checkout"
+run_builder "$root/operation" "$root/bundle" reviewed-ref ${'b'.repeat(40)} "$root/operation/checkout"
 child=$(<"$root/child.pid")
 [[ -f "$root/quiesced" ]]
 if kill -0 "$child" 2>/dev/null; then exit 90; fi
+`)
+    })
+
+    it('publishes from a commit marker without root Git traversal of builder output', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+checkout="$root/checkout"; marker="$root/result.commit"; mkdir -p "$checkout" "$root/releases"
+git -C "$checkout" init --quiet
+printf '{}\n' >"$checkout/package.json"
+git -C "$checkout" add package.json
+git -C "$checkout" -c user.name=proof -c user.email=proof@example.com commit --quiet -m proof
+expected=$(git -C "$checkout" rev-parse HEAD)
+if [[ $EUID -eq 0 ]] && id node >/dev/null 2>&1; then
+  chown -R node:node "$checkout" "$root"
+  chmod 0755 "$root"
+  export -f write_builder_commit_marker
+  runuser -u node -- bash -c 'write_builder_commit_marker "$1" "$2" "$3"' proof "$checkout" "$expected" "$marker"
+  if env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" rev-parse HEAD >/dev/null 2>&1; then exit 90; fi
+else
+  write_builder_commit_marker "$checkout" "$expected" "$marker"
+  chown() { return 0; }
+fi
+read_builder_commit_marker "$marker" "$expected"
+commit=${'d'.repeat(40)}
+publish_builder_checkout "$checkout" "$root/releases/$commit" "$root/releases"
+[[ -f "$root/releases/$commit/package.json" ]]
 `)
     })
 
@@ -534,7 +576,15 @@ validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
 install() {
   if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi
 }
-systemctl() { return 0; }
+enable_state=enabled
+service_enable_state() { printf '%s\n' "$enable_state"; }
+systemctl() {
+  case "\${1:-} \${2:-}" in
+    'enable mydsh') enable_state=enabled ;;
+    'disable mydsh') enable_state=disabled ;;
+  esac
+  return 0
+}
 caddy() { return 0; }
 health_check() { return 0; }
 authenticated_acceptance() { return 0; }
@@ -551,12 +601,15 @@ done
 public_acceptance() { return 1; }
 if activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 90; fi
 [[ $(readlink "$root/current") == "$previous" ]]
+[[ $enable_state == enabled ]]
 grep -Fx old "$host/etc/caddy/Caddyfile"
 grep -Fx old "$host/etc/systemd/system/mydsh.service"
 grep -Fx old "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
 rm -f "$root/current"
+enable_state=disabled
 if activate_transaction "$candidate" '' "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 91; fi
 [[ ! -e "$root/current" && ! -L "$root/current" ]]
+[[ $enable_state == disabled ]]
 grep -Fx old "$host/etc/caddy/Caddyfile"
 `)
     })
@@ -580,6 +633,7 @@ printf '%s\nnew\n' "$MANAGED_MARKER" >"$candidate/deploy/alibaba-cloud/deploy-re
 validate_candidate_configs() { return 0; }
 validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
 install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
+service_enable_state() { printf 'enabled\n'; }
 systemctl() { return 0; }
 caddy() { return 0; }
 health_check() { return 0; }
@@ -608,7 +662,7 @@ validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
 install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
 systemctl() { return 0; }; caddy() { return 0; }; health_check() { return 0; }; sync() { return 0; }
 ln -s "$previous" "$root/current"
-prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host"
+prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
 stage_candidate_configs "$assets" "$host"
 atomic_replace_link "$root/current" "$candidate"
 restore_host_configs_real=$(declare -f restore_host_configs)
@@ -618,7 +672,7 @@ if recover_activation_journal "$journal" "$host" "$root/current"; then exit 90; 
 eval "$restore_host_configs_real"
 recover_activation_journal "$journal" "$host" "$root/current"
 [[ ! -e "$journal" && $(readlink "$root/current") == "$previous" ]]
-prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host"
+prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
 write_journal_state "$journal" committed
 rm() { return 1; }
 if recover_activation_journal "$journal" "$host" "$root/current"; then exit 91; fi
@@ -629,25 +683,72 @@ recover_activation_journal "$journal" "$host" "$root/current"
 `)
     })
 
+    it('publishes only complete prepared journals and clears safe abandoned staging', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+host="$root/host"; assets="$root/assets"; journal="$root/activation"; candidate="$root/${'c'.repeat(40)}"
+mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$candidate"
+for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
+  name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"; printf '%s\nnew\n' "$MANAGED_MARKER" >"$assets/$name"
+done
+install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
+sync() { return 0; }
+copy_definition=$(declare -f copy_durable_file)
+copy_durable_file() { return 1; }
+if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 90; fi
+[[ ! -e "$journal" && ! -L "$journal" ]]
+if compgen -G "$root/activation.new.*" >/dev/null; then exit 91; fi
+eval "$copy_definition"
+state_definition=$(declare -f write_journal_state)
+write_journal_state() { return 1; }
+if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 92; fi
+[[ ! -e "$journal" && ! -L "$journal" ]]
+if compgen -G "$root/activation.new.*" >/dev/null; then exit 93; fi
+eval "$state_definition"
+sync() { return 1; }
+if prepare_activation_journal "$journal" "$candidate" '' "$assets" "$host" disabled; then exit 94; fi
+[[ ! -e "$journal" && ! -L "$journal" ]]
+if compgen -G "$root/activation.new.*" >/dev/null; then exit 95; fi
+unset -f sync
+mkdir "$root/activation.new.abandoned"
+mkdir "$root/outside"
+ln -s "$root/outside" "$root/activation.new.aliased"
+cleanup_abandoned_journal_staging "$root"
+[[ ! -e "$root/activation.new.abandoned" ]]
+[[ -L "$root/activation.new.aliased" && -d "$root/outside" ]]
+rm -f "$root/activation.new.aliased"
+mkdir "$journal"
+printf 'state=prepared\n' >"$journal/state"
+sync() { if [[ "\${*: -1}" == "$journal" && $(<"$journal/state") == state=committed ]]; then return 1; fi; return 0; }
+if write_journal_state "$journal" committed; then exit 96; fi
+grep -Fx 'state=prepared' "$journal/state"
+`)
+    })
+
     it('rolls back when the accepted state cannot be journaled', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-host="$root/host"; assets="$root/assets"; previous="$root/${'6'.repeat(40)}"; candidate="$root/${'7'.repeat(40)}"; journal="$root/activation"
-mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$previous" "$candidate"
+host="$root/host"; assets="$root/assets"; candidate="$root/${'7'.repeat(40)}"; journal="$root/activation"
+mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/usr/local/sbin" "$assets" "$candidate"
 for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf' 'deploy-release.sh:usr/local/sbin/mydsh-deploy-release'; do
   name=\${spec%%:*}; path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"; printf '%s\nnew\n' "$MANAGED_MARKER" >"$assets/$name"
 done
 validate_candidate_configs() { return 0; }
 validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
 install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
-systemctl() { return 0; }; caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync() { return 0; }
+enable_state=disabled
+service_enable_state() { printf '%s\n' "$enable_state"; }
+systemctl() { case "\${1:-} \${2:-}" in 'enable mydsh') enable_state=enabled ;; 'disable mydsh') enable_state=disabled ;; esac; return 0; }
+caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync() { return 0; }
 eval "$(declare -f write_journal_state | sed '1s/write_journal_state/write_journal_state_real/')"
 write_journal_state() { [[ $2 != committed ]] || return 1; write_journal_state_real "$@"; }
-ln -s "$previous" "$root/current"
-if activate_transaction "$candidate" "$previous" "$assets" "$host" "$root/current" "$journal"; then exit 90; fi
-[[ $(readlink "$root/current") == "$previous" ]]
+if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal"; then exit 90; fi
+[[ ! -e "$root/current" && ! -L "$root/current" ]]
+[[ $enable_state == disabled ]]
 grep -Fx old "$host/etc/caddy/Caddyfile"
 [[ ! -e "$journal" ]]
 `)
@@ -710,6 +811,7 @@ wait "$holder"
     expect(activation.indexOf('systemctl restart mydsh')).toBeLessThan(activation.indexOf('health_check'))
     expect(activation.indexOf('health_check')).toBeLessThan(activation.indexOf('caddy validate'))
     expect(activation.indexOf('caddy validate')).toBeLessThan(activation.indexOf('systemctl reload caddy'))
+    expect(activation.indexOf('systemctl enable mydsh')).toBeLessThan(activation.indexOf('write_journal_state "$journal" committed'))
     expect(activation).toMatch(/if caddy validate[\s\S]*systemctl reload caddy[\s\S]*recover_activation_journal/)
   })
 
