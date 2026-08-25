@@ -1313,6 +1313,8 @@ wait "$holder"
       expect(readme).not.toContain('sudo rm -rf -- "$target"')
       expect(readme).toContain('mydsh-deploy-release --rotate-invite')
       expect(readme).toContain('mydsh-deploy-release --rotate-session')
+      expect(readme).toMatch(/existing active healthy release|现有且健康的活动 release/)
+      expect(readme).toMatch(/fresh bootstrap.*deploy|全新 bootstrap.*部署/)
       expect(readme).not.toContain("sudo bash -c '\nset -euo pipefail\numask 077\nrotate()")
     }
   })

@@ -163,6 +163,8 @@ sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 
 更改邀请密钥会影响后续登录，但现有的 30 天 cookie 仍然有效。更改会话密钥会立即使全部 cookie 失效。稳定的 root helper 会获取部署锁，在服务器上生成新值，原子更新并同步私有环境文件，重启 DSH，并在验收失败时回滚文件和进程。两个命令都不会打印密钥。
 
+轮换要求现有且健康的活动 release。全新 bootstrap 必须先部署第一个 release，才能运行任一命令。
+
 ```bash
 sudo /usr/local/sbin/mydsh-deploy-release --rotate-invite
 # Use this instead to revoke every cookie:

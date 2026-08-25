@@ -163,6 +163,8 @@ sudo /usr/local/sbin/mydsh-deploy-release --prune "$candidate"
 
 Changing the invite secret affects later logins but leaves existing 30-day cookies valid. Changing the session secret immediately invalidates every cookie. The stable root helper takes the deployment lock, generates the value on the server, atomically updates and syncs the private environment, restarts DSH, and rolls back the file and process on failed acceptance. Neither command prints a secret.
 
+Rotation requires an existing active healthy release. A fresh bootstrap must deploy its first release before running either command.
+
 ```bash
 sudo /usr/local/sbin/mydsh-deploy-release --rotate-invite
 # Use this instead to revoke every cookie:
