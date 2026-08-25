@@ -481,7 +481,7 @@ write_journal_value() {
   local name=$2
   local value=$3
   local temporary
-  [[ $name == previous || $name == target || $name == service-enabled ]] || return 1
+  [[ $name == previous || $name == target || $name == service-enabled || $name == rollback-required ]] || return 1
   create_registered_temp_file "$journal" || return 1
   temporary=$CREATED_TEMP_FILE
   printf '%s\n' "$value" >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
@@ -570,6 +570,7 @@ prepare_activation_journal() {
   write_journal_value "$staging" previous "${previous:-none}" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" target "$target" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" service-enabled "$previous_enabled" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_value "$staging" rollback-required 1 || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_state "$staging" prepared || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   sync -f "$staging" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   mv -T -- "$staging" "$journal" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
@@ -591,19 +592,28 @@ recover_activation_journal() {
   local journal=${1:-$ACTIVATION_DIR}
   local host_root=${2:-}
   local current_path=${3:-$CURRENT_LINK}
+  local mode=${4:-normal}
+  local rollback_required=0
   local state
   local previous
   local previous_enabled
   local target
   local installed_caddy
+  [[ $mode == normal || $mode == force ]] || return 1
   [[ ! -e "$journal" && ! -L "$journal" ]] && return 0
   [[ -d "$journal" && ! -L "$journal" ]] || return 1
   state=$(sed -n 's/^state=//p' "$journal/state") || return 1
-  if [[ $state == committed ]]; then
+  if [[ -e "$journal/rollback-required" || -L "$journal/rollback-required" ]]; then
+    [[ -f "$journal/rollback-required" && ! -L "$journal/rollback-required" ]] || return 1
+    grep -Fqx 1 "$journal/rollback-required" || return 1
+    rollback_required=1
+  fi
+  if [[ $state == committed && $mode == normal && $rollback_required == 0 ]]; then
     remove_activation_journal "$journal" || return 1
     return 0
   fi
-  [[ $state == prepared ]] || return 1
+  [[ $state == prepared || $state == committed ]] || return 1
+  if [[ $mode == normal && $rollback_required != 1 ]]; then return 1; fi
   previous=$(<"$journal/previous") || return 1
   target=$(<"$journal/target") || return 1
   previous_enabled=$(<"$journal/service-enabled") || return 1
@@ -625,6 +635,19 @@ recover_activation_journal() {
   caddy validate --config "$installed_caddy" --adapter caddyfile || return 1
   systemctl reload caddy || return 1
   remove_activation_journal "$journal" || return 1
+}
+
+finalize_committed_journal() {
+  local journal=$1
+  [[ -d "$journal" && ! -L "$journal" ]] || return 1
+  grep -Fqx 'state=committed' "$journal/state" || return 1
+  [[ -f "$journal/rollback-required" && ! -L "$journal/rollback-required" ]] || return 1
+  grep -Fqx 1 "$journal/rollback-required" || return 1
+  rm -f -- "$journal/rollback-required" || return 1
+  if ! sync -f "$journal"; then
+    write_journal_value "$journal" rollback-required 1 || true
+    return 1
+  fi
 }
 
 service_enable_state() {
@@ -754,13 +777,10 @@ activate_transaction() {
       if health_check "$target"; then
         if caddy validate --config "$installed_caddy" --adapter caddyfile && systemctl reload caddy; then
           if public_acceptance && authenticated_acceptance && systemctl enable mydsh; then
-            if write_journal_state "$journal" committed; then
+            if write_journal_state "$journal" committed && finalize_committed_journal "$journal"; then
               if ! remove_activation_journal "$journal"; then
                 printf 'mydsh-deploy-release: activation accepted but committed journal cleanup was not durable at %s; the next operation will retry if it remains\n' "$journal" >&2
               fi
-              return 0
-            elif grep -Fqx 'state=committed' "$journal/state"; then
-              printf 'mydsh-deploy-release: activation accepted with committed journal retained at %s; cleanup will retry next operation\n' "$journal" >&2
               return 0
             fi
           fi
@@ -768,8 +788,8 @@ activate_transaction() {
       fi
     fi
   fi
-  if ! recover_activation_journal "$journal" "$host_root" "$current_path"; then
-    printf 'mydsh-deploy-release: activation recovery incomplete; retry with journal %s intact\n' "$journal" >&2
+  if ! recover_activation_journal "$journal" "$host_root" "$current_path" force; then
+    printf 'mydsh-deploy-release: forced rollback incomplete; recovery required with journal retained at %s\n' "$journal" >&2
   fi
   return 1
 }

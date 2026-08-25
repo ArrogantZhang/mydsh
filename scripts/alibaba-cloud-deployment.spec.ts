@@ -228,6 +228,10 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('recover_activation_journal')
     expect(script).toContain('write_journal_state "$staging" prepared')
     expect(script).toContain('write_journal_state "$journal" committed')
+    expect(script).toContain('rollback-required')
+    expect(script).toContain('finalize_committed_journal')
+    expect(script).toContain('recover_activation_journal "$journal" "$host_root" "$current_path" force')
+    expect(script).not.toContain('activation accepted with committed journal retained')
     expect(script).toContain('service-enabled')
     expect(script).toContain('restore_service_enable_state')
     expect(script).toContain('root-helper')
@@ -674,6 +678,7 @@ recover_activation_journal "$journal" "$host" "$root/current"
 [[ ! -e "$journal" && $(readlink "$root/current") == "$previous" ]]
 prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
 write_journal_state "$journal" committed
+finalize_committed_journal "$journal"
 rm() { return 1; }
 if recover_activation_journal "$journal" "$host" "$root/current"; then exit 91; fi
 [[ -d "$journal" && $(readlink "$root/current") == "$previous" ]]
@@ -745,12 +750,26 @@ service_enable_state() { printf '%s\n' "$enable_state"; }
 systemctl() { case "\${1:-} \${2:-}" in 'enable mydsh') enable_state=enabled ;; 'disable mydsh') enable_state=disabled ;; esac; return 0; }
 caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync() { return 0; }
 eval "$(declare -f write_journal_state | sed '1s/write_journal_state/write_journal_state_real/')"
-write_journal_state() { [[ $2 != committed ]] || return 1; write_journal_state_real "$@"; }
-if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal"; then exit 90; fi
+write_journal_state() { if [[ $2 == committed ]]; then printf 'state=committed\n' >"$1/state"; return 2; fi; write_journal_state_real "$@"; }
+if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal" >"$root/first-output" 2>&1; then exit 90; fi
 [[ ! -e "$root/current" && ! -L "$root/current" ]]
 [[ $enable_state == disabled ]]
 grep -Fx old "$host/etc/caddy/Caddyfile"
 [[ ! -e "$journal" ]]
+if grep -F 'activation accepted' "$root/first-output"; then exit 91; fi
+restore_definition=$(declare -f restore_host_configs)
+restore_host_configs() { return 1; }
+if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal" >"$root/second-output" 2>&1; then exit 92; fi
+[[ -d "$journal" && -f "$journal/rollback-required" ]]
+grep -Fx 'state=committed' "$journal/state"
+[[ $(readlink "$root/current") == "$candidate" && $enable_state == enabled ]]
+if grep -F 'activation accepted' "$root/second-output"; then exit 93; fi
+grep -F 'forced rollback incomplete; recovery required' "$root/second-output"
+eval "$restore_definition"
+recover_activation_journal "$journal" "$host" "$root/current"
+[[ ! -e "$root/current" && ! -L "$root/current" && ! -e "$journal" ]]
+[[ $enable_state == disabled ]]
+grep -Fx old "$host/etc/caddy/Caddyfile"
 `)
     })
 
