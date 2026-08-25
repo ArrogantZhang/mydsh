@@ -37,11 +37,29 @@ verify_static_inputs() {
   done
 }
 
+validate_manifest_ref() {
+  local ref=$1
+  local remainder
+  local component
+  local components=()
+  case "$ref" in
+    refs/heads/*) remainder=${ref#refs/heads/} ;;
+    refs/tags/*) remainder=${ref#refs/tags/} ;;
+    *) return 1 ;;
+  esac
+  [[ -n "$remainder" && $ref =~ ^refs/(heads|tags)/[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ $remainder != /* && $remainder != */ && $remainder != *..* && $remainder != *//* && $remainder != *'@{'* ]] || return 1
+  IFS=/ read -r -a components <<<"$remainder"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && $component != .* && $component != *. && $component != *.lock ]] || return 1
+  done
+}
+
 resolve_named_ref_commit() {
   local ref=$1
   local repository=${2:-.}
   local commit
-  [[ $ref == refs/heads/* || $ref == refs/tags/* ]] || return 1
+  validate_manifest_ref "$ref" || return 1
   git check-ref-format "$ref" >/dev/null || return 1
   git -C "$repository" show-ref --verify --quiet "$ref" || return 1
   commit=$(git -C "$repository" rev-parse --verify "${ref}^{commit}") || return 1

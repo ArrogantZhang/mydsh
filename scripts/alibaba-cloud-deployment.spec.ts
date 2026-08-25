@@ -281,6 +281,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
     expect(script).toContain('verify_static_inputs')
     expect(script).toContain('resolve_named_ref_commit')
+    expect(script).toContain('validate_manifest_ref')
     expect(script).toContain('git check-ref-format "$ref"')
     expect(script).toContain('"${ref}^{commit}"')
     expect(script).not.toContain('check-ref-format --branch')
@@ -541,14 +542,34 @@ git -C "$root/repo" add file
 git -C "$root/repo" commit -qm reviewed
 git -C "$root/repo" branch reviewed
 git -C "$root/repo" tag reviewed
+git -C "$root/repo" branch feature-x
+git -C "$root/repo" tag v1.2.3
 branch_commit=$(resolve_named_ref_commit refs/heads/reviewed "$root/repo")
 tag_commit=$(resolve_named_ref_commit refs/tags/reviewed "$root/repo")
 [[ $branch_commit =~ ^[0-9a-f]{40}$ && $tag_commit == "$branch_commit" ]]
-invalid_refs=(reviewed HEAD refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?' 'refs/tags/back\\slash')
+resolve_named_ref_commit refs/heads/feature-x "$root/repo" >/dev/null
+resolve_named_ref_commit refs/tags/v1.2.3 "$root/repo" >/dev/null
+invalid_refs=(reviewed HEAD refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?' 'refs/tags/back\\slash' refs/heads/foo@bar refs/tags/v1+build)
 for invalid in "\${invalid_refs[@]}"; do
   if resolve_named_ref_commit "$invalid" "$root/repo" >/dev/null 2>&1; then exit 90; fi
 done
 `, 'package-release.sh')
+    })
+
+    it('uses the same ordinary ref grammar in producer and consumer', () => {
+      expectBashSuccess(`
+set -euo pipefail
+consumer_body=$(declare -f validate_manifest_ref | tail -n +2)
+source "${resolve(deploymentRoot, 'package-release.sh').replaceAll('\\', '/')}"
+producer_body=$(declare -f validate_manifest_ref | tail -n +2)
+[[ $producer_body == "$consumer_body" ]]
+valid_refs=(refs/heads/feature-x refs/tags/v1.2.3)
+invalid_refs=(refs/heads/foo@bar refs/tags/v1+build refs/tags/foo..bar 'refs/heads/@{bad}' refs/heads/.hidden refs/tags/release.lock 'refs/heads/what?' 'refs/tags/back\\slash')
+for ref in "\${valid_refs[@]}"; do validate_manifest_ref "$ref"; done
+for ref in "\${invalid_refs[@]}"; do
+  if validate_manifest_ref "$ref"; then exit 90; fi
+done
+`)
     })
 
     it('caps the root-private upload copy even when the caller file grows', () => {
