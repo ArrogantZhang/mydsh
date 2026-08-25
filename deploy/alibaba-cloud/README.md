@@ -114,7 +114,7 @@ Keep model keys in the DSH credential store. Never add them to this directory, a
 
 ## Upgrade and roll back
 
-For an upgrade, run `package-release.sh` for the new reviewed ref, create a fresh remote staging directory, upload only the new artifact and checksum, and invoke `/usr/local/sbin/mydsh-deploy-release` with those two files. Do not upload or replace bootstrap assets during an upgrade. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
+For an upgrade, run `package-release.sh` for the new reviewed ref, create a fresh remote staging directory, upload the one atomic artifact-set directory that contains the tarball and checksum, and invoke `/usr/local/sbin/mydsh-deploy-release` with that directory as its single argument. Do not upload or replace bootstrap assets during an upgrade. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
 
 ```bash
 UPGRADE_STAGE=$(mktemp -d)

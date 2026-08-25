@@ -335,6 +335,10 @@ validate_candidate_unit_contract() {
   local unit=$1
   local environment_files=()
   [[ -f "$unit" && ! -L "$unit" ]] || return 1
+  require_unit_value_once "$unit" After network-online.target || return 1
+  require_unit_value_once "$unit" Wants network-online.target || return 1
+  require_unit_value_once "$unit" StartLimitIntervalSec 60 || return 1
+  require_unit_value_once "$unit" StartLimitBurst 5 || return 1
   require_unit_value_once "$unit" Type simple || return 1
   require_unit_value_once "$unit" User mydsh || return 1
   require_unit_value_once "$unit" Group mydsh || return 1
@@ -357,6 +361,7 @@ validate_candidate_unit_contract() {
   require_unit_value_once "$unit" ProtectHome true || return 1
   require_unit_value_once "$unit" ReadWritePaths '/var/lib/mydsh /srv/mydsh/workspace' || return 1
   require_unit_value_once "$unit" WantedBy multi-user.target || return 1
+  if grep -Eq '^(SystemCallFilter|IPAddressDeny|RestrictAddressFamilies)=' "$unit"; then return 1; fi
 }
 
 validate_temp_directory() {

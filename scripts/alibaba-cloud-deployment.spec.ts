@@ -173,6 +173,11 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('validate_archive_members')
     expect(script).toContain('validate_release_manifest')
     expect(script).toContain('validate_candidate_unit_contract')
+    expect(script).toContain('After network-online.target')
+    expect(script).toContain('Wants network-online.target')
+    expect(script).toContain('StartLimitIntervalSec 60')
+    expect(script).toContain('StartLimitBurst 5')
+    expect(script).toMatch(/SystemCallFilter\|IPAddressDeny\|RestrictAddressFamilies/)
     expect(script).toContain('helper_journal_format=1')
     expect(script).toContain('apps/cli/lib/bin.js')
     expect(script).toContain('apps/web/dist/index.html')
@@ -585,6 +590,21 @@ if validate_candidate_unit_contract "$unit"; then exit 92; fi
 cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
 sed -i 's#^ReadWritePaths=.*#ReadWritePaths=/var/lib/mydsh /tmp#' "$unit"
 if validate_candidate_unit_contract "$unit"; then exit 93; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+sed -i '/^After=network-online.target$/d' "$unit"
+if validate_candidate_unit_contract "$unit"; then exit 94; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+printf 'StartLimitBurst=5\n' >>"$unit"
+if validate_candidate_unit_contract "$unit"; then exit 95; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+printf 'SystemCallFilter=@system-service\n' >>"$unit"
+if validate_candidate_unit_contract "$unit"; then exit 96; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+printf 'IPAddressDeny=any\n' >>"$unit"
+if validate_candidate_unit_contract "$unit"; then exit 97; fi
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$unit"
+printf 'RestrictAddressFamilies=AF_UNIX\n' >>"$unit"
+if validate_candidate_unit_contract "$unit"; then exit 98; fi
 `)
     })
 
@@ -888,6 +908,8 @@ wait "$holder"
       expect(readme).toContain('git archive "$DEPLOY_REF"')
       expect(readme).toContain('package-release.sh "$DEPLOY_REF"')
       expect(readme).toContain('node:24-bookworm')
+      expect(readme).toContain("mydsh-deploy-release './${UPGRADE_SET##*/}'")
+      expect(readme).not.toMatch(/with those two files|这两个文件调用/)
       expect(readme).not.toContain('scp deploy/alibaba-cloud/{Caddyfile')
       expect(readme).not.toContain('feat/invite-auth-deployment')
       expect(readme).toContain('mktemp -d "$HOME/mydsh-deploy.XXXXXX"')

@@ -114,7 +114,7 @@ printf "Authenticated smoke passed.\n"
 
 ## 升级和回滚
 
-升级时，为新的已评审 ref 运行 `package-release.sh`，创建新的远程 staging 目录，只上传新 artifact 与 checksum，再用这两个文件调用 `/usr/local/sbin/mydsh-deploy-release`。升级时不要上传或替换 bootstrap 文件。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；helper 拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
+升级时，为新的已评审 ref 运行 `package-release.sh`，创建新的远程 staging 目录，上传一个包含 tarball 和 checksum 的原子 artifact-set 目录，再把该目录作为唯一参数调用 `/usr/local/sbin/mydsh-deploy-release`。升级时不要上传或替换 bootstrap 文件。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；helper 拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
 
 ```bash
 UPGRADE_STAGE=$(mktemp -d)
