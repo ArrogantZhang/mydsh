@@ -20,6 +20,12 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 该认证模型面向共享同一 DSH 实例的小规模可信群体。有效 Cookie 传递实例既有的浏览器权限；它不会创建身份、按用户划分的工作区、会话所有权或命令隔离。
 
+阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。共享的非阻塞宿主锁将 bootstrap、部署和回滚串行化。单个激活事务同时覆盖 release 符号链接、`mydsh.service`、Caddyfile 和 Caddy systemd drop-in；失败时会恢复之前的代码和全部 3 个宿主配置文件，再重启之前的服务并重新加载 Caddy。
+
+`mydsh-build` 在空白的最小环境中 clone 并构建候选 release，使用独立的 home、缓存和临时 `DSH_HOME`。它无法读取运行时用户的 home、工作区、环境文件或认证密钥。root 在激活前将完成的候选 release 设为不可变，而 `mydsh` 只运行已接受的 release。
+
+Git bundle 是传输格式，不是真实性证明：`git bundle verify` 检查结构、前置对象和对象连通性。部署信任管理员经过评审的本地 checkout，以及创建 bundle 时另行验证的签名 ref。helper 会保留该 bundle 的 root-only 副本，并在 builder 执行后，将每项特权部署输入与可信 commit 逐字节比较，然后才验证候选宿主配置以及公开和认证行为。
+
 ## 会话和滥用控制
 
 会话 token 包含版本、过期时间、随机 nonce 和 HMAC-SHA256 签名。仅限 host 的安全 Cookie 默认有效期为 30 天。更改邀请码只控制之后的登录；轮换签名秘密会撤销所有会话。退出登录只清除浏览器 Cookie，而不会在服务端撤销 token。
@@ -38,6 +44,12 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 **让 Caddy 状态检查提供就绪状态，而不使用 Cordis 依赖。** Caddy 会在认证子请求不可用时保持失败关闭，但外部状态无法协调进程内前端 fallback 与 route 注册或 HMR 撤回的顺序。就绪依赖可防止该 fallback 在相同的启动和卸载窗口中存在。
 
+**运行 release 内的 root helper。** 从 `/opt/mydsh/current` 执行部署控制流，会让正在激活的候选 release 选择负责安装 unit、处理密钥和执行回滚的 root 程序。独立安装且受管理的 helper 将这项权限保留在此前经过评审的宿主控制平面中。
+
+**以运行时用户执行构建。** 依赖生命周期脚本和仓库构建工具将因此获得持久 DSH 状态、共享工作区和运行时可读凭据的访问权。独立构建身份只向不受信任的构建步骤提供可丢弃的候选数据和缓存状态。
+
+**使用仅代码回滚。** release 可以同时更改 systemd unit、Caddy 配置和代码。只回滚符号链接可能让旧代码与新宿主配置配对，因此激活和恢复将这 4 个值作为一个串行事务处理。
+
 ## 后果
 
 - Caddy 是必需的安全组件，`3080` 端口必须保持私有；直接访问会绕过认证。
@@ -45,3 +57,6 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 - 邀请码认证发生 HMR 时，也会拆除并重新挂载依赖就绪状态的 Web runtime 和前端 fallback。
 - 登录限流会在进程重启时重置，且不会跨副本协调，因此该部署只运行一个 DSH 进程。
 - 所有通过认证的人共享相同的实例权限；多租户或互不信任的访问需要不同的身份与授权设计。
+- bootstrap 和 release 操作不会在特权路径覆盖不受管理的文件或跟随符号链接，而是直接失败。
+- 构建无法使用生产状态或密钥，代价是增加第二个系统账户和独立构建缓存。
+- 可部署的 Git bundle 必须来自可信且经过评审的 checkout；仅验证 bundle 并不足够。

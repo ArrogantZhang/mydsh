@@ -8,46 +8,48 @@ This tutorial deploys one invite-protected DeepSeek Harness Web process on an Al
 
 Use a fresh Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
 
-The bootstrap installs Node.js 24 from the [official NodeSource repository](https://github.com/nodesource/distributions), pnpm 11.7.0, and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). Review both repository procedures before running a root script on a long-lived host.
+The bootstrap installs Node.js 24 from the [official NodeSource repository](https://github.com/nodesource/distributions), pnpm 11.7.0, and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` before authoring either APT source; package signatures authenticate repository output, while the exact Node.js and Caddy patch versions may advance within those signed repositories. Review both repository procedures before running a root script on a long-lived host.
 
-The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and branch `feat/invite-auth-deployment`. Replace the hostname and SSH destination, but pass the exact branch placed in the bundle.
+The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed release tag stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed branch or signed tag selected for this deployment.
 
 ## Prepare and upload a release
 
 Run these commands from the repository root on your development machine. The bundle contains the named branch and its reachable commits without copying your working tree or untracked files.
 
 ```bash
+set -euo pipefail
+DEPLOY_REF=refs/tags/dsh-reviewed-YYYYMMDD
+REMOTE=ecs-admin@203.0.113.10
 git status --short
-git bundle create mydsh.bundle feat/invite-auth-deployment
+git bundle create mydsh.bundle "$DEPLOY_REF"
 git bundle verify mydsh.bundle
-ssh ecs-admin@203.0.113.10 'sudo install -d -o "$USER" -g "$(id -gn)" -m 0700 /tmp/mydsh-deploy'
-scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} ecs-admin@203.0.113.10:/tmp/mydsh-deploy/
-scp mydsh.bundle ecs-admin@203.0.113.10:/tmp/mydsh-deploy/
+REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+[[ $REMOTE_STAGE == */mydsh-deploy.* ]]
+scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
+scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ```
 
-The first `scp` uploads all five bootstrap and deployment assets to the same private temporary directory. The overlay stays in the Git bundle and is validated from the checked-out release.
+The first `scp` uploads all five bootstrap and deployment assets to the same unpredictable, SSH-user-owned directory. The overlay stays in the Git bundle and is validated from the checked-out release. `git bundle verify` checks bundle structure, prerequisites, and object connectivity; it does not prove authenticity. Trust comes from the reviewed local checkout and, when used, verification of the selected signed tag or commit before bundle creation.
 
 ## Bootstrap the host
 
-Connect to the instance and run the bootstrap once. Re-running it updates the public hostname, managed service files, package sources, and runtimes while preserving `/etc/mydsh/mydsh.env` and its secrets.
+Run bootstrap from the uploaded directory. It installs the reviewed control-plane helper at `/usr/local/sbin/mydsh-deploy-release`; deployments and rollbacks never execute root control flow from a release directory. Re-running bootstrap updates files carrying the stable managed marker and refuses symlinks, wrong file types, non-root ownership, or unmanaged targets instead of replacing them.
 
 ```bash
-ssh ecs-admin@203.0.113.10
-cd /tmp/mydsh-deploy
-sudo bash ./bootstrap-host.sh dsh.example.com
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-The script creates the `mydsh` system account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, and `/usr/sbin/nologin` or its `/sbin/nologin` equivalent before changing runtime-directory ownership. It validates Caddy and starts Caddy, but it does not start `mydsh` before a release exists. A pre-existing unmanaged target is backed up once with suffix `.pre-mydsh`; a later unmanaged collision fails instead of overwriting that backup.
+The script creates separate `mydsh` runtime and `mydsh-build` builder accounts, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, distinct groups, and `/usr/sbin/nologin` or its `/sbin/nologin` equivalent before changing directory ownership. The builder receives only its private home, scratch `DSH_HOME`, package cache, and candidate staging tree; runtime data, workspace, environment files, and secrets remain inaccessible. Bootstrap validates and starts Caddy, but does not start `mydsh` before a release exists.
 
 ## Deploy the release
 
-Deploy the exact branch carried by the bundle. The script verifies the bundle, installs frozen dependencies as `mydsh`, runs the invite-auth tests, builds the repository, dumps the composed configuration, publishes a commit-named immutable directory, switches `/opt/mydsh/current` atomically, restarts DSH, waits for a bounded local health check, then validates and reloads Caddy. Failure in any activation step restores the previous release.
+Deploy the exact ref carried by the bundle through the root-installed helper. It runs clone, dependency lifecycle scripts, tests, build, and config dump as `mydsh-build` under an empty, minimal environment and scratch `DSH_HOME`, then makes the completed release root-owned and immutable. Activation validates the candidate unit and Caddy configuration, serializes all host changes with bootstrap and rollback, installs the candidate unit and proxy files, switches `/opt/mydsh/current`, verifies the runtime process and public/authenticated behavior, and accepts the release only after every check passes. Any failure restores the previous code link and all three host configuration files; first-deployment failure restores bootstrap configuration and stops DSH.
 
 ```bash
-sudo bash ./deploy-release.sh ./mydsh.bundle feat/invite-auth-deployment
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-Do not remove the uploaded bundle until the command returns successfully. A failed update restores the previous `current` target and restarts it; a failed first deployment removes only the new validated symlink and stops `mydsh`. The failed immutable release remains available for diagnosis.
+The remote command removes the upload only after success. A failed update retains the exact bundle and uploaded assets, restores the previous `current` target, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, and stops `mydsh`.
 
 ## Verify HTTPS and login
 
@@ -108,7 +110,7 @@ Keep model keys in the DSH credential store. Never add them to this directory, a
 
 ## Upgrade and roll back
 
-Create a new bundle from a reviewed deployment branch, upload it beside the five assets, and run `deploy-release.sh` with that bundle and its exact branch. Each full commit receives one directory under `/opt/mydsh/releases`; the script refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
+Create a new bundle from a reviewed deployment ref, upload it beside the five assets, and invoke `/usr/local/sbin/mydsh-deploy-release` with that bundle and exact ref. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
 
 The deploy script rolls back automatically when restart, health acceptance, Caddy validation, or Caddy reload fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same validation, atomic switch, restart, health check, and Caddy activation.
 
@@ -119,7 +121,22 @@ commit=0123456789abcdef0123456789abcdef01234567
 target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
 [[ ${target%/*} == /opt/mydsh/releases ]]
 [[ ${target##*/} == "$commit" ]]
-sudo bash /opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh --rollback "$commit"
+sudo /usr/local/sbin/mydsh-deploy-release --rollback "$commit"
+```
+
+Inspect disk usage with `sudo du -sh /opt/mydsh/releases/*` before pruning. Never remove `/opt/mydsh/current` or the selected rollback release. For any other candidate, require a full lowercase commit, resolve it under the release root, and compare it with the active release before removing exactly that directory.
+
+```bash
+set -euo pipefail
+candidate=0123456789abcdef0123456789abcdef01234567
+[[ $candidate =~ ^[0-9a-f]{40}$ ]]
+target=$(sudo realpath -e -- "/opt/mydsh/releases/$candidate")
+[[ ${target%/*} == /opt/mydsh/releases ]]
+[[ ${target##*/} == "$candidate" ]]
+current=$(sudo realpath -e -- /opt/mydsh/current)
+[[ $target != "$current" ]]
+# Confirm that $candidate is not the selected rollback release, then run:
+sudo rm -rf -- "$target"
 ```
 
 ## Rotate authentication secrets

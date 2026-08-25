@@ -20,6 +20,12 @@ Plugin config holds only uppercase `DSH_*` environment references and non-secret
 
 This authentication model is for a small trusted group sharing one DSH instance. A valid cookie conveys the instance's existing browser authority; it does not create identities, per-user workspaces, session ownership, or command isolation.
 
+The Alibaba Cloud deployment installs reviewed root control flow at `/usr/local/sbin/mydsh-deploy-release`, outside every release. A shared nonblocking host lock serializes bootstrap, deployment, and rollback. One activation transaction covers the release symlink, `mydsh.service`, the Caddyfile, and the Caddy systemd drop-in; failure restores the preceding code and all three host configuration files before restarting the previous service and reloading Caddy.
+
+`mydsh-build` clones and builds candidates under an empty minimal environment with its own home, cache, and scratch `DSH_HOME`. It cannot read the runtime user's home, workspace, environment files, or authentication secrets. Root makes a completed candidate immutable before activation, while `mydsh` only runs the accepted release.
+
+A Git bundle is a transport, not an authenticity proof: `git bundle verify` checks structure, prerequisites, and object connectivity. Deployment trusts the administrator's reviewed local checkout and any separately verified signed ref used to create the bundle. The helper retains a root-only copy of that bundle and, after builder execution, compares every privileged deployment input byte-for-byte with the trusted commit before validating candidate host configuration and public plus authenticated behavior.
+
 ## Session and abuse controls
 
 The session token carries a version, expiry, random nonce, and HMAC-SHA256 signature. The host-only secure cookie defaults to 30 days. Changing the invite code controls future login only; rotating the signing secret revokes all sessions. Logout is browser-side cookie clearing rather than server-side token revocation.
@@ -38,6 +44,12 @@ The [package README](../../../../packages/host/invite-auth/README.md) owns curre
 
 **Let Caddy status checks provide readiness without a Cordis dependency.** Caddy fails closed when its auth subrequest is unavailable, but an external status cannot order the in-process frontend fallback against route registration or HMR withdrawal. The readiness dependency prevents that fallback from existing during the same startup and unload windows.
 
+**Run a release-contained root helper.** Executing deployment control flow from `/opt/mydsh/current` would let the candidate being activated choose the root program that installs units, handles secrets, and performs rollback. A separately installed managed helper keeps that authority in the previously reviewed host control plane.
+
+**Build as the runtime-user.** Dependency lifecycle scripts and repository build tools would then execute with access to persistent DSH state, the shared workspace, and any runtime-readable credentials. A distinct builder identity gives untrusted build steps only disposable candidate and cache state.
+
+**Use code-only rollback.** A release can change its systemd unit and Caddy configuration together with code. Rolling back only the symlink can pair old code with new host configuration, so activation and recovery treat all four values as one serialized transaction.
+
 ## Consequences
 
 - Caddy is a required security component and port `3080` must remain private; direct access bypasses authentication.
@@ -45,3 +57,6 @@ The [package README](../../../../packages/host/invite-auth/README.md) owns curre
 - HMR of invite auth also tears down and remounts the readiness-dependent Web runtime and frontend fallback.
 - Login rate limits reset on process restart and do not coordinate across replicas, so this deployment runs one DSH process.
 - Every authenticated person shares the same instance authority; multi-tenant or mutually untrusted access requires a different identity and authorization design.
+- Bootstrap and release operations fail rather than overwrite unmanaged files or follow symlinks at privileged paths.
+- Builds cannot use production state or secrets, at the cost of a second system account and separate build cache.
+- A deployable Git bundle must come from a trusted reviewed checkout; bundle verification alone is insufficient.

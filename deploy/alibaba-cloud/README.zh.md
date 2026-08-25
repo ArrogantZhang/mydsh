@@ -8,46 +8,48 @@
 
 使用一台全新的 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
 
-bootstrap 脚本从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24，同时安装 pnpm 11.7.0，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
+bootstrap 脚本从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24，同时安装 pnpm 11.7.0，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本只会在 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` 且 Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` 时写入相应 APT 软件源；软件包签名用于认证软件源输出，而 Node.js 和 Caddy 的具体补丁版本可能在这些已签名软件源中前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
-下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10` 和分支 `feat/invite-auth-deployment`。请替换主机名和 SSH 目标，但必须传入 bundle 中包含的确切分支。
+下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的 release tag 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标，以及经过评审的分支或签名 tag。
 
 ## 准备并上传 release
 
 在开发机的仓库根目录运行以下命令。bundle 包含指定分支及其可达 commit，不会复制工作树或未跟踪文件。
 
 ```bash
+set -euo pipefail
+DEPLOY_REF=refs/tags/dsh-reviewed-YYYYMMDD
+REMOTE=ecs-admin@203.0.113.10
 git status --short
-git bundle create mydsh.bundle feat/invite-auth-deployment
+git bundle create mydsh.bundle "$DEPLOY_REF"
 git bundle verify mydsh.bundle
-ssh ecs-admin@203.0.113.10 'sudo install -d -o "$USER" -g "$(id -gn)" -m 0700 /tmp/mydsh-deploy'
-scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} ecs-admin@203.0.113.10:/tmp/mydsh-deploy/
-scp mydsh.bundle ecs-admin@203.0.113.10:/tmp/mydsh-deploy/
+REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+[[ $REMOTE_STAGE == */mydsh-deploy.* ]]
+scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
+scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ```
 
-第一个 `scp` 将全部 5 个 bootstrap 和部署文件上传到同一个私有临时目录。overlay 保留在 Git bundle 中，并从检出的 release 内接受验证。
+第一个 `scp` 将全部 5 个 bootstrap 和部署文件上传到同一个不可预测、由 SSH 用户拥有的目录。overlay 保留在 Git bundle 中，并从检出的 release 内接受验证。`git bundle verify` 检查 bundle 结构、前置对象和对象连通性，但不证明真实性。信任来自经过评审的本地 checkout；使用签名 tag 或 commit 时，还来自创建 bundle 前对所选签名的验证。
 
 ## 初始化主机
 
-连接实例并运行一次 bootstrap。再次运行会更新公开主机名、托管的服务文件、软件源和运行时，同时保留 `/etc/mydsh/mydsh.env` 及其中的密钥。
+从上传目录运行 bootstrap。脚本会将经过评审的控制平面 helper 安装到 `/usr/local/sbin/mydsh-deploy-release`；部署和回滚绝不会从 release 目录执行 root 控制流。再次运行时，bootstrap 只更新带有稳定托管标记的文件；遇到符号链接、错误文件类型、非 root 所有权或不受管理的目标时会拒绝替换。
 
 ```bash
-ssh ecs-admin@203.0.113.10
-cd /tmp/mydsh-deploy
-sudo bash ./bootstrap-host.sh dsh.example.com
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-脚本创建 `mydsh` 系统账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 在更改运行时目录所有权前，要求该范围、非 root UID，以及 `/usr/sbin/nologin` 或等价的 `/sbin/nologin`。它会验证并启动 Caddy，但在 release 存在之前不会启动 `mydsh`。脚本为已有且不受管理的目标创建一次 `.pre-mydsh` 后缀备份；如果之后再次出现不受管理的冲突，脚本会失败，不会覆盖该备份。
+脚本创建相互独立的 `mydsh` 运行时账户和 `mydsh-build` 构建账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 在更改目录所有权前，要求该范围、非 root UID、不同的 group，以及 `/usr/sbin/nologin` 或等价的 `/sbin/nologin`。构建账户只能访问自己的 home、临时 `DSH_HOME`、包缓存和候选 staging tree；运行时数据、工作区、环境文件和密钥保持不可访问。bootstrap 会验证并启动 Caddy，但在 release 存在之前不会启动 `mydsh`。
 
 ## 部署 release
 
-部署 bundle 携带的确切分支。脚本会验证 bundle，以 `mydsh` 身份安装锁定依赖并运行 invite-auth 测试，构建仓库，转储组合配置，发布以 commit 命名的不可变目录，原子切换 `/opt/mydsh/current`，重启 DSH，等待有界的本机健康检查，然后验证并重新加载 Caddy。任何激活步骤失败都会恢复上一个 release。
+通过 root 安装的 helper 部署 bundle 携带的确切 ref。helper 以 `mydsh-build` 身份在空白的最小环境和临时 `DSH_HOME` 下执行 clone、依赖生命周期脚本、测试、构建和配置转储，然后将完成的 release 设为 root 所有且不可变。激活会验证候选 unit 和 Caddy 配置，将全部宿主变更与 bootstrap 和回滚串行化，安装候选 unit 和代理文件，切换 `/opt/mydsh/current`，验证运行时进程以及公开和认证行为，并仅在全部检查通过后接受 release。任何失败都会恢复上一个代码链接和全部 3 个宿主配置文件；首次部署失败会恢复 bootstrap 配置并停止 DSH。
 
 ```bash
-sudo bash ./deploy-release.sh ./mydsh.bundle feat/invite-auth-deployment
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-命令成功返回前不要删除上传的 bundle。更新失败时，脚本会恢复上一个 `current` 目标并将其重启；首次部署失败时，脚本只删除新建且已验证的符号链接并停止 `mydsh`。失败的不可变 release 会保留以供诊断。
+远程命令只在成功后删除上传目录。更新失败时，它会保留确切的 bundle 和上传文件，恢复上一个 `current` 目标并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接并停止 `mydsh`。
 
 ## 验证 HTTPS 和登录
 
@@ -108,9 +110,9 @@ printf "Authenticated smoke passed.\n"
 
 ## 升级和回滚
 
-从经过评审的部署分支创建新 bundle，将其上传到 5 个部署文件所在目录，然后使用该 bundle 及其确切分支运行 `deploy-release.sh`。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；脚本拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
+从经过评审的部署 ref 创建新 bundle，将其上传到 5 个部署文件所在目录，然后使用该 bundle 及其确切 ref 调用 `/usr/local/sbin/mydsh-deploy-release`。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；helper 拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
 
-重启、健康检查验收、Caddy 验证或 Caddy 重新加载失败时，deploy 脚本会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，以 canonical 路径解析目录，并在脚本执行相同的验证、原子切换、重启、健康检查和 Caddy 激活之前，证明目录的父路径和 basename 完全匹配。
+重启、健康检查验收、Caddy 验证或 Caddy 重新加载失败时，deploy helper 会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，解析目录的规范化真实路径，并在 helper 执行相同的验证、原子切换、重启、健康检查和 Caddy 激活之前，证明目录的父路径和 basename 完全匹配。
 
 ```bash
 set -euo pipefail
@@ -119,7 +121,22 @@ commit=0123456789abcdef0123456789abcdef01234567
 target=$(sudo realpath -e -- "/opt/mydsh/releases/$commit")
 [[ ${target%/*} == /opt/mydsh/releases ]]
 [[ ${target##*/} == "$commit" ]]
-sudo bash /opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh --rollback "$commit"
+sudo /usr/local/sbin/mydsh-deploy-release --rollback "$commit"
+```
+
+清理前先使用 `sudo du -sh /opt/mydsh/releases/*` 检查磁盘占用。绝不能删除 `/opt/mydsh/current` 或选定的回滚 release。对于其他候选目录，必须要求完整的小写 commit，在 release 根目录内解析其真实路径，并在精确删除该目录前与活动 release 比较。
+
+```bash
+set -euo pipefail
+candidate=0123456789abcdef0123456789abcdef01234567
+[[ $candidate =~ ^[0-9a-f]{40}$ ]]
+target=$(sudo realpath -e -- "/opt/mydsh/releases/$candidate")
+[[ ${target%/*} == /opt/mydsh/releases ]]
+[[ ${target##*/} == "$candidate" ]]
+current=$(sudo realpath -e -- /opt/mydsh/current)
+[[ $target != "$current" ]]
+# Confirm that $candidate is not the selected rollback release, then run:
+sudo rm -rf -- "$target"
 ```
 
 ## 轮换认证密钥
