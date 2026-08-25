@@ -20,6 +20,49 @@ const INVITE_SENTINEL = 'web-e2e-invite-sentinel-8f41d2a6'
 const SESSION_SENTINEL = 'web-e2e-session-sentinel-3d7c91af-9e0b5d28-6a4f1c73'
 const CONTENT_SECURITY_POLICY = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'"
 
+interface Closeable {
+  close(): Promise<void>
+}
+
+async function closeBrowserAndScaffold(browser: Closeable | undefined, scaffold: Closeable | undefined): Promise<void> {
+  const failures: unknown[] = []
+  for (const resource of [browser, scaffold]) {
+    if (resource === undefined) continue
+    try {
+      await resource.close()
+    } catch (error) {
+      failures.push(error)
+    }
+  }
+  if (failures.length > 0) throw new AggregateError(failures, 'invite-auth browser teardown failed')
+}
+
+describe('invite-auth browser teardown', () => {
+  it('closes the scaffold after a browser failure and aggregates independent close failures', async () => {
+    const browserFailure = new Error('browser close failed')
+    const scaffoldFailure = new Error('scaffold close failed')
+    let scaffoldCloseCalls = 0
+    const browser: Closeable = { close: async () => { throw browserFailure } }
+    const scaffold: Closeable = {
+      close: async () => {
+        scaffoldCloseCalls += 1
+        throw scaffoldFailure
+      },
+    }
+
+    let received: unknown
+    try {
+      await closeBrowserAndScaffold(browser, scaffold)
+    } catch (error) {
+      received = error
+    }
+
+    expect(scaffoldCloseCalls).toBe(1)
+    expect(received).toBeInstanceOf(AggregateError)
+    expect((received as AggregateError).errors).toEqual([browserFailure, scaffoldFailure])
+  })
+})
+
 describe('web e2e: invite authentication login', () => {
   let scaffold: WebScaffold | undefined
   let browser: Browser | undefined
@@ -48,8 +91,7 @@ describe('web e2e: invite authentication login', () => {
   }, 120_000)
 
   afterAll(async () => {
-    await browser?.close()
-    await scaffold?.close()
+    await closeBrowserAndScaffold(browser, scaffold)
   })
 
   it('serves the static Chinese invite-code login form without exposing its boot secrets', async () => {
