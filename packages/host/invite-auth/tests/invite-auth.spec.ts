@@ -171,7 +171,7 @@ async function incompleteKeepAlive(
     await Promise.race([
       new Promise<void>(resolve => socket.once('close', () => { resolve() })),
       new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error(`socket did not close after ${requestLine}`)), 2_000)
+        timer = setTimeout(() => { reject(new Error(`socket did not close after ${requestLine}`)) }, 2_000)
       }),
     ])
   } finally {
@@ -201,7 +201,7 @@ async function request(composition: Composition, path: string, init: RequestInit
 async function login(
   composition: Composition,
   inviteCode: string | undefined,
-  options: { address?: string; next?: string; headers?: HeadersInit } = {},
+  options: { address?: string; next?: string; headers?: Readonly<Record<string, string>> } = {},
 ): Promise<Result> {
   const form = new URLSearchParams()
   if (inviteCode !== undefined) form.set('inviteCode', inviteCode)
@@ -233,7 +233,12 @@ async function unusedPort(): Promise<number> {
   })
   const address = server.address()
   if (address === null || typeof address === 'string') throw new Error('test server did not bind a TCP port')
-  await new Promise<void>((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+  await new Promise<void>((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
+  })
   return address.port
 }
 
@@ -576,7 +581,12 @@ describe('real Loader invite-auth composition', () => {
         replacement.once('error', reject)
         replacement.listen(port, '127.0.0.1', resolve)
       })
-      await new Promise<void>((resolve, reject) => replacement.close(error => error === undefined ? resolve() : reject(error)))
+      await new Promise<void>((resolve, reject) => {
+        replacement.close((error) => {
+          if (error === undefined) resolve()
+          else reject(error)
+        })
+      })
     }
   })
 

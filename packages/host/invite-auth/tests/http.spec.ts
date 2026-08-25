@@ -45,17 +45,19 @@ interface NetworkResponse {
 
 /** Start a server that writes the parser's requested connection disposition for rejected requests. */
 async function withFormServer(run: (port: number) => Promise<void>): Promise<void> {
-  const server = createServer(async (incoming, outgoing) => {
-    try {
-      await readUrlEncodedForm(incoming, 4_096)
-      writeEmpty(outgoing, 204)
-    } catch (error) {
-      if (error instanceof HttpError) {
-        writeEmpty(outgoing, error.status, error.closeConnection ? { connection: 'close' } : {})
-        return
+  const server = createServer((incoming, outgoing) => {
+    void (async () => {
+      try {
+        await readUrlEncodedForm(incoming, 4_096)
+        writeEmpty(outgoing, 204)
+      } catch (error) {
+        if (error instanceof HttpError) {
+          writeEmpty(outgoing, error.status, error.closeConnection ? { connection: 'close' } : {})
+          return
+        }
+        throw error
       }
-      throw error
-    }
+    })()
   })
   await listen(server)
   try {
@@ -97,13 +99,18 @@ async function expectClosed(socket: Socket): Promise<void> {
 function listen(server: Server): Promise<void> {
   return new Promise((resolve, reject) => {
     server.once('error', reject)
-    server.listen(0, '127.0.0.1', () => resolve())
+    server.listen(0, '127.0.0.1', () => { resolve() })
   })
 }
 
 /** Close a test server after all sockets have been directed to close. */
 function close(server: Server): Promise<void> {
-  return new Promise((resolve, reject) => server.close(error => error === undefined ? resolve() : reject(error)))
+  return new Promise((resolve, reject) => {
+    server.close((error) => {
+      if (error === undefined) resolve()
+      else reject(error)
+    })
+  })
 }
 
 describe('readUrlEncodedForm', () => {
@@ -237,15 +244,13 @@ describe('HTTP response helpers', () => {
       'set-cookie': 'session=abc',
       'retry-after': '60',
     })
-    expect(recorded.calls).toEqual([{
-      status: 429,
-      headers: expect.objectContaining({
-        'cache-control': 'no-store',
-        'content-security-policy': securityHeaders()['content-security-policy'],
-        'set-cookie': 'session=abc',
-        'retry-after': '60',
-      }),
-    }])
+    expect(recorded.calls[0]?.status).toBe(429)
+    expect(recorded.calls[0]?.headers).toEqual(expect.objectContaining({
+      'cache-control': 'no-store',
+      'content-security-policy': securityHeaders()['content-security-policy'],
+      'set-cookie': 'session=abc',
+      'retry-after': '60',
+    }))
     expect(recorded.calls[0]?.headers).not.toHaveProperty('Cache-Control')
     expect(recorded.calls[0]?.headers).not.toHaveProperty('Content-Security-Policy')
     expect(recorded.bodies).toEqual([undefined])
@@ -254,10 +259,11 @@ describe('HTTP response helpers', () => {
   it('writes HTML with a fixed UTF-8 content type', () => {
     const recorded = response()
     writeHtml(recorded.response, 200, '<h1>访问 DSH</h1>', { 'Content-Type': 'text/plain', connection: 'close' })
-    expect(recorded.calls[0]).toEqual({
-      status: 200,
-      headers: expect.objectContaining({ 'content-type': 'text/html; charset=utf-8', connection: 'close' }),
-    })
+    expect(recorded.calls[0]?.status).toBe(200)
+    expect(recorded.calls[0]?.headers).toEqual(expect.objectContaining({
+      'content-type': 'text/html; charset=utf-8',
+      connection: 'close',
+    }))
     expect(recorded.calls[0]?.headers).not.toHaveProperty('Content-Type')
     expect(recorded.bodies).toEqual(['<h1>访问 DSH</h1>'])
   })
@@ -265,10 +271,12 @@ describe('HTTP response helpers', () => {
   it('redirects with a 303 location and no response body', () => {
     const recorded = response()
     redirect(recorded.response, '/sessions', { Location: 'https://evil.example', allow: 'POST' })
-    expect(recorded.calls[0]).toEqual({
-      status: 303,
-      headers: expect.objectContaining({ location: '/sessions', allow: 'POST', 'cache-control': 'no-store' }),
-    })
+    expect(recorded.calls[0]?.status).toBe(303)
+    expect(recorded.calls[0]?.headers).toEqual(expect.objectContaining({
+      location: '/sessions',
+      allow: 'POST',
+      'cache-control': 'no-store',
+    }))
     expect(recorded.calls[0]?.headers).not.toHaveProperty('Location')
     expect(recorded.bodies).toEqual([undefined])
   })
