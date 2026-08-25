@@ -1,0 +1,29 @@
+# Managed by DeepSeek Harness Alibaba Cloud deployment
+[Unit]
+Description=DeepSeek Harness Web
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=60
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=mydsh
+Group=mydsh
+WorkingDirectory=/srv/mydsh/workspace
+Environment=NODE_ENV=production
+EnvironmentFile=/etc/mydsh/public.env
+EnvironmentFile=/etc/mydsh/mydsh.env
+ExecStart=/usr/bin/node /opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/mydsh /srv/mydsh/workspace
+
+[Install]
+WantedBy=multi-user.target

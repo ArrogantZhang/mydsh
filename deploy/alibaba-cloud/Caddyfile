@@ -1,0 +1,23 @@
+# Managed by DeepSeek Harness Alibaba Cloud deployment
+{$DSH_PUBLIC_HOST} {
+	header Strict-Transport-Security "max-age=15552000"
+
+	@invite path /__invite /__invite/*
+	handle @invite {
+		reverse_proxy 127.0.0.1:3080 {
+			header_up X-DSH-Invite-Client-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+	}
+
+	handle {
+		forward_auth 127.0.0.1:3080 {
+			uri /__invite/check
+			header_up X-DSH-Invite-Client-IP {remote_host}
+			header_up X-Forwarded-Proto {scheme}
+			header_up X-Forwarded-Host {host}
+		}
+		reverse_proxy 127.0.0.1:3080
+	}
+}
