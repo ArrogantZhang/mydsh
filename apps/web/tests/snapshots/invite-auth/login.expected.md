@@ -1,0 +1,6 @@
+- main:
+  - heading "访问 DSH" [level=1]
+  - paragraph: 请输入共享邀请码后继续。
+  - text: 邀请码
+  - textbox "邀请码"
+  - button "进入"
