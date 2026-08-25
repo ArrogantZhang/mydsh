@@ -10,6 +10,8 @@
 
 宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy；它不安装 Git。打包需要开发机安装 Git 和 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
+打包编排必须在 Linux 或 WSL 上运行，并提供 Bash、Python 3、GNU coreutils（`realpath`、`stat`、`sync`、`timeout` 和 `mktemp`）、GNU tar、Git 与 Docker。不支持单独使用 Windows PowerShell 或 macOS。Docker 只隔离构建，不能取代用于验证并原子发布 artifact set 的 Linux/GNU 宿主工具。
+
 下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的具名 ref 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标和已评审 ref；如果条件允许，优先使用已验证的签名 tag。`DEPLOY_REF` 必须是已存在且完整的 `refs/heads/*` 或 `refs/tags/*` 名称；脚本会拒绝简写和有歧义的 revision。
 
 ## 准备并上传 release

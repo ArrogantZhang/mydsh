@@ -10,6 +10,8 @@ Use a fresh Linux amd64 Ubuntu 22.04 or 24.04 ECS instance with a public address
 
 The host bootstrap installs only the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian); it does not install Git. It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Git and Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
 
+Run packaging orchestration on Linux or WSL with Bash, Python 3, GNU coreutils (`realpath`, `stat`, `sync`, `timeout`, and `mktemp`), GNU tar, Git, and Docker. Windows PowerShell or macOS alone is unsupported. Docker isolates the build but does not replace the Linux/GNU host tools used to validate and atomically publish the artifact set.
+
 The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed named ref stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed ref selected for this deployment; a verified signed tag is preferable when available. `DEPLOY_REF` must be a fully qualified existing `refs/heads/*` or `refs/tags/*` name; shorthand and ambiguous revisions are rejected.
 
 ## Prepare and upload a release

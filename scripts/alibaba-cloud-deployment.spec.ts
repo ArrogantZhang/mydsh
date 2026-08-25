@@ -190,6 +190,11 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('validate_extraction_inodes')
     expect(script).toContain('cleanup_abandoned_operation_directories')
     expect(script).toContain('rotate_authentication_secret')
+    expect(script).toContain('/var/lib/mydsh-deploy/rotation')
+    expect(script).toContain('ROTATION_FORMAT=1')
+    expect(script).toContain('prepare_rotation_journal')
+    expect(script).toContain('recover_rotation_journal')
+    expect(script).not.toContain('mktemp "$state_root/.rotate-backup.')
     expect(script).toContain('validate_upload_space')
     expect(script).toContain('UPLOAD_METADATA_BYTES')
     expect(script).toContain('validate_managed_host_state')
@@ -273,6 +278,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(main.indexOf('recover_activation_journal "$ACTIVATION_DIR"')).toBeLessThan(main.indexOf('\n  validate_host'))
     expect(main.indexOf('acquire_operation_lock')).toBeLessThan(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"'))
     expect(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"')).toBeLessThan(main.indexOf('deploy_artifact "$1"'))
+    expect(main.indexOf('recover_rotation_journal "$ROTATION_DIR"')).toBeLessThan(main.indexOf('deploy_artifact "$1"'))
     const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('TRUST_ROOT=$(mktemp'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('copy_bounded_upload'))
@@ -612,6 +618,42 @@ sync() { return 0; }
 systemctl() { return 1; }
 if rotate_authentication_secret session "$env_file" "$root"; then exit 91; fi
 [[ $(sha256sum "$env_file") == "$before" ]]
+`)
+    })
+
+    it('recovers prepared and committed rotation journals durably', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+env_file="$root/mydsh.env"; journal="$root/rotation"
+printf '%s\nDSH_HOME=/var/lib/mydsh\nDSH_INVITE_CODE_SECRET=old-invite\nDSH_INVITE_SESSION_SECRET=old-session\n' "$MANAGED_MARKER" >"$env_file"
+chmod 0600 "$env_file"
+stat() { if [[ "$1" == -c && "$2" == %U:%G ]]; then printf 'root:root\n'; else command stat "$@"; fi; }
+systemctl() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; current_release() { return 0; }; sync() { return 0; }
+prepare_rotation_journal "$journal" invite "$env_file"
+sed -i 's/old-invite/interrupted-invite/' "$env_file"
+recover_rotation_journal "$journal" "$env_file"
+grep -Fx 'DSH_INVITE_CODE_SECRET=old-invite' "$env_file"
+[[ ! -e "$journal" ]]
+prepare_rotation_journal "$journal" session "$env_file"
+sed -i 's/old-session/accepted-session/' "$env_file"
+write_journal_state "$journal" committed
+recover_rotation_journal "$journal" "$env_file"
+grep -Fx 'DSH_INVITE_SESSION_SECRET=accepted-session' "$env_file"
+[[ ! -e "$journal" ]]
+prepare_rotation_journal "$journal" invite "$env_file"
+sed -i 's/old-invite/broken-invite/' "$env_file"
+restore_definition=$(declare -f restore_secret_backup)
+restore_secret_backup() { return 1; }
+if recover_rotation_journal "$journal" "$env_file"; then exit 90; fi
+[[ -d "$journal" ]]
+eval "$restore_definition"
+recover_rotation_journal "$journal" "$env_file"
+grep -Fx 'DSH_INVITE_CODE_SECRET=old-invite' "$env_file"
+touch "$root/.rotate-backup.abc123"
+cleanup_rotation_residue "$root"
+[[ ! -e "$root/.rotate-backup.abc123" ]]
 `)
     })
 

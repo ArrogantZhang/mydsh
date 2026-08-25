@@ -15,6 +15,8 @@ readonly ROOT_HELPER=/usr/local/sbin/mydsh-deploy-release
 readonly DEPLOY_STATE_ROOT=/var/lib/mydsh-deploy
 readonly UPLOADS_DIR=/var/lib/mydsh-deploy/uploads
 readonly ACTIVATION_DIR=/var/lib/mydsh-deploy/activation
+readonly ROTATION_DIR=/var/lib/mydsh-deploy/rotation
+readonly ROTATION_FORMAT=1
 readonly MAX_COMPRESSED_BYTES=1073741824
 readonly UPLOAD_METADATA_BYTES=1048576
 readonly MAX_ARCHIVE_MEMBERS=500000
@@ -1013,6 +1015,78 @@ prune_release() {
   printf 'Pruned inactive release %s.\n' "$commit"
 }
 
+remove_rotation_journal() {
+  local journal=$1
+  local parent=${journal%/*}
+  [[ $journal == "$parent/rotation" && -d "$journal" && ! -L "$journal" ]] || return 1
+  rm -rf -- "$journal" || return 1
+  sync -f "$parent" || return 1
+}
+
+prepare_rotation_journal() {
+  local journal=$1
+  local kind=$2
+  local env_file=$3
+  local parent=${journal%/*}
+  local staging
+  [[ $kind == invite || $kind == session ]] || return 1
+  validate_existing_managed_file "$env_file" 600 || return 1
+  [[ $journal == "$parent/rotation" && -d "$parent" && ! -L "$parent" && $(realpath -e -- "$parent") == "$parent" ]] || return 1
+  [[ ! -e "$journal" && ! -L "$journal" ]] || return 1
+  staging=$(mktemp -d "$parent/rotation.new.XXXXXX") || return 1
+  [[ $staging == "$parent/rotation.new."* && -d "$staging" && ! -L "$staging" ]] || return 1
+  chmod 0700 "$staging" || { rm -rf -- "$staging" || true; return 1; }
+  install -o root -g root -m 0600 -- "$env_file" "$staging/backup" || { rm -rf -- "$staging" || true; return 1; }
+  printf '%s\n' "$ROTATION_FORMAT" >"$staging/format" || { rm -rf -- "$staging" || true; return 1; }
+  printf '%s\n' "$kind" >"$staging/kind" || { rm -rf -- "$staging" || true; return 1; }
+  printf 'state=prepared\n' >"$staging/state" || { rm -rf -- "$staging" || true; return 1; }
+  chmod 0600 "$staging/format" "$staging/kind" "$staging/state" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$staging/backup" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$staging/format" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$staging/kind" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$staging/state" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$staging" || { rm -rf -- "$staging" || true; return 1; }
+  mv -T -- "$staging" "$journal" || { rm -rf -- "$staging" || true; return 1; }
+  sync -f "$parent" || return 1
+}
+
+recover_rotation_journal() {
+  local journal=${1:-$ROTATION_DIR}
+  local env_file=${2:-$PRIVATE_ENV}
+  local mode=${3:-normal}
+  local state
+  local kind
+  local active
+  [[ ! -e "$journal" && ! -L "$journal" ]] && return 0
+  [[ -d "$journal" && ! -L "$journal" && $(<"$journal/format") == "$ROTATION_FORMAT" ]] || return 1
+  kind=$(<"$journal/kind") || return 1
+  [[ $kind == invite || $kind == session ]] || return 1
+  state=$(sed -n 's/^state=//p' "$journal/state") || return 1
+  if [[ $state == committed && $mode == normal ]]; then remove_rotation_journal "$journal"; return; fi
+  [[ $state == prepared || $mode == force ]] || return 1
+  validate_existing_managed_file "$journal/backup" 600 || return 1
+  restore_secret_backup "$journal/backup" "$env_file" || return 1
+  active=$(current_release) || active=''
+  systemctl restart mydsh || return 1
+  health_check "$active" || return 1
+  public_acceptance || return 1
+  authenticated_acceptance || return 1
+  remove_rotation_journal "$journal"
+}
+
+cleanup_rotation_residue() (
+  local root=$1
+  local item
+  local owner
+  [[ -d "$root" && ! -L "$root" && $(realpath -e -- "$root") == "$root" ]] || return 1
+  shopt -s nullglob
+  for item in "$root"/.rotate-backup.* "$root"/rotation.new.*; do
+    owner=$(stat -c '%U:%G' -- "$item") || return 1
+    [[ $owner == root:root && ! -L "$item" && ( -f "$item" || -d "$item" ) ]] || return 1
+  done
+  for item in "$root"/.rotate-backup.* "$root"/rotation.new.*; do rm -rf -- "$item" || return 1; done
+)
+
 restore_secret_backup() {
   local backup=$1
   local env_file=$2
@@ -1031,10 +1105,10 @@ rotate_authentication_secret() {
   local kind=$1
   local env_file=${2:-$PRIVATE_ENV}
   local state_root=${3:-$DEPLOY_STATE_ROOT}
+  local journal=${4:-$state_root/rotation}
   local key
   local bytes
   local value
-  local backup
   local temporary
   local found=0
   local line
@@ -1046,38 +1120,33 @@ rotate_authentication_secret() {
   esac
   validate_existing_managed_file "$env_file" 600 || return 1
   [[ -d "$state_root" && ! -L "$state_root" && $(realpath -e -- "$state_root") == "$state_root" ]] || return 1
-  backup=$(mktemp "$state_root/.rotate-backup.XXXXXX") || return 1
-  [[ $backup == "$state_root/.rotate-backup."* && -f "$backup" && ! -L "$backup" ]] || return 1
-  install -o root -g root -m 0600 -- "$env_file" "$backup" || { rm -f -- "$backup" || true; return 1; }
-  sync -f "$backup" || { rm -f -- "$backup" || true; return 1; }
-  value=$(openssl rand -hex "$bytes") || { rm -f -- "$backup" || true; return 1; }
-  create_registered_temp_file "$(dirname -- "$env_file")" || { rm -f -- "$backup" || true; return 1; }
+  prepare_rotation_journal "$journal" "$kind" "$env_file" || return 1
+  value=$(openssl rand -hex "$bytes") || { recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
+  create_registered_temp_file "$(dirname -- "$env_file")" || { recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   temporary=$CREATED_TEMP_FILE
   while IFS= read -r line; do
     case "$line" in
       "$key="*) printf '%s=%s\n' "$key" "$value"; found=$((found + 1)) ;;
       *) printf '%s\n' "$line" ;;
     esac
-  done <"$env_file" >"$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  done <"$env_file" >"$temporary" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   unset value
-  [[ $found == 1 ]] || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
-  chown root:root "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
-  chmod 0600 "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
-  sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
-  mv -f -- "$temporary" "$env_file" || { discard_registered_temp_file "$temporary" || true; rm -f -- "$backup" || true; return 1; }
+  [[ $found == 1 ]] || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
+  chown root:root "$temporary" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
+  chmod 0600 "$temporary" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
+  sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
+  mv -f -- "$temporary" "$env_file" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   unregister_temp_file "$temporary"
   active=$(current_release) || active=''
-  if sync -f "$env_file" && sync -f "$(dirname -- "$env_file")" && systemctl restart mydsh && health_check "$active" && public_acceptance && authenticated_acceptance; then
-    if ! rm -f -- "$backup"; then printf 'mydsh-deploy-release: rotation accepted; stale backup retained at %s\n' "$backup" >&2; fi
+  if sync -f "$env_file" && sync -f "$(dirname -- "$env_file")" && systemctl restart mydsh && health_check "$active" && public_acceptance && authenticated_acceptance && write_journal_state "$journal" committed; then
+    if ! remove_rotation_journal "$journal"; then printf 'mydsh-deploy-release: rotation accepted; committed journal retained at %s\n' "$journal" >&2; fi
     printf 'Rotated %s authentication secret.\n' "$kind"
     return 0
   fi
-  if ! restore_secret_backup "$backup" "$env_file"; then
-    printf 'mydsh-deploy-release: secret rollback failed; recovery backup retained at %s\n' "$backup" >&2
+  if ! recover_rotation_journal "$journal" "$env_file" force; then
+    printf 'mydsh-deploy-release: secret rollback failed; recovery journal retained at %s\n' "$journal" >&2
     return 1
   fi
-  systemctl restart mydsh || true
-  if ! rm -f -- "$backup"; then printf 'mydsh-deploy-release: restored secret but stale backup remains at %s\n' "$backup" >&2; fi
   return 1
 }
 
@@ -1158,6 +1227,8 @@ main() {
   trap cleanup_operation EXIT
   validate_recovery_prerequisites
   load_public_environment
+  cleanup_rotation_residue "$DEPLOY_STATE_ROOT" || fail 'unsafe rotation residue requires operator inspection'
+  recover_rotation_journal "$ROTATION_DIR" "$PRIVATE_ENV" || fail "rotation recovery failed; inspect $ROTATION_DIR"
   cleanup_abandoned_journal_staging "$(dirname -- "$ACTIVATION_DIR")" || fail 'cannot inspect abandoned activation journal staging'
   recover_activation_journal "$ACTIVATION_DIR" || fail "activation recovery failed; inspect $ACTIVATION_DIR"
   validate_host
