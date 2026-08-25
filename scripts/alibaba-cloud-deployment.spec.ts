@@ -146,6 +146,9 @@ describe('Alibaba Cloud deployment assets', () => {
     const script = asset('deploy-release.sh')
 
     expect(script).toMatch(/^#!\/usr\/bin\/env bash\n# Managed by DeepSeek Harness Alibaba Cloud deployment\nset -euo pipefail\n/)
+    expect(script).toContain('Usage: sudo %s <git-bundle-file> <ref>')
+    expect(script).toContain('sudo %s --rollback <40-character-lowercase-commit>')
+    expect(script).toContain('sudo %s --prune <40-character-lowercase-commit>')
     expect(script).toMatch(/\[\[ \$# -eq 2 \]\]/)
     expect(script).not.toContain('set -x')
     expect(script).toContain('realpath -e --')
@@ -269,6 +272,29 @@ commit=${'c'.repeat(40)}
 mkdir -p "$root/releases/$commit" "$root/outside/$commit"
 validate_release_target "$root/releases/$commit" "$root/releases"
 if validate_release_target "$root/outside/$commit" "$root/releases"; then exit 90; fi
+`)
+    })
+
+    it('documents every helper form and rejects commit-named release symlinks', () => {
+      expectBashSuccess(`
+set -euo pipefail
+usage_output=$(usage 2>&1)
+grep -F -- '<git-bundle-file> <ref>' <<<"$usage_output"
+grep -F -- '--rollback <40-character-lowercase-commit>' <<<"$usage_output"
+grep -F -- '--prune <40-character-lowercase-commit>' <<<"$usage_output"
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+real=${'1'.repeat(40)}
+alias=${'2'.repeat(40)}
+mkdir -p "$root/releases/$real"
+ln -s "$root/releases/$real" "$root/releases/$alias"
+ln -s "$root/releases/$real" "$root/current"
+if validate_release_target "$root/releases/$alias" "$root/releases"; then exit 90; fi
+if prune_release "$alias" "$root/releases" "$root/current"; then exit 91; fi
+[[ -L "$root/releases/$alias" && -d "$root/releases/$real" ]]
+activate_transaction() { touch "$root/activated"; return 0; }
+if (rollback_to_commit "$alias" "$root/releases" "$root/current"); then exit 92; fi
+[[ ! -e "$root/activated" && -d "$root/releases/$real" ]]
 `)
     })
 

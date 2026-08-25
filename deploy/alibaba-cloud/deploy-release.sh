@@ -20,7 +20,8 @@ REGISTERED_TEMP_FILES=()
 
 usage() {
   printf 'Usage: sudo %s <git-bundle-file> <ref>\n' "${0##*/}" >&2
-  printf '       sudo %s --rollback <full-commit>\n' "${0##*/}" >&2
+  printf '       sudo %s --rollback <40-character-lowercase-commit>\n' "${0##*/}" >&2
+  printf '       sudo %s --prune <40-character-lowercase-commit>\n' "${0##*/}" >&2
 }
 
 fail() {
@@ -143,12 +144,13 @@ validate_release_target() {
   local resolved_target
   local commit
 
-  [[ -d "$releases_root" && -d "$target" ]] || return 1
+  [[ -d "$releases_root" && ! -L "$releases_root" && -d "$target" && ! -L "$target" ]] || return 1
   resolved_root=$(realpath -e -- "$releases_root") || return 1
   resolved_target=$(realpath -e -- "$target") || return 1
-  commit=${resolved_target##*/}
+  commit=${target##*/}
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || return 1
-  [[ ${resolved_target%/*} == "$resolved_root" ]] || return 1
+  [[ $resolved_root == "$releases_root" ]] || return 1
+  [[ $target == "$releases_root/$commit" && $resolved_target == "$target" ]] || return 1
 }
 
 validate_system_account() {
@@ -243,11 +245,13 @@ load_public_environment() {
 }
 
 current_release() {
+  local current_path=${1:-$CURRENT_LINK}
+  local releases_root=${2:-$RELEASES_DIR}
   local current
-  if [[ ! -e "$CURRENT_LINK" && ! -L "$CURRENT_LINK" ]]; then return 0; fi
-  [[ -L "$CURRENT_LINK" ]] || return 1
-  current=$(realpath -e -- "$CURRENT_LINK") || return 1
-  validate_release_target "$current" || return 1
+  if [[ ! -e "$current_path" && ! -L "$current_path" ]]; then return 0; fi
+  [[ -L "$current_path" ]] || return 1
+  current=$(realpath -e -- "$current_path") || return 1
+  validate_release_target "$current" "$releases_root" || return 1
   printf '%s\n' "$current"
 }
 
@@ -476,14 +480,16 @@ activate_transaction() {
 
 rollback_to_commit() {
   local commit=$1
+  local releases_root=${2:-$RELEASES_DIR}
+  local current_path=${3:-$CURRENT_LINK}
   local previous
   local target
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail 'rollback commit must be 40 lowercase hexadecimal characters'
-  target="$RELEASES_DIR/$commit"
-  validate_release_target "$target" || fail 'rollback target is outside the canonical release directory'
-  previous=$(current_release) || fail 'current release link is unsafe'
+  target="$releases_root/$commit"
+  validate_release_target "$target" "$releases_root" || fail 'rollback target is outside the canonical release directory'
+  previous=$(current_release "$current_path" "$releases_root") || fail 'current release link is unsafe'
   load_public_environment
-  activate_transaction "$target" "$previous" || return 1
+  activate_transaction "$target" "$previous" '' "$current_path" || return 1
   printf 'Rolled back to release %s after public and authenticated acceptance.\n' "$commit"
 }
 
