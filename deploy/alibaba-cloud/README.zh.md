@@ -8,13 +8,13 @@
 
 使用一台全新的 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
 
-bootstrap 脚本从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24，同时安装 pnpm 11.7.0，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本只会在 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` 且 Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` 时写入相应 APT 软件源；软件包签名用于认证软件源输出，而 Node.js 和 Caddy 的具体补丁版本可能在这些已签名软件源中前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
+bootstrap 脚本从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24，同时安装 pnpm 11.7.0，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`，并要求官方 pnpm 11.7.0 tarball 的固定 SHA-512 integrity。已签名软件源中的补丁版本可能前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
-下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的 release tag 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标，以及经过评审的分支或签名 tag。
+下列示例使用 `dsh.example.com`、`ecs-admin@203.0.113.10`，并将经过评审的具名 ref 存入 `DEPLOY_REF`。请将这三个值替换为本次部署选择的 DNS 名称、SSH 目标和已评审 ref；如果条件允许，优先使用已验证的签名 tag。
 
 ## 准备并上传 release
 
-在开发机的仓库根目录运行以下命令。bundle 包含指定分支及其可达 commit，不会复制工作树或未跟踪文件。
+在开发机的仓库根目录运行以下命令。bundle 包含选定的具名 ref 及其可达 commit，不会复制工作树或未跟踪文件。
 
 ```bash
 set -euo pipefail
@@ -23,9 +23,12 @@ REMOTE=ecs-admin@203.0.113.10
 git status --short
 git bundle create mydsh.bundle "$DEPLOY_REF"
 git bundle verify mydsh.bundle
+LOCAL_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 [[ $REMOTE_STAGE == */mydsh-deploy.* ]]
-scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
+scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
 scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ```
 
@@ -39,11 +42,11 @@ scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-脚本创建相互独立的 `mydsh` 运行时账户和 `mydsh-build` 构建账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 在更改目录所有权前，要求该范围、非 root UID、不同的 group，以及 `/usr/sbin/nologin` 或等价的 `/sbin/nologin`。构建账户只能访问自己的 home、临时 `DSH_HOME`、包缓存和候选 staging tree；运行时数据、工作区、环境文件和密钥保持不可访问。bootstrap 会验证并启动 Caddy，但在 release 存在之前不会启动 `mydsh`。
+脚本创建相互独立的 `mydsh` 运行时账户和 `mydsh-build` 构建账户、持久化目录和 release 目录、`/etc/mydsh/public.env`，以及只有 root 可读的私有环境文件。Ubuntu 22.04 和 24.04 为系统账户分配小于 1000 的 UID；bootstrap 要求该范围、非 root UID、不同的 group 和 nologin shell。每个候选 release 都使用新的 builder HOME、XDG 目录、缓存、临时 `DSH_HOME` 和 checkout；候选之间不会复用这些内容，瞬态 systemd 构建服务及其 descendant cgroup 停止并且发布正常完成或失败后，helper 会将其删除。运行时数据、工作区、私有环境文件和密钥保持不可访问。存在活动 release 时，bootstrap 要么逐字节确认无需操作，要么拒绝并要求通过普通部署更新。
 
 ## 部署 release
 
-通过 root 安装的 helper 部署 bundle 携带的确切 ref。helper 以 `mydsh-build` 身份在空白的最小环境和临时 `DSH_HOME` 下执行 clone、依赖生命周期脚本、测试、构建和配置转储，然后将完成的 release 设为 root 所有且不可变。激活会验证候选 unit 和 Caddy 配置，将全部宿主变更与 bootstrap 和回滚串行化，安装候选 unit 和代理文件，切换 `/opt/mydsh/current`，验证运行时进程以及公开和认证行为，并仅在全部检查通过后接受 release。任何失败都会恢复上一个代码链接和全部 3 个宿主配置文件；首次部署失败会恢复 bootstrap 配置并停止 DSH。
+通过 root 安装的 helper 部署 bundle 携带的确切 ref。一个瞬态 systemd 服务以 `mydsh-build` 身份在空白的单次操作环境下执行 clone、依赖生命周期脚本、测试、构建和配置转储；systemd 会终止并等待整个 descendant cgroup。之后 root 才将完成的 tree 以禁用 reflink 的方式复制到新的私有 inode 中并发布。激活会在更改 helper、unit、Caddy 文件或 release 链接前持久保存 root-only `prepared` 恢复 journal。任何失败都会保留或重放该 journal，直到恢复之前的一致状态；接受激活会先记录 `committed` 再清理，因此后续清理绝不会将其回滚。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"

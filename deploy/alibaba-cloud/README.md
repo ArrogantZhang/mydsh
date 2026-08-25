@@ -8,13 +8,13 @@ This tutorial deploys one invite-protected DeepSeek Harness Web process on an Al
 
 Use a fresh Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
 
-The bootstrap installs Node.js 24 from the [official NodeSource repository](https://github.com/nodesource/distributions), pnpm 11.7.0, and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34` before authoring either APT source; package signatures authenticate repository output, while the exact Node.js and Caddy patch versions may advance within those signed repositories. Review both repository procedures before running a root script on a long-lived host.
+The bootstrap installs Node.js 24 from the [official NodeSource repository](https://github.com/nodesource/distributions), pnpm 11.7.0, and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`, Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`, and the pinned SHA-512 integrity of the official pnpm 11.7.0 tarball. Signed-repository patch versions may advance. Review both repository procedures before running a root script on a long-lived host.
 
-The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed release tag stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed branch or signed tag selected for this deployment.
+The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed named ref stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed ref selected for this deployment; a verified signed tag is preferable when available.
 
 ## Prepare and upload a release
 
-Run these commands from the repository root on your development machine. The bundle contains the named branch and its reachable commits without copying your working tree or untracked files.
+Run these commands from the repository root on your development machine. The bundle contains the selected named ref and its reachable commits without copying your working tree or untracked files.
 
 ```bash
 set -euo pipefail
@@ -23,9 +23,12 @@ REMOTE=ecs-admin@203.0.113.10
 git status --short
 git bundle create mydsh.bundle "$DEPLOY_REF"
 git bundle verify mydsh.bundle
+LOCAL_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
+git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 [[ $REMOTE_STAGE == */mydsh-deploy.* ]]
-scp deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
+scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
 scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
 ```
 
@@ -39,11 +42,11 @@ Run bootstrap from the uploaded directory. It installs the reviewed control-plan
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-The script creates separate `mydsh` runtime and `mydsh-build` builder accounts, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, distinct groups, and `/usr/sbin/nologin` or its `/sbin/nologin` equivalent before changing directory ownership. The builder receives only its private home, scratch `DSH_HOME`, package cache, and candidate staging tree; runtime data, workspace, environment files, and secrets remain inaccessible. Bootstrap validates and starts Caddy, but does not start `mydsh` before a release exists.
+The script creates separate `mydsh` runtime and `mydsh-build` builder accounts, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, distinct groups, and a nologin shell. Every candidate gets a new builder HOME, XDG directories, cache, scratch `DSH_HOME`, and checkout; none is reused, and the helper removes them after the transient systemd build service and its descendant cgroup stop and publication finishes or fails normally. Runtime data, workspace, the private environment file, and secrets remain inaccessible. With an active release, bootstrap is a byte-for-byte no-op or refuses and directs changes through normal deployment.
 
 ## Deploy the release
 
-Deploy the exact ref carried by the bundle through the root-installed helper. It runs clone, dependency lifecycle scripts, tests, build, and config dump as `mydsh-build` under an empty, minimal environment and scratch `DSH_HOME`, then makes the completed release root-owned and immutable. Activation validates the candidate unit and Caddy configuration, serializes all host changes with bootstrap and rollback, installs the candidate unit and proxy files, switches `/opt/mydsh/current`, verifies the runtime process and public/authenticated behavior, and accepts the release only after every check passes. Any failure restores the previous code link and all three host configuration files; first-deployment failure restores bootstrap configuration and stops DSH.
+Deploy the exact ref carried by the bundle through the root-installed helper. One transient systemd service runs clone, dependency lifecycle scripts, tests, build, and config dump as `mydsh-build` under an empty per-operation environment; systemd kills and awaits the entire descendant cgroup. Root then copies the completed tree without reflinks into new private inodes before publication. Activation persists a root-only `prepared` recovery journal before changing the helper, unit, Caddy files, or release link. Any failure retains or replays that journal until the previous coherent state is restored; accepted activation records `committed` before cleanup, so later cleanup can never roll it back.
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"

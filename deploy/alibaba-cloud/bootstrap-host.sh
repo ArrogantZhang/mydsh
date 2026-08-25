@@ -5,7 +5,10 @@ readonly MANAGED_MARKER='# Managed by DeepSeek Harness Alibaba Cloud deployment'
 readonly DEPLOY_LOCK=/run/lock/mydsh-deploy.lock
 readonly NODESOURCE_FINGERPRINT=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 readonly CADDY_FINGERPRINT=65760C51EDEA2017CEA2CA15155B6D79CA56EA34
-readonly SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)"
+readonly PNPM_INTEGRITY='sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
+readonly PNPM_TARBALL=https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+readonly SCRIPT_DIR
 DEPLOY_LOCK_FD=''
 TEMP_DIR=''
 CREATED_TEMP_FILE=''
@@ -62,11 +65,11 @@ cleanup_registered_temp_files() {
 
 create_registered_temp_file() {
   local parent=$1
-  local attempt
+  local _attempt
   local candidate
 
   [[ $(realpath -e -- "$parent") == "$parent" ]] || return 1
-  for attempt in {1..20}; do
+  for _attempt in {1..20}; do
     candidate="$parent/.mydsh-tmp.$$.$RANDOM"
     REGISTERED_TEMP_FILES+=("$candidate")
     if (umask 077; set -o noclobber; : >"$candidate") 2>/dev/null; then
@@ -85,7 +88,7 @@ acquire_operation_lock() {
   command -v flock >/dev/null 2>&1 || fail 'flock is required for deployment serialization'
   validate_lock_path "$lock_path" "$expected_owner"
   exec {DEPLOY_LOCK_FD}>"$lock_path" || fail "cannot open deployment lock: $lock_path"
-  chmod 0600 "$lock_path"
+  chmod 0600 "$lock_path" || fail "cannot secure deployment lock: $lock_path"
   validate_lock_path "$lock_path" "$expected_owner"
   flock -n "$DEPLOY_LOCK_FD" || fail "another bootstrap, deployment, or rollback holds $lock_path"
 }
@@ -120,12 +123,84 @@ ensure_managed_directory() {
   local mode=$4
   local resolved
 
-  [[ $path == /* && $path != / ]] || fail "unsafe managed directory path: $path"
-  [[ ! -L "$path" ]] || fail "managed directory must not be a symlink: $path"
-  [[ ! -e "$path" || -d "$path" ]] || fail "managed directory path has the wrong type: $path"
-  install -d -o "$owner" -g "$group" -m "$mode" -- "$path"
+  validate_managed_directory_path "$path"
+  install -d -o "$owner" -g "$group" -m "$mode" -- "$path" || fail "cannot create or normalize managed directory: $path"
   resolved=$(realpath -e -- "$path") || fail "cannot resolve managed directory: $path"
   [[ $resolved == "$path" ]] || fail "managed directory escapes its literal path: $path -> $resolved"
+}
+
+validate_managed_directory_path() {
+  local path=$1
+  local resolved
+  [[ $path == /* && $path != / ]] || fail "unsafe managed directory path: $path"
+  validate_ancestor_chain "$path"
+  [[ ! -L "$path" ]] || fail "managed directory must not be a symlink: $path"
+  [[ ! -e "$path" || -d "$path" ]] || fail "managed directory path has the wrong type: $path"
+  if [[ -d "$path" ]]; then
+    resolved=$(realpath -e -- "$path") || fail "cannot resolve managed directory: $path"
+    [[ $resolved == "$path" ]] || fail "managed directory escapes its literal path: $path -> $resolved"
+  fi
+}
+
+validate_ancestor_chain() {
+  local path=$1
+  local parent
+  local current=''
+  local component
+  local components=()
+  parent=$(dirname -- "$path")
+  IFS=/ read -r -a components <<<"${parent#/}"
+  for component in "${components[@]}"; do
+    [[ -n "$component" ]] || continue
+    current="$current/$component"
+    if [[ -e "$current" || -L "$current" ]]; then
+      [[ -d "$current" && ! -L "$current" ]] || fail "managed path ancestor is not a real directory: $current"
+      [[ $(realpath -e -- "$current") == "$current" ]] || fail "managed path ancestor is aliased: $current"
+    fi
+  done
+}
+
+preflight_managed_paths() {
+  local paths=("$@")
+  local path
+  for path in "${paths[@]}"; do
+    validate_managed_directory_path "$path"
+  done
+}
+
+active_bootstrap_matches() {
+  local public_host=$1
+  local source_dir=${2:-$SCRIPT_DIR}
+  local host_root=${3:-}
+  local current_path=${4:-/opt/mydsh/current}
+  local releases_root=${5:-/opt/mydsh/releases}
+  local commit
+  local line_count
+  local resolved_current
+  local resolved_releases
+  local caddy="$host_root/etc/caddy/Caddyfile"
+  local unit="$host_root/etc/systemd/system/mydsh.service"
+  local dropin="$host_root/etc/systemd/system/caddy.service.d/mydsh.conf"
+  local helper="$host_root/usr/local/sbin/mydsh-deploy-release"
+  local public_env="$host_root/etc/mydsh/public.env"
+  [[ -L "$current_path" ]] || return 1
+  [[ -d "$releases_root" && ! -L "$releases_root" ]] || return 1
+  resolved_releases=$(realpath -e -- "$releases_root") || return 1
+  resolved_current=$(realpath -e -- "$current_path") || return 1
+  commit=${resolved_current##*/}
+  [[ $resolved_releases == "$releases_root" && $commit =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ $resolved_current == "$releases_root/$commit" ]] || return 1
+  for path in "$caddy" "$unit" "$dropin" "$helper" "$public_env"; do
+    validate_existing_managed_file "$path" || return 1
+  done
+  cmp -- "$source_dir/Caddyfile" "$caddy" || return 1
+  cmp -- "$source_dir/mydsh.service" "$unit" || return 1
+  cmp -- "$source_dir/caddy-mydsh.conf" "$dropin" || return 1
+  cmp -- "$source_dir/deploy-release.sh" "$helper" || return 1
+  line_count=$(wc -l <"$public_env") || return 1
+  [[ $line_count == 2 ]] || return 1
+  grep -Fqx "$MANAGED_MARKER" "$public_env" || return 1
+  grep -Fqx "DSH_PUBLIC_HOST=$public_host" "$public_env" || return 1
 }
 
 validate_existing_managed_file() {
@@ -232,8 +307,20 @@ install_repository_key() {
   mapfile -t fingerprints < <(key_fingerprints "$armored")
   [[ ${#fingerprints[@]} -eq 1 ]] || fail "$name signing key download must contain exactly one primary key"
   [[ ${fingerprints[0]} == "$expected" ]] || fail "$name signing key fingerprint changed: ${fingerprints[0]}"
+  if [[ -e "$target" || -L "$target" ]]; then
+    validate_existing_root_key "$target" "$expected"
+  fi
   gpg --batch --yes --dearmor --output "$binary" "$armored"
   install_root_data_file "$binary" "$target"
+}
+
+validate_existing_root_key() {
+  local target=$1
+  local expected=$2
+  local fingerprints=()
+  [[ -f "$target" && ! -L "$target" ]] || fail "existing signing key has an unsafe type: $target"
+  mapfile -t fingerprints < <(key_fingerprints "$target")
+  [[ ${#fingerprints[@]} -eq 1 && ${fingerprints[0]} == "$expected" ]] || fail "existing signing key does not match the pinned fingerprint: $target"
 }
 
 validate_system_account() {
@@ -241,17 +328,17 @@ validate_system_account() {
   local expected_home=$2
   local account_name
   local entries=()
-  local gecos
-  local gid
+  local _gecos
+  local _gid
   local home
   local passwd_uid
-  local password
+  local _password
   local shell
   local uid
 
   mapfile -t entries < <(getent passwd "$name")
   [[ ${#entries[@]} -eq 1 ]] || fail "getent must resolve exactly one $name account"
-  IFS=: read -r account_name password passwd_uid gid gecos home shell <<<"${entries[0]}"
+  IFS=: read -r account_name _password passwd_uid _gid _gecos home shell <<<"${entries[0]}"
   [[ $account_name == "$name" && $passwd_uid =~ ^[0-9]+$ ]] || fail "$name passwd entry is malformed"
   uid=$(id -u "$name") || fail "id cannot resolve $name"
   [[ $uid == "$passwd_uid" && $uid != 0 && $uid -lt 1000 ]] || fail "$name must be a non-root Ubuntu system account"
@@ -265,9 +352,9 @@ create_accounts_and_directories() {
   fi
   validate_system_account mydsh /var/lib/mydsh
   if ! id mydsh-build >/dev/null 2>&1; then
-    useradd --system --home-dir /var/lib/mydsh-build --shell /usr/sbin/nologin --user-group mydsh-build
+    useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin --user-group mydsh-build
   fi
-  validate_system_account mydsh-build /var/lib/mydsh-build
+  validate_system_account mydsh-build /nonexistent
   [[ $(id -u mydsh) != "$(id -u mydsh-build)" ]] || fail 'runtime and builder accounts must be distinct'
   [[ $(id -g mydsh) != "$(id -g mydsh-build)" ]] || fail 'runtime and builder groups must be distinct'
 
@@ -275,11 +362,9 @@ create_accounts_and_directories() {
   ensure_managed_directory /opt/mydsh/releases root root 0755
   ensure_managed_directory /etc/mydsh root root 0755
   ensure_managed_directory /var/lib/mydsh mydsh mydsh 0700
+  ensure_managed_directory /srv/mydsh root root 0755
   ensure_managed_directory /srv/mydsh/workspace mydsh mydsh 0750
-  ensure_managed_directory /var/lib/mydsh-build mydsh-build mydsh-build 0700
-  ensure_managed_directory /var/lib/mydsh-build/dsh-home mydsh-build mydsh-build 0700
-  ensure_managed_directory /var/cache/mydsh-build root root 0755
-  ensure_managed_directory /var/cache/mydsh-build/pnpm mydsh-build mydsh-build 0700
+  ensure_managed_directory /var/lib/mydsh-deploy root root 0700
   ensure_managed_directory /etc/caddy root root 0755
   ensure_managed_directory /etc/systemd/system/caddy.service.d root root 0755
 }
@@ -321,10 +406,19 @@ write_environment_files() {
 }
 
 configure_package_repositories() {
-  install_repository_key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "$NODESOURCE_FINGERPRINT" /usr/share/keyrings/nodesource.gpg nodesource
-  write_managed_file /etc/apt/sources.list.d/nodesource.list 0644 'deb [signed-by=/usr/share/keyrings/nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main'
-  install_repository_key https://dl.cloudsmith.io/public/caddy/stable/gpg.key "$CADDY_FINGERPRINT" /usr/share/keyrings/caddy-stable-archive-keyring.gpg caddy-stable
-  write_managed_file /etc/apt/sources.list.d/caddy-stable.list 0644 'deb [signed-by=/usr/share/keyrings/caddy-stable-archive-keyring.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main'
+  install_repository_key https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key "$NODESOURCE_FINGERPRINT" /usr/share/keyrings/mydsh-nodesource.gpg nodesource
+  write_managed_file /etc/apt/sources.list.d/nodesource.list 0644 'deb [signed-by=/usr/share/keyrings/mydsh-nodesource.gpg] https://deb.nodesource.com/node_24.x nodistro main'
+  install_repository_key https://dl.cloudsmith.io/public/caddy/stable/gpg.key "$CADDY_FINGERPRINT" /usr/share/keyrings/mydsh-caddy-stable.gpg caddy-stable
+  write_managed_file /etc/apt/sources.list.d/caddy-stable.list 0644 'deb [signed-by=/usr/share/keyrings/mydsh-caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main'
+}
+
+install_pnpm() {
+  local tarball="$TEMP_DIR/pnpm-11.7.0.tgz"
+  local digest
+  curl --fail --silent --show-error --location "$PNPM_TARBALL" --output "$tarball"
+  digest=$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A) || fail 'cannot calculate pnpm tarball integrity'
+  [[ "sha512-$digest" == "$PNPM_INTEGRITY" ]] || fail 'pnpm tarball integrity mismatch'
+  npm install --global --ignore-scripts "$tarball"
 }
 
 main() {
@@ -341,6 +435,24 @@ main() {
   public_host=$1
   [[ ${#public_host} -le 253 && $public_host =~ $HOST_PATTERN ]] || fail 'hostname must be one lowercase DNS name such as dsh.example.com'
   acquire_operation_lock
+  preflight_managed_paths \
+    /opt/mydsh \
+    /opt/mydsh/releases \
+    /etc/mydsh \
+    /var/lib/mydsh \
+    /srv/mydsh \
+    /srv/mydsh/workspace \
+    /var/lib/mydsh-deploy \
+    /etc/caddy \
+    /etc/systemd/system/caddy.service.d \
+    /usr/share/keyrings \
+    /etc/apt/sources.list.d \
+    /usr/local/sbin
+  if [[ -e /opt/mydsh/current || -L /opt/mydsh/current ]]; then
+    active_bootstrap_matches "$public_host" || fail 'active host differs from bootstrap assets; deploy the reviewed ref through mydsh-deploy-release'
+    printf 'Active host already matches reviewed bootstrap assets; no changes applied.\n'
+    return 0
+  fi
   TEMP_DIR=$(mktemp -d /tmp/mydsh-bootstrap.XXXXXX) || fail 'cannot create bootstrap temporary directory'
   [[ -n "$TEMP_DIR" && "$TEMP_DIR" == /tmp/mydsh-bootstrap.* && $(realpath -e -- "$TEMP_DIR") == "$TEMP_DIR" ]] || fail 'unsafe bootstrap temporary directory'
   trap cleanup EXIT
@@ -354,7 +466,7 @@ main() {
   DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install -y nodejs caddy
   node_version=$(node --version)
   [[ $node_version =~ ^v24\. ]] || fail "Node.js 24 is required; installed $node_version"
-  npm install --global --ignore-scripts pnpm@11.7.0
+  install_pnpm
   pnpm_version=$(pnpm --version)
   [[ $pnpm_version == 11.7.0 ]] || fail "pnpm 11.7.0 is required; installed $pnpm_version"
 
@@ -364,7 +476,8 @@ main() {
   install_managed_file "$SCRIPT_DIR/deploy-release.sh" /usr/local/sbin/mydsh-deploy-release 0755
   systemctl daemon-reload
   set -a
-  # shellcheck disable=SC1091 -- write_environment_files owns this root-controlled file.
+  # write_environment_files owns this root-controlled file.
+  # shellcheck disable=SC1091
   source /etc/mydsh/public.env
   set +a
   caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile

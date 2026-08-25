@@ -20,11 +20,11 @@ Plugin config holds only uppercase `DSH_*` environment references and non-secret
 
 This authentication model is for a small trusted group sharing one DSH instance. A valid cookie conveys the instance's existing browser authority; it does not create identities, per-user workspaces, session ownership, or command isolation.
 
-The Alibaba Cloud deployment installs reviewed root control flow at `/usr/local/sbin/mydsh-deploy-release`, outside every release. A shared nonblocking host lock serializes bootstrap, deployment, and rollback. One activation transaction covers the release symlink, `mydsh.service`, the Caddyfile, and the Caddy systemd drop-in; failure restores the preceding code and all three host configuration files before restarting the previous service and reloading Caddy.
+The Alibaba Cloud deployment installs reviewed root control flow at `/usr/local/sbin/mydsh-deploy-release`, outside every release. A shared nonblocking host lock serializes bootstrap, deployment, rollback, and pruning. Before mutation, the helper persists a `prepared` recovery journal under `/var/lib/mydsh-deploy/activation` containing the previous link and root-owned host-file backups. Failure retains or replays that journal until recovery succeeds; accepted activation records `committed` before cleanup, so cleanup failure can never roll back a live accepted release.
 
-`mydsh-build` clones and builds candidates under an empty minimal environment with its own home, cache, and scratch `DSH_HOME`. It cannot read the runtime user's home, workspace, environment files, or authentication secrets. Root makes a completed candidate immutable before activation, while `mydsh` only runs the accepted release.
+`mydsh-build` receives a new HOME, XDG config/cache, pnpm cache, scratch `DSH_HOME`, and checkout for each operation. One transient service runs the complete build pipeline with `KillMode=control-group`; systemd kills and awaits all descendants before root copies the result with reflinks disabled into new root-private inodes. The builder cannot retain a writable inode or open descriptor into the published tree and cannot read runtime state, workspace files, the private environment file, or authentication secrets.
 
-A Git bundle is a transport, not an authenticity proof: `git bundle verify` checks structure, prerequisites, and object connectivity. Deployment trusts the administrator's reviewed local checkout and any separately verified signed ref used to create the bundle. The helper retains a root-only copy of that bundle and, after builder execution, compares every privileged deployment input byte-for-byte with the trusted commit before validating candidate host configuration and public plus authenticated behavior.
+A Git bundle is a transport, not an authenticity proof: `git bundle verify` checks structure, prerequisites, and object connectivity. Deployment trusts the administrator's reviewed local checkout and any separately verified signed ref used to create the bundle. The helper retains a root-only copy of that bundle, sources every privileged deployment asset from a root-only extraction of the trusted commit, and rejects builder-side copies that differ before validating candidate host configuration and public plus authenticated behavior.
 
 ## Session and abuse controls
 
@@ -58,5 +58,5 @@ The [package README](../../../../packages/host/invite-auth/README.md) owns curre
 - Login rate limits reset on process restart and do not coordinate across replicas, so this deployment runs one DSH process.
 - Every authenticated person shares the same instance authority; multi-tenant or mutually untrusted access requires a different identity and authorization design.
 - Bootstrap and release operations fail rather than overwrite unmanaged files or follow symlinks at privileged paths.
-- Builds cannot use production state or secrets, at the cost of a second system account and separate build cache.
+- Builds cannot use production state or secrets, at the cost of a second system account and per-operation build storage.
 - A deployable Git bundle must come from a trusted reviewed checkout; bundle verification alone is insufficient.

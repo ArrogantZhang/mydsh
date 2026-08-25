@@ -6,7 +6,7 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment-design.zh.md)
 
 This design defines a DeepSeek Harness Web deployment for a small group of trusted users: the application runs on an Alibaba Cloud Hong Kong or overseas Ubuntu 22.04/24.04 ECS instance, serves HTTPS on a dedicated subdomain, and requires each visitor to enter one shared invite code. A browser remains authenticated for 30 days after successful verification.
 
-Each deployment uses an explicit reviewed branch or signed tag recorded as `DEPLOY_REF`; unattended upstream updates are excluded. Model configuration does not enter source control or deployment automation; an administrator adds Kimi as a custom OpenAI-compatible provider in the Web UI.
+Each deployment uses an explicit reviewed named ref recorded as `DEPLOY_REF`, preferably a verified signed tag when available; unattended upstream updates are excluded. Model configuration does not enter source control or deployment automation; an administrator adds Kimi as a custom OpenAI-compatible provider in the Web UI.
 
 Every authorized visitor shares one DSH instance, its sessions, its workspace, and the service account's permissions. This design applies only to the administrator and fully trusted users; it does not provide multi-tenant isolation.
 
@@ -92,20 +92,20 @@ When DSH is unavailable, Caddy returns `502`, and systemd restores the service a
 - `/var/lib/mydsh` is the persistent `DSH_HOME`, independent of releases.
 - `/srv/mydsh/workspace` is the systemd working directory and default DSH workspace.
 - `/usr/local/sbin/mydsh-deploy-release` is the root-owned deployment, rollback, and pruning control helper; release content never supplies root control flow.
-- `/var/lib/mydsh-build` and `/var/cache/mydsh-build/pnpm` belong to the separate non-login builder identity and cannot expose runtime state or workspace data.
+- `/var/lib/mydsh-deploy` is root-only transaction state, and `/var/lib/mydsh-deploy/activation` is the durable activation journal. Each builder tree uses a hidden, single-operation directory under the root-owned releases parent and is removed after publication or failure.
 - `/run/lock/mydsh-deploy.lock` serializes bootstrap, deployment, rollback, and pruning.
 - `/etc/mydsh/public.env` stores the non-secret `DSH_PUBLIC_HOST` for both systemd services.
 - `/etc/mydsh/mydsh.env` stores root-only secrets and the persistent `DSH_HOME` path.
 
-The server uses Node.js 24 and the pnpm version declared by the repository's `packageManager`. `mydsh-build` runs clone, frozen dependency installation, lifecycle scripts, tests, build, and config dump under `env -i` with its own HOME, cache, and scratch `DSH_HOME`; it cannot read `/var/lib/mydsh`, `/srv/mydsh/workspace`, or the root-only environment files. The helper compares privileged deployment inputs with a root-only copy of the trusted bundle before root makes the completed release immutable. systemd reads `/etc/mydsh/public.env` and the private environment file, then runs `/opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}` as the separate non-login `mydsh` runtime user from `/srv/mydsh/workspace`. Caddy reads only the public environment file.
+The server uses Node.js 24 and pnpm 11.7.0 with pinned tarball integrity. A transient service runs clone, frozen dependency installation, lifecycle scripts, tests, build, and config dump as `mydsh-build` under `env -i` with per-operation HOME, XDG directories, cache, scratch `DSH_HOME`, and checkout. `KillMode=control-group` makes systemd kill and await every descendant before root copies the completed tree without reflinks into new private inodes. The helper compares privileged deployment inputs with a root-only trusted Git extraction. systemd then runs the accepted release as the separate non-login `mydsh` runtime user from `/srv/mydsh/workspace`; Caddy reads only the public environment file.
 
 Caddy listens on ports 80 and 443, obtains and renews certificates automatically, and proxies to `127.0.0.1:3080`. `caddy validate` must pass before configuration reload.
 
 ## Release and rollback
 
-The local repository retains the DeepSeek upstream remote and the invite-code extension commits. An upgrade fetches the latest `master` and merges the local commits into a new deployment branch. Because upstream is a developer preview, every upgrade is an explicit release that requires renewed verification.
+The local repository retains the DeepSeek upstream remote and the invite-code extension commits. An upgrade fetches the latest `master` and merges the local commits into a new reviewed deployment ref. Because upstream is a developer preview, every upgrade is an explicit release that requires renewed verification.
 
-The root-installed helper validates candidate Caddy and systemd files before activation, backs up the current managed host files, atomically installs the candidate unit, Caddyfile, and Caddy drop-in, reloads systemd, switches `current`, and restarts DSH. It then verifies the active PID belongs to `mydsh`, the link names the candidate, loopback login is ready, public unauthenticated HTML and API responses fail closed, and a real invite-code login reaches the guarded application. Any failure restores the previous link and all three host files, reloads systemd, restarts the previous service, and reloads the previous Caddy configuration; first-deployment failure removes the candidate link, stops DSH, and restores bootstrap configuration. `DSH_HOME` does not roll back with code, so any future data migration requires a separate backward-compatibility assessment.
+The root-installed helper writes a durable `prepared` journal containing the previous link and host-file backups before installing the candidate helper, unit, Caddyfile, and Caddy drop-in. It reloads systemd, switches `current`, restarts DSH, and performs loopback, public, and authenticated acceptance. Any interruption or failure leaves the journal for the next locked operation to restore; failed restoration retains it and blocks new work. Acceptance atomically records `committed` before cleanup, so a cleanup failure leaves a journal that the next operation removes without rollback. `DSH_HOME` does not roll back with code, so any future data migration requires a separate backward-compatibility assessment.
 
 ## Testing and acceptance
 
