@@ -76,7 +76,6 @@ export const SERVICE_PAGE: Record<string, string> = {
   fileReferences: 'session-reference.md',
   fs: 'filesystem.md',
   goals: 'goal.md',
-  inviteAuthReadiness: 'web-server.md',
   webServer: 'web-server.md',
   invariants: 'invariants.md',
   llm: 'llm-streaming.md',
@@ -127,12 +126,12 @@ export const SERVICE_PAGE: Record<string, string> = {
  * face only) name the package README that owns their surface.
  *
  * Two categories remain, and neither is a projection gap a scanning rule could
- * close. An OPTIONAL key (`key?: X`) is a value the launcher or boot code
- * installs before the tree mounts, which the analyzer skips by rule because no
- * plugin provides it and `inject` cannot reach it. A client-face key belongs to
- * the browser Context, which this host-face program never sees; the browser
- * surface has its own generated catalog (`scripts/gen-client-catalog.ts`, served
- * to a model as `cordis_runtime_inspect what:"client"`).
+ * close. An OPTIONAL key (`key?: X`) is either a launcher-provided value or an
+ * internal lifecycle fact deliberately excluded from the callable service
+ * catalog; each exemption names its owner. A client-face key belongs to the
+ * browser Context, which this host-face program never sees; the browser surface
+ * has its own generated catalog (`scripts/gen-client-catalog.ts`, served to a
+ * model as `cordis_runtime_inspect what:"client"`).
  */
 export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   agent: 'not a service: the DX accessor field on Agent.ctx (root accessor defaulting to undefined) — docs/subsystems/core.md owns the Agent handle',
@@ -142,6 +141,7 @@ export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   launcherSessionQueryPath: 'not a service: launcher-provided boot-context value (string | undefined) — packages/session-query/session-query-sqlite/README.md owns this launcher contract',
   dshHomePath: 'not a service: boot-provided root accessor function (typeof dshHomePath | undefined) for Loader !!js config expressions — packages/boot/app-boot/README.md owns the boot contract',
   launchEnvironment: 'not a service: launcher-provided root accessor value (LaunchEnvironmentSnapshot | undefined) — packages/util/launch-environment/README.md owns this launcher contract',
+  inviteAuthReadiness: 'not a callable service: plugin-provided route-readiness fact used only for Loader injection ordering — packages/host/invite-auth/README.md owns the lifecycle contract',
   connection: 'interface-typed (HostConnectionHandle); implementing class HostConnectionService is declared in rpc-host.ts — packages/client/connection/README.md owns the API',
   uiRenderer: 'client-side interface-typed browser service — packages/client/ui-renderer/README.md owns the API',
   settingsSchema: 'client-side schema introspection service — packages/client/ui-settings/README.md owns the API',

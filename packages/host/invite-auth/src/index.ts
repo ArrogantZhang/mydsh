@@ -30,9 +30,9 @@ declare module '@deepseek-ai/cordis' {
   interface Context {
     /**
      * Fact available only while invite-auth owns its route prefix. A plugin
-     * that injects this service is disposed before that prefix is withdrawn.
+     * that injects this fact is disposed before that prefix is withdrawn.
      */
-    inviteAuthReadiness: InviteAuthReadiness
+    inviteAuthReadiness?: InviteAuthReadiness
   }
 }
 

@@ -11,7 +11,7 @@ import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest'
 import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
@@ -694,21 +694,22 @@ describe('real Loader invite-auth composition', () => {
   })
 
   it('releases and restores the sole prefix route across plugin disposal', { timeout: 60_000 }, async () => {
+    expectTypeOf<undefined>().toExtend<Context['inviteAuthReadiness']>()
     const composition = await loadComposition()
-    expect(composition.context.inviteAuthReadiness).toEqual({ routePrefix: '/__invite' })
+    expect(composition.context.get('inviteAuthReadiness')).toEqual({ routePrefix: '/__invite' })
     const entry = [...composition.context.loader.entries()].find(candidate => candidate.options.id === 'invite-auth')
     expect(entry).toBeDefined()
     await entry!.fiber?.dispose()
     expect((await request(composition, '/__invite/login')).status).toBe(404)
-    expect(composition.context.inviteAuthReadiness).toBeUndefined()
+    expect(composition.context.get('inviteAuthReadiness')).toBeUndefined()
 
     const replacement = composition.context.plugin(InviteAuth, {})
     await expect(replacement.await()).resolves.toBeDefined()
     expect((await request(composition, '/__invite/login')).status).toBe(200)
-    expect(composition.context.inviteAuthReadiness).toEqual({ routePrefix: '/__invite' })
+    expect(composition.context.get('inviteAuthReadiness')).toEqual({ routePrefix: '/__invite' })
     await replacement.dispose()
     expect((await request(composition, '/__invite/login')).status).toBe(404)
-    expect(composition.context.inviteAuthReadiness).toBeUndefined()
+    expect(composition.context.get('inviteAuthReadiness')).toBeUndefined()
   })
 
   it('registers and disposes the package invariant companion', async () => {

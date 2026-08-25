@@ -32,7 +32,7 @@ The [package README](../../../../packages/host/invite-auth/README.md) owns curre
 
 **Run a standalone authentication process.** A separate service adds another runtime, health model, deployment artifact, and secret handoff while the authenticated routes still need coordinated startup with the DSH page. The native plugin reuses WebServer route ownership and Cordis lifecycle ordering without adding a second application process.
 
-**Use Caddy Basic Authentication.** Basic Authentication sends the long-lived shared credential on every request, gives the deployment little control over logout and session rotation, and exposes browser-native prompts rather than the product's same-origin login flow. A short signed session keeps the invite code at the login endpoint and permits signing-secret rotation to revoke all browsers.
+**Use Caddy Basic Authentication.** Basic Authentication sends the long-lived shared credential on every request, gives the deployment little control over logout and session rotation, and exposes browser-native prompts rather than the product's same-origin login flow. A separately signed session keeps the invite code at the login endpoint and permits signing-secret rotation to revoke all browsers.
 
 **Convert `dsh-host-webserver` into authentication middleware.** Global middleware would make a generic HTTP carrier own deployment policy and would affect every composition, including the shipped local Web bundle. A prefix-owning plugin plus proxy enforcement keeps authentication opt-in and preserves WebServer's route-registration role.
 
