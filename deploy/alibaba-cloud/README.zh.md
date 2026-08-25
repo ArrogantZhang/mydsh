@@ -135,7 +135,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-releas
 
 升级成功通过验收后，只删除经过精确验证且不可预测的远程 staging 目录。升级失败时保留该目录，并打印其非秘密路径供诊断。
 
-已安装 helper 拥有 journal 格式 `1`，并被明确排除在自动 release 更新之外。helper、journal 格式、unit 或 Caddy 变更需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。冻结字节比较会让使用旧模板打包的 release 在维护后失去资格，因此必须先使用新模板打包并保留一个经过测试的已知良好 release；回滚只能选择携带新控制平面字节的 release。
+已安装 helper 拥有两个带版本的格式 1 journal：`/var/lib/mydsh-deploy/activation` 负责代码激活，`/var/lib/mydsh-deploy/rotation` 负责密钥轮换。helper 拒绝未知格式，并在每次部署、回滚、清理或轮换前协调两个 journal。处于 `prepared` 的轮换会恢复并同步旧环境、重启 DSH 并重新验收；处于 `committed` 的轮换保留新密钥并清理 journal。恢复失败会保留 journal 并阻止下一项操作。helper、journal 格式、unit 或 Caddy 变更需要在 DSH 停止时执行单独评审的维护流程；本教程不自动处理该控制平面变更。冻结字节比较会让使用旧模板打包的 release 在维护后失去资格，因此必须先使用新模板打包并保留一个经过测试的已知良好 release；回滚只能选择携带新控制平面字节的 release。
 
 重启、监听检查或公开与已认证验收失败时，deploy helper 会自动回滚。如果操作员要主动回滚，请从 `sudo ls -1 /opt/mydsh/releases` 中选择一个确认可用的完整 commit。以下预检要求 40 个小写十六进制字符，解析目录的规范化真实路径，并在 helper 执行相同的逐字节比较、原子切换、重启和验收检查之前，证明目录的父路径和 basename 完全匹配。
 

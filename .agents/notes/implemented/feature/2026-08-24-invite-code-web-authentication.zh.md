@@ -22,6 +22,8 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。该稳定 helper 拥有 journal 格式 1，并被排除在自动 release 更新之外；更改它需要单独评审的维护流程。root 所有的 systemd unit、Caddyfile 和 Caddy drop-in 也是冻结的控制平面输入：候选必须携带逐字节相同的副本，正常部署绝不会替换或重新加载这些文件。共享的非阻塞宿主锁将 bootstrap、部署、回滚、清理、遗留 staging 清理，以及邀请或会话密钥轮换串行化。轮换会在服务器上生成密钥，原子同步私有环境文件，并在重启或验收失败时恢复它。helper 会在切换代码前于 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` 恢复 journal，其中包含之前的链接和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复并同步该状态，直到恢复成功；接受激活会验证监听与认证行为、启用服务、同步受影响文件系统，并在清理前记录 `committed`。
 
+稳定 helper 拥有两个带版本的格式 1 journal：激活与轮换。它拒绝未知格式，并在每项操作前协调两者。`prepared` 轮换恢复并同步旧环境、重启 DSH 并重复验收；`committed` 轮换保留新密钥并清理 journal。恢复失败会保留状态并阻止后续工作，且没有经过验证的活动 release 时，轮换不能发布状态。
+
 候选 release 绝不会在生产宿主上构建。选定的具名 Git ref 提供 `package-release.sh`；脚本会对照该 ref 检查自身字节并创建可信解压目录，再在 digest 固定、使用全新本地状态且没有生产环境的临时官方 Node 24 Linux 容器中，执行固定 pnpm 安装、冻结依赖、invite-auth 测试、完整构建和配置转储。CPU、内存、进程数和运行时间受限；网络与磁盘使用量不受限。容器只能写入精确源码 tree 的副本，不能接触调用者输出目录。容器退出后，宿主把每个静态安全输入与可信解压目录逐字节比较，生成 manifest 和 checksum，再通过一次目录重命名发布完整 artifact-set 目录。服务器仅支持 Linux amd64，没有 builder 身份、pnpm、源码 checkout、生命周期执行、测试运行器或候选构建缓存。
 
 通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。本地 packager 和宿主 helper 执行相同的压缩大小、member 数量、单个 member 和展开大小 artifact 限制。helper 还会为每个 member 预算文件系统 metadata 和备用 inode，要求以 commit 命名的 artifact-set 目录中恰好只有 archive 和 checksum，把两者复制到持久的 root-private 新 inode，拒绝不安全 archive member 和越界链接，并验证 manifest 格式、commit、具名 ref、Linux amd64 平台、固定镜像 digest、运行时输出和 helper journal 兼容版本。与已安装控制平面的逐字节比较关闭了候选配置语法；helper 绝不会执行 release 内的控制流。

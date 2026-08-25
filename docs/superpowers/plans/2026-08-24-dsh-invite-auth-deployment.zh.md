@@ -936,6 +936,8 @@ EnvironmentFile=/etc/mydsh/public.env
 
 `deploy-release.sh` 只接受原子发布、以 commit 命名的 artifact-set 目录，并要求其中恰好只有 archive 与 sidecar。在共享锁下，它会清理安全的遗留 staging，在复制任一文件前预留压缩上限与固定上传余量，把两者复制到持久的 root-private 新 inode，验证 SHA-256，执行文档规定的压缩大小、member 数量、单个 member、展开大小、文件系统 metadata、inode 和可用空间限制，拒绝不安全 archive 条目，并验证 manifest、镜像 digest、helper journal 兼容版本、已构建 CLI、依赖和 overlay。本地 packager 会在发布前执行 artifact 限制。纯 Bash ref 验证器接受 packager 生成的常用子集，无需在生产环境安装或运行 Git。候选 systemd unit、Caddyfile 和 drop-in 必须与已安装、受管理的控制平面逐字节相同。helper 只发布并激活代码，并负责带回滚的加锁原子邀请/会话密钥轮换；它绝不会运行候选命令，也不会更新稳定 helper、unit 或 Caddy 文件。
 
+helper 拥有相互独立、带版本的格式 1 激活和轮换 journal，并拒绝未知格式。每项操作前都会先协调 journal：`prepared` 轮换恢复并同步旧环境、重启并验收；`committed` 轮换保留新值并清理状态；恢复失败会保留状态并阻止后续工作。轮换必须在发布 journal 前确认存在非空且经过验证的活动 release。
+
 实现由 `deploy/alibaba-cloud/deploy-release.sh` 负责；它将部署、回滚、恢复和清理串行化，在变更前记录之前的链接和启用状态，原子切换符号链接，验证运行时身份、回环 listener、公开拒绝和认证访问，并持久提交或恢复之前的代码状态。正常 release 激活绝不会重新加载冻结的 Caddy 或 systemd 配置。永远不要自动删除旧 release，也不要打印任一秘密。
 
 - [ ] **步骤 4：编写双语部署教程**

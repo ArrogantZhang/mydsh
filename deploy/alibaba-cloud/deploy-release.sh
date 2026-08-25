@@ -1066,7 +1066,8 @@ recover_rotation_journal() {
   [[ $state == prepared || $mode == force ]] || return 1
   validate_existing_managed_file "$journal/backup" 600 || return 1
   restore_secret_backup "$journal/backup" "$env_file" || return 1
-  active=$(current_release) || active=''
+  active=$(current_release) || return 1
+  [[ -n "$active" ]] || return 1
   systemctl restart mydsh || return 1
   health_check "$active" || return 1
   public_acceptance || return 1
@@ -1120,6 +1121,8 @@ rotate_authentication_secret() {
   esac
   validate_existing_managed_file "$env_file" 600 || return 1
   [[ -d "$state_root" && ! -L "$state_root" && $(realpath -e -- "$state_root") == "$state_root" ]] || return 1
+  active=$(current_release) || return 1
+  [[ -n "$active" ]] || return 1
   prepare_rotation_journal "$journal" "$kind" "$env_file" || return 1
   value=$(openssl rand -hex "$bytes") || { recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   create_registered_temp_file "$(dirname -- "$env_file")" || { recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
@@ -1137,7 +1140,6 @@ rotate_authentication_secret() {
   sync -f "$temporary" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   mv -f -- "$temporary" "$env_file" || { discard_registered_temp_file "$temporary" || true; recover_rotation_journal "$journal" "$env_file" force || true; return 1; }
   unregister_temp_file "$temporary"
-  active=$(current_release) || active=''
   if sync -f "$env_file" && sync -f "$(dirname -- "$env_file")" && systemctl restart mydsh && health_check "$active" && public_acceptance && authenticated_acceptance && write_journal_state "$journal" committed; then
     if ! remove_rotation_journal "$journal"; then printf 'mydsh-deploy-release: rotation accepted; committed journal retained at %s\n' "$journal" >&2; fi
     printf 'Rotated %s authentication secret.\n' "$kind"

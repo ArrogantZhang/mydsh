@@ -279,6 +279,8 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(main.indexOf('acquire_operation_lock')).toBeLessThan(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"'))
     expect(main.indexOf('cleanup_abandoned_operation_directories "$UPLOADS_DIR"')).toBeLessThan(main.indexOf('deploy_artifact "$1"'))
     expect(main.indexOf('recover_rotation_journal "$ROTATION_DIR"')).toBeLessThan(main.indexOf('deploy_artifact "$1"'))
+    const rotation = script.slice(script.indexOf('\nrotate_authentication_secret() {'), script.indexOf('\ndeploy_artifact() {'))
+    expect(rotation.indexOf('active=$(current_release)')).toBeLessThan(rotation.indexOf('prepare_rotation_journal'))
     const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('TRUST_ROOT=$(mktemp'))
     expect(deploy.indexOf('validate_upload_space')).toBeLessThan(deploy.indexOf('copy_bounded_upload'))
@@ -606,6 +608,7 @@ systemctl() { return 0; }
 health_check() { return 0; }
 public_acceptance() { return 0; }
 authenticated_acceptance() { return 0; }
+current_release() { printf '/opt/mydsh/releases/${'a'.repeat(40)}\n'; }
 sync() { return 0; }
 rotate_authentication_secret invite "$env_file" "$root"
 grep -Fx 'DSH_INVITE_CODE_SECRET=11111111111111111111111111111111' "$env_file"
@@ -630,7 +633,7 @@ env_file="$root/mydsh.env"; journal="$root/rotation"
 printf '%s\nDSH_HOME=/var/lib/mydsh\nDSH_INVITE_CODE_SECRET=old-invite\nDSH_INVITE_SESSION_SECRET=old-session\n' "$MANAGED_MARKER" >"$env_file"
 chmod 0600 "$env_file"
 stat() { if [[ "$1" == -c && "$2" == %U:%G ]]; then printf 'root:root\n'; else command stat "$@"; fi; }
-systemctl() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; current_release() { return 0; }; sync() { return 0; }
+systemctl() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; current_release() { printf '/opt/mydsh/releases/${'a'.repeat(40)}\n'; }; sync() { return 0; }
 prepare_rotation_journal "$journal" invite "$env_file"
 sed -i 's/old-invite/interrupted-invite/' "$env_file"
 recover_rotation_journal "$journal" "$env_file"
@@ -654,6 +657,25 @@ grep -Fx 'DSH_INVITE_CODE_SECRET=old-invite' "$env_file"
 touch "$root/.rotate-backup.abc123"
 cleanup_rotation_residue "$root"
 [[ ! -e "$root/.rotate-backup.abc123" ]]
+`)
+    })
+
+    it('refuses rotation before the first release without leaving state', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+env_file="$root/mydsh.env"
+printf '%s\nDSH_HOME=/var/lib/mydsh\nDSH_INVITE_CODE_SECRET=old-invite\nDSH_INVITE_SESSION_SECRET=old-session\n' "$MANAGED_MARKER" >"$env_file"
+chmod 0600 "$env_file"
+stat() { if [[ "$1" == -c && "$2" == %U:%G ]]; then printf 'root:root\n'; else command stat "$@"; fi; }
+current_release() { return 0; }
+systemctl() { touch "$root/restarted"; return 0; }
+if rotate_authentication_secret invite "$env_file" "$root"; then exit 90; fi
+[[ ! -e "$root/rotation" && ! -e "$root/restarted" ]]
+if compgen -G "$root/.mydsh-tmp.*" >/dev/null; then exit 91; fi
+recover_rotation_journal "$root/rotation" "$env_file"
+[[ ! -e "$root/restarted" ]]
 `)
     })
 

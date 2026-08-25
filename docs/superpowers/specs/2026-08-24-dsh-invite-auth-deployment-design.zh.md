@@ -92,7 +92,7 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/var/lib/mydsh` 是持久化 `DSH_HOME`，独立于 release。
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
 - `/usr/local/sbin/mydsh-deploy-release` 是 root 所有、拥有 journal 格式 1 的部署、回滚和清理控制 helper；release 内容绝不提供或更新 root 控制流。
-- `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/uploads` 在验证期间保存持久的 root-private 上传副本，`/var/lib/mydsh-deploy/activation` 是持久激活 journal。解压使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
+- `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/uploads` 在验证期间保存持久的 root-private 上传副本，`/var/lib/mydsh-deploy/activation` 是格式 1 激活 journal，`/var/lib/mydsh-deploy/rotation` 是格式 1 轮换 journal。解压使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
 - `/run/lock/mydsh-deploy.lock` 将 bootstrap、部署、回滚和清理串行化。
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
@@ -102,6 +102,8 @@ Linux amd64 服务器只安装 Node.js 24 运行时和 Caddy；bootstrap 会在�
 稳定的宿主 helper 要求原子 artifact-set 目录中恰好只有 tarball 和 checksum。在部署锁保护下，它只删除规范、root 所有的遗留上传与解压目录，并拒绝不安全的匹配项。复制前，它会在上传文件系统上预留完整的 1 GiB 压缩文件上限、1 GiB 安全余量，以及 1 MiB checksum 与 metadata 开销，而不依赖可变源文件的当前大小。它把两个文件复制到持久的 root-private 新 inode，验证 SHA-256，并在解压前执行压缩大小、member 数量、单个 member、展开大小、每个 member 的文件系统 metadata、inode 和 release 文件系统可用空间限制；本地 packager 会在发布前应用 artifact 限制。它拒绝绝对路径、父目录穿越、sparse 或特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。纯 Bash manifest ref 验证器只接受 `refs/heads/` 或 `refs/tags/` 下的常用 ASCII component，并拒绝有歧义的分隔符、点开头或以 `.lock` 结尾的 component、空白、控制字符、反斜杠和 Git 元字符；artifact 格式有意不支持生僻但可能有效的 Git ref。候选 unit、Caddyfile 和 Caddy drop-in 必须与已安装、root 所有的受管理文件逐字节相同；systemd 与 Caddy 验证针对该冻结控制平面运行，正常部署绝不会安装或重新加载这些文件。同一个加锁 helper 会通过原子文件替换与进程回滚轮换邀请和会话密钥。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。bootstrap 安装并验证受管理配置；更改配置需要单独评审的控制平面维护。
+
+稳定 helper 拒绝未知 journal 格式，并在每次操作前于共享锁下协调激活和轮换 journal。处于 `prepared` 的轮换会恢复并同步旧环境、重启 DSH，并重复公开和已认证验收；处于 `committed` 的轮换保留新密钥并删除 journal。恢复失败会保留 journal 并阻止后续工作。
 
 ## 发布与回滚
 
