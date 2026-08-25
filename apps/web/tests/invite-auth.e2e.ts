@@ -102,6 +102,8 @@ describe('web e2e: invite authentication login', () => {
     const response = await page.goto(`${scaffold.baseUrl}/__invite/login?next=%2Fsessions`, { waitUntil: 'load' })
     if (response === null) throw new Error('invite-auth login navigation returned no HTTP response')
 
+    expect(response.status()).toBe(200)
+    expect(response.headers()['content-type']).toBe('text/html; charset=utf-8')
     expect(response.headers()['cache-control']).toBe('no-store')
     expect(response.headers()['content-security-policy']).toBe(CONTENT_SECURITY_POLICY)
     expect(response.headers()['x-content-type-options']).toBe('nosniff')
