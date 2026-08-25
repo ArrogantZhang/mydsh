@@ -100,13 +100,12 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('65760C51EDEA2017CEA2CA15155B6D79CA56EA34')
     expect(script).toContain('[[ ${#fingerprints[@]} -eq 1 ]]')
     expect(script).toContain('https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main')
-    expect(script).toContain('npm install --global --ignore-scripts "$tarball"')
-    expect(script).toContain('sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==')
-    expect(script).toContain('https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz')
+    expect(script).not.toContain('npm install --global')
+    expect(script).not.toContain('PNPM_INTEGRITY')
     expect(script).toContain('mydsh-nodesource.gpg')
     expect(script).toContain('mydsh-caddy-stable.gpg')
     expect(script).toMatch(/node --version[\s\S]*24/)
-    expect(script).toMatch(/pnpm --version[\s\S]*11\.7\.0/)
+    expect(script).not.toMatch(/\bpnpm\b/)
     expect(script).toContain('openssl rand -hex 16')
     expect(script).toContain('openssl rand -hex 32')
     expect(script).toContain('if [[ -e /etc/mydsh/mydsh.env || -L /etc/mydsh/mydsh.env ]]')
@@ -117,7 +116,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('ensure_managed_directory /opt/mydsh/releases root root 0755')
     expect(script).toContain('ensure_managed_directory /var/lib/mydsh mydsh mydsh 0700')
     expect(script).toContain('ensure_managed_directory /srv/mydsh/workspace mydsh mydsh 0750')
-    expect(script).toContain('mydsh-build')
+    expect(script).not.toContain('mydsh-build')
     expect(script).not.toContain('ensure_managed_directory /var/lib/mydsh-build')
     expect(script).not.toContain('ensure_managed_directory /var/cache/mydsh-build')
     expect(script).toContain('ensure_managed_directory /var/lib/mydsh-deploy root root 0700')
@@ -156,36 +155,27 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(bootstrapMain.indexOf('preflight_managed_paths')).toBeLessThan(bootstrapMain.indexOf('apt-get update'))
   })
 
-  it('isolates candidate builds and transacts release activation', () => {
+  it('validates prebuilt artifacts and transacts release activation', () => {
     const script = asset('deploy-release.sh')
 
     expect(script).toMatch(/^#!\/usr\/bin\/env bash\n# Managed by DeepSeek Harness Alibaba Cloud deployment\nset -euo pipefail\n/)
-    expect(script).toContain('Usage: sudo %s <git-bundle-file> <ref>')
+    expect(script).toContain('Usage: sudo %s <prebuilt-linux-artifact.tar.gz> <sha256-sidecar>')
     expect(script).toContain('sudo %s --rollback <40-character-lowercase-commit>')
     expect(script).toContain('sudo %s --prune <40-character-lowercase-commit>')
     expect(script).toMatch(/\[\[ \$# -eq 2 \]\]/)
     expect(script).not.toContain('set -x')
     expect(script).toContain('realpath -e --')
-    expect(script).toContain('trusted_git -C "$trusted_repository" bundle verify "$trusted_bundle"')
-    expect(script).toContain('env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git "$@"')
-    expect(script).toContain('git check-ref-format --branch')
-    expect(script).toContain('$RELEASES_DIR/.build.XXXXXX')
-    expect(script).not.toContain('$DEPLOY_STATE_ROOT/build.XXXXXX')
-    expect(script).toContain('staged_bundle="$operation_root/release.bundle"')
-    expect(script).toMatch(/install .*"\$trusted_bundle" "\$staged_bundle"/)
-    expect(script).toContain('git clone --branch "$ref" --single-branch "$bundle" "$checkout"')
-    expect(script).toContain("rev-parse 'FETCH_HEAD^{commit}'")
-    expect(script).toContain('git -C "$checkout" rev-parse HEAD')
-    expect(script).toContain('write_builder_commit_marker')
-    expect(script).toContain('read_builder_commit_marker')
-    expect(script).toContain('[[ $(id -un) == mydsh-build ]]')
-    expect(script).not.toMatch(/builder_commit=\$\(env -i[^\n]*git -C "\$checkout"/)
-    expect(script).toContain('install --frozen-lockfile --store-dir "$cache"')
-    expect(script).toMatch(/vitest run packages\/host\/invite-auth\/tests/)
-    expect(script).toContain('pnpm --dir "$checkout" run build')
-    expect(script).toContain('--dump-config')
+    expect(script).toContain('$RELEASES_DIR/.extract.XXXXXX')
+    expect(script).toContain('verify_artifact_checksum')
+    expect(script).toContain('validate_archive_members')
+    expect(script).toContain('validate_release_manifest')
+    expect(script).toContain('helper_journal_format=1')
+    expect(script).toContain('apps/cli/lib/bin.js')
+    expect(script).toContain('apps/web/dist/index.html')
+    expect(script).toContain('node_modules')
+    expect(script).not.toMatch(/systemd-run|pnpm (?:install|run|exec)|git clone|--internal-build|mydsh-build/)
     expect(script).toContain('chown -R root:root')
-    expect(script).toContain('chmod 0755 "$publish_root"')
+    expect(script).toContain('chmod 0755 "$extract_root"')
     expect(script).toContain('chmod -R go-w')
     expect(script).toContain('caddy validate --config "$installed_caddy" --adapter caddyfile')
     expect(script).toContain('local next_path="${current_path}.next"')
@@ -206,21 +196,9 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('/run/lock/mydsh-deploy.lock')
     expect(script).toContain('flock -n')
     expect(script).toContain('validate_lock_path')
-    expect(script).toContain('run_builder')
-    expect(script).toContain('systemd-run --wait --collect --pipe')
-    expect(script).toContain('KillMode=control-group')
-    expect(script).toContain('PrivateTmp=yes')
-    expect(script).toContain('HOME="$operation_root/home"')
-    expect(script).toContain('TMPDIR="$operation_root/tmp"')
-    expect(script).toContain('XDG_RUNTIME_DIR="$operation_root/xdg-runtime"')
-    expect(script).toContain('XDG_CONFIG_HOME="$operation_root/xdg-config"')
-    expect(script).toContain('XDG_CACHE_HOME="$operation_root/xdg-cache"')
-    expect(script).toContain('NPM_CONFIG_USERCONFIG=/dev/null')
-    expect(script).toContain('NPM_CONFIG_GLOBALCONFIG=/dev/null')
-    expect(script).toContain('GIT_CONFIG_NOSYSTEM=1')
-    expect(script).toContain('GIT_CONFIG_GLOBAL=/dev/null')
-    expect(script).toContain('cp -a --reflink=never')
-    expect(script).toContain('install_trusted_release_assets')
+    expect(script).toContain('sha256sum')
+    expect(script).toContain('sync_activated_state')
+    expect(script).toContain('listener_check')
     expect(script).toContain('/var/lib/mydsh-deploy/activation')
     expect(script).toContain('activation.new.XXXXXX')
     expect(script).toContain('mv -T -- "$staging" "$journal"')
@@ -234,11 +212,10 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).not.toContain('activation accepted with committed journal retained')
     expect(script).toContain('service-enabled')
     expect(script).toContain('restore_service_enable_state')
-    expect(script).toContain('root-helper')
+    expect(script).not.toContain('root-helper')
     expect(script).not.toMatch(/runuser -u mydsh -- (?:git|pnpm|env|node)/)
     expect(script).not.toContain('DSH_HOME=/var/lib/mydsh /usr/bin/node')
     expect(script).toContain('systemd-analyze')
-    expect(script).toContain('bash -n "$helper_candidate"')
     expect(script).toContain('stage_candidate_configs')
     expect(script).toContain('restore_host_configs')
     expect(script).toContain('systemctl is-active --quiet mydsh')
@@ -246,7 +223,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('stat -c %U "/proc/$main_pid"')
     expect(script).toContain('public_acceptance')
     expect(script).toContain('authenticated_acceptance')
-    expect(script).toContain('cmp -- "$trusted_assets/$candidate_path"')
+    expect(script).not.toContain('install_managed_file "$asset_root/deploy-release.sh"')
     expect(script).toContain('create_registered_temp_file')
     expect(script).toContain('cleanup_registered_temp_files')
     expect(script).toContain('activation accepted but committed journal cleanup was not durable')
@@ -256,9 +233,31 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET[^\n]*(?:>&2|\/dev\/stdout)/)
     const main = script.slice(script.indexOf('\nmain() {'))
     expect(main.indexOf('recover_activation_journal "$ACTIVATION_DIR"')).toBeLessThan(main.indexOf('\n  validate_host'))
-    const deploy = script.slice(script.indexOf('\ndeploy_bundle() {'), script.indexOf('\nmain() {'))
-    expect(deploy.indexOf('validate_candidate_configs "$trusted_assets"')).toBeLessThan(deploy.indexOf('publish_builder_checkout'))
-    expect(deploy).not.toContain('git -C "$checkout"')
+    const deploy = script.slice(script.indexOf('\ndeploy_artifact() {'), script.indexOf('\nmain() {'))
+    expect(deploy.indexOf('validate_archive_members')).toBeLessThan(deploy.indexOf('tar -xzf'))
+    expect(deploy.indexOf('validate_candidate_configs')).toBeLessThan(deploy.indexOf('publish_extracted_release'))
+  })
+
+  it('packages an exact reviewed ref in a bounded Node 24 container', () => {
+    const script = asset('package-release.sh')
+
+    expect(script).toMatch(/^#!\/usr\/bin\/env bash\nset -euo pipefail\n/)
+    expect(script).toContain('node:24-bookworm')
+    expect(script).toContain('rev-parse --symbolic-full-name')
+    expect(script).toContain('archive "$commit"')
+    expect(script).toContain('--memory=')
+    expect(script).toContain('--pids-limit=')
+    expect(script).toContain('--cpus=')
+    expect(script).toContain('pnpm-11.7.0.tgz')
+    expect(script).toContain('sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==')
+    expect(script).toContain('--frozen-lockfile')
+    expect(script).toContain('vitest run packages/host/invite-auth/tests')
+    expect(script).toContain('run build')
+    expect(script).toContain('--dump-config')
+    expect(script).toContain('format=1')
+    expect(script).toContain('helper_journal_format=1')
+    expect(script).toContain('sha256sum')
+    expect(script).not.toMatch(/runuser|systemd-run|DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
 
   it('limits GNU filesystem integration to Linux CI', () => {
@@ -331,7 +330,7 @@ if validate_release_target "$root/outside/$commit" "$root/releases"; then exit 9
       expectBashSuccess(`
 set -euo pipefail
 usage_output=$(usage 2>&1)
-grep -F -- '<git-bundle-file> <ref>' <<<"$usage_output"
+grep -F -- '<prebuilt-linux-artifact.tar.gz> <sha256-sidecar>' <<<"$usage_output"
 grep -F -- '--rollback <40-character-lowercase-commit>' <<<"$usage_output"
 grep -F -- '--prune <40-character-lowercase-commit>' <<<"$usage_output"
 root=$(mktemp -d)
@@ -384,45 +383,53 @@ if (preflight_managed_paths "$root/early/child" "$root/late-ancestor/child"); th
 `, 'bootstrap-host.sh')
     })
 
-    it('copies builder output to new root-private inodes and rejects invalid checkout types', () => {
+    it('publishes only canonical extracted release directories', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-mkdir -p "$root/releases" "$root/checkout"
-printf '{}\n' >"$root/checkout/package.json"
+mkdir -p "$root/releases" "$root/extracted"
+printf '{}\n' >"$root/extracted/package.json"
 commit=${'3'.repeat(40)}
 chown() { return 0; }
-publish_builder_checkout "$root/checkout" "$root/releases/$commit" "$root/releases"
-[[ $(stat -c %i "$root/checkout/package.json") != "$(stat -c %i "$root/releases/$commit/package.json")" ]]
+publish_extracted_release "$root/extracted" "$root/releases/$commit" "$root/releases"
+[[ ! -e "$root/extracted" && -f "$root/releases/$commit/package.json" ]]
 [[ $(stat -c %a "$root/releases/$commit") == 755 ]]
 alias=${'4'.repeat(40)}
-ln -s "$root/checkout" "$root/aliased-checkout"
-if publish_builder_checkout "$root/aliased-checkout" "$root/releases/$alias" "$root/releases"; then exit 90; fi
+ln -s "$root/releases/$commit" "$root/aliased-extract"
+if publish_extracted_release "$root/aliased-extract" "$root/releases/$alias" "$root/releases"; then exit 90; fi
 [[ ! -e "$root/releases/$alias" ]]
 file=${'5'.repeat(40)}
 printf 'not a directory\n' >"$root/not-directory"
-if publish_builder_checkout "$root/not-directory" "$root/releases/$file" "$root/releases"; then exit 91; fi
+if publish_extracted_release "$root/not-directory" "$root/releases/$file" "$root/releases"; then exit 91; fi
 [[ ! -e "$root/releases/$file" ]]
 `)
     })
 
-    it('removes a poisoned new publication without following its trusted-asset alias', () => {
+    it('rejects archive members and links that escape extraction', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-commit=${'a'.repeat(39)}b
-target="$root/releases/$commit"
-assets="$root/assets"
 outside="$root/outside"
-mkdir -p "$target" "$assets" "$outside"
-for name in Caddyfile mydsh.service caddy-mydsh.conf deploy-release.sh; do printf '%s\n' "$MANAGED_MARKER" >"$assets/$name"; done
-printf 'untouched\n' >"$outside/sentinel"
-ln -s "$outside" "$target/.mydsh-trusted-deploy"
-if install_trusted_release_assets "$target" "$assets" "$root/releases"; then exit 90; fi
-[[ ! -e "$target" && ! -L "$target" ]]
-grep -Fx untouched "$outside/sentinel"
+mkdir -p "$root/tree" "$outside"
+ln -s ../../outside "$root/tree/escape"
+tar -czf "$root/escape.tar.gz" -C "$root/tree" .
+if validate_archive_members "$root/escape.tar.gz"; then exit 90; fi
+printf 'safe\n' >"$root/tree/file"
+rm "$root/tree/escape"
+tar -czf "$root/safe.tar.gz" -C "$root/tree" .
+validate_archive_members "$root/safe.tar.gz"
+python3 - "$root/traversal.tar.gz" <<'PY'
+import io
+import sys
+import tarfile
+with tarfile.open(sys.argv[1], 'w:gz') as stream:
+    member = tarfile.TarInfo('../escape')
+    member.size = 1
+    stream.addfile(member, io.BytesIO(b'x'))
+PY
+if validate_archive_members "$root/traversal.tar.gz"; then exit 91; fi
 `)
     })
 
@@ -484,78 +491,44 @@ wait "$holder"
 `)
     })
 
-    it('constructs a sanitized builder command', () => {
+    it('validates checksum, manifest, required outputs, listeners, and sync paths', () => {
       expectBashSuccess(`
 set -euo pipefail
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
-operation_root="$root/operation"; mkdir -p "$operation_root"
-systemd-run() { printf '%s\n' "$*" >"$root/argv"; }
-systemctl() { return 1; }
-run_builder "$operation_root" "$root/bundle" reviewed-ref ${'a'.repeat(40)} "$operation_root/checkout"
-grep -F -- '--wait --collect --pipe' "$root/argv"
-grep -F -- '--uid=mydsh-build --gid=mydsh-build' "$root/argv"
-grep -F -- 'KillMode=control-group' "$root/argv"
-grep -F -- 'PrivateTmp=yes' "$root/argv"
-grep -F -- "HOME=$operation_root/home" "$root/argv"
-grep -F -- "TMPDIR=$operation_root/tmp" "$root/argv"
-grep -F -- "XDG_RUNTIME_DIR=$operation_root/xdg-runtime" "$root/argv"
-grep -F -- 'NPM_CONFIG_USERCONFIG=/dev/null' "$root/argv"
-grep -F -- 'NPM_CONFIG_GLOBALCONFIG=/dev/null' "$root/argv"
-grep -F -- 'GIT_CONFIG_NOSYSTEM=1' "$root/argv"
-if grep -F -- 'DSH_HOME=/var/lib/mydsh ' "$root/argv"; then exit 90; fi
-if grep -E -- 'DSH_INVITE_|/srv/mydsh/workspace' "$root/argv"; then exit 91; fi
-`)
-    })
-
-    it('waits for a controlled build group to quiesce before returning', () => {
-      expectBashSuccess(`
-set -euo pipefail
-root=$(mktemp -d)
-trap 'rm -rf -- "$root"' EXIT
-mkdir -p "$root/operation/checkout"
-printf 'builder-output\n' >"$root/operation/checkout/artifact"
-systemd-run() {
-  bash -c 'exec 9>>"$1"; printf "%s\n" "$BASHPID" >"$2"; sleep 300' proof-child "$root/operation/checkout/artifact" "$root/child.pid" &
-  child=$!
-  for _attempt in {1..100}; do [[ -s "$root/child.pid" ]] && break; sleep 0.01; done
-  kill "$child"
-  wait "$child" 2>/dev/null || true
-  printf 'quiesced\n' >"$root/quiesced"
-}
-systemctl() { return 1; }
-run_builder "$root/operation" "$root/bundle" reviewed-ref ${'b'.repeat(40)} "$root/operation/checkout"
-child=$(<"$root/child.pid")
-[[ -f "$root/quiesced" ]]
-if kill -0 "$child" 2>/dev/null; then exit 90; fi
-`)
-    })
-
-    it('publishes from a commit marker without root Git traversal of builder output', () => {
-      expectBashSuccess(`
-set -euo pipefail
-root=$(mktemp -d)
-trap 'rm -rf -- "$root"' EXIT
-checkout="$root/checkout"; marker="$root/result.commit"; mkdir -p "$checkout" "$root/releases"
-git -C "$checkout" init --quiet
-printf '{}\n' >"$checkout/package.json"
-git -C "$checkout" add package.json
-git -C "$checkout" -c user.name=proof -c user.email=proof@example.com commit --quiet -m proof
-expected=$(git -C "$checkout" rev-parse HEAD)
-if [[ $EUID -eq 0 ]] && id node >/dev/null 2>&1; then
-  chown -R node:node "$checkout" "$root"
-  chmod 0755 "$root"
-  export -f write_builder_commit_marker
-  runuser -u node -- bash -c 'write_builder_commit_marker "$1" "$2" "$3"' proof "$checkout" "$expected" "$marker"
-  if env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git -C "$checkout" rev-parse HEAD >/dev/null 2>&1; then exit 90; fi
-else
-  write_builder_commit_marker "$checkout" "$expected" "$marker"
-  chown() { return 0; }
-fi
-read_builder_commit_marker "$marker" "$expected"
-commit=${'d'.repeat(40)}
-publish_builder_checkout "$checkout" "$root/releases/$commit" "$root/releases"
-[[ -f "$root/releases/$commit/package.json" ]]
+artifact="$root/mydsh-${'d'.repeat(40)}-linux-amd64.tar.gz"
+printf 'artifact\n' >"$artifact"
+digest=$(sha256sum "$artifact" | awk '{print $1}')
+printf '%s  %s\n' "$digest" "\${artifact##*/}" >"$artifact.sha256"
+verify_artifact_checksum "$artifact" "$artifact.sha256"
+printf '0%.0s' {1..64} >"$root/bad.sha256"; printf '  %s\n' "\${artifact##*/}" >>"$root/bad.sha256"
+if verify_artifact_checksum "$artifact" "$root/bad.sha256"; then exit 90; fi
+release="$root/release"
+mkdir -p "$release/apps/cli/lib" "$release/apps/web/dist" "$release/deploy/alibaba-cloud" "$release/node_modules"
+touch "$release/apps/cli/lib/bin.js"
+touch "$release/apps/web/dist/index.html"
+for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do touch "$release/deploy/alibaba-cloud/$name"; done
+printf 'format=1\ncommit=%s\nref=refs/tags/reviewed\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\n' "${'d'.repeat(40)}" >"$release/.mydsh-release-manifest"
+validate_release_manifest "$release"
+validate_required_release_outputs "$release"
+rm "$release/apps/cli/lib/bin.js"
+if validate_required_release_outputs "$release"; then exit 91; fi
+ss() { printf 'LISTEN 0 511 127.0.0.1:3080 0.0.0.0:*\n'; }
+listener_check
+ss() { printf 'LISTEN 0 511 0.0.0.0:3080 0.0.0.0:*\n'; }
+if listener_check; then exit 92; fi
+host="$root/host"; journal="$root/activation"; current="$root/current"; active="$root/active"
+mkdir -p "$host/etc/caddy" "$host/etc/systemd/system/caddy.service.d" "$host/etc/systemd/system/multi-user.target.wants" "$active" "$journal"
+touch "$host/etc/caddy/Caddyfile" "$host/etc/systemd/system/mydsh.service" "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
+sync() { printf '%s\n' "\${*: -1}" >>"$root/synced"; }
+sync_activated_state "$active" "$journal" "$host" "$current"
+grep -Fx "$active" "$root/synced"
+grep -Fx "\${current%/*}" "$root/synced"
+grep -Fx "$host/etc/caddy/Caddyfile" "$root/synced"
+grep -Fx "$host/etc/systemd/system/mydsh.service" "$root/synced"
+grep -Fx "$host/etc/systemd/system/caddy.service.d/mydsh.conf" "$root/synced"
+grep -Fx "$host/etc/systemd/system/multi-user.target.wants" "$root/synced"
+grep -Fx "$journal" "$root/synced"
 `)
     })
 
@@ -591,6 +564,7 @@ systemctl() {
 }
 caddy() { return 0; }
 health_check() { return 0; }
+sync_activated_state() { return 0; }
 authenticated_acceptance() { return 0; }
 public_acceptance() { return 0; }
 ln -s "$previous" "$root/current"
@@ -602,7 +576,7 @@ ln -s "$previous" "$root/current"
 for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/mydsh.service' 'caddy-mydsh.conf:etc/systemd/system/caddy.service.d/mydsh.conf'; do
   path=\${spec#*:}; printf '%s\nold\n' "$MANAGED_MARKER" >"$host/$path"
 done
-public_acceptance() { return 1; }
+sync_activated_state() { if [[ ! -e "$root/sync-failed" ]]; then touch "$root/sync-failed"; return 1; fi; return 0; }
 if activate_transaction "$candidate" "$previous" "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 90; fi
 [[ $(readlink "$root/current") == "$previous" ]]
 [[ $enable_state == enabled ]]
@@ -611,6 +585,7 @@ grep -Fx old "$host/etc/systemd/system/mydsh.service"
 grep -Fx old "$host/etc/systemd/system/caddy.service.d/mydsh.conf"
 rm -f "$root/current"
 enable_state=disabled
+rm -f "$root/sync-failed"
 if activate_transaction "$candidate" '' "$candidate/deploy/alibaba-cloud" "$host" "$root/current" "$root/activation"; then exit 91; fi
 [[ ! -e "$root/current" && ! -L "$root/current" ]]
 [[ $enable_state == disabled ]]
@@ -641,6 +616,7 @@ service_enable_state() { printf 'enabled\n'; }
 systemctl() { return 0; }
 caddy() { return 0; }
 health_check() { return 0; }
+sync_activated_state() { return 0; }
 public_acceptance() { return 0; }
 authenticated_acceptance() { return 0; }
 rm() { [[ "\${*: -1}" == */activation ]] && return 1; command rm "$@"; }
@@ -664,7 +640,7 @@ for spec in 'Caddyfile:etc/caddy/Caddyfile' 'mydsh.service:etc/systemd/system/my
 done
 validate_existing_managed_file() { grep -Fqx "$MANAGED_MARKER" "$1"; }
 install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "\${@: -2:1}" "\${@: -1}"; fi; }
-systemctl() { return 0; }; caddy() { return 0; }; health_check() { return 0; }; sync() { return 0; }
+systemctl() { return 0; }; caddy() { return 0; }; health_check() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
 ln -s "$previous" "$root/current"
 prepare_activation_journal "$journal" "$candidate" "$previous" "$assets" "$host" enabled
 stage_candidate_configs "$assets" "$host"
@@ -748,7 +724,7 @@ install() { if [[ " $* " == *' -d '* ]]; then mkdir -p "\${@: -1}"; else cp -- "
 enable_state=disabled
 service_enable_state() { printf '%s\n' "$enable_state"; }
 systemctl() { case "\${1:-} \${2:-}" in 'enable mydsh') enable_state=enabled ;; 'disable mydsh') enable_state=disabled ;; esac; return 0; }
-caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync() { return 0; }
+caddy() { return 0; }; health_check() { return 0; }; public_acceptance() { return 0; }; authenticated_acceptance() { return 0; }; sync_activated_state() { return 0; }; sync() { return 0; }
 eval "$(declare -f write_journal_state | sed '1s/write_journal_state/write_journal_state_real/')"
 write_journal_state() { if [[ $2 == committed ]]; then printf 'state=committed\n' >"$1/state"; return 2; fi; write_journal_state_real "$@"; }
 if activate_transaction "$candidate" '' "$assets" "$host" "$root/current" "$journal" >"$root/first-output" 2>&1; then exit 90; fi
@@ -854,11 +830,14 @@ wait "$holder"
       expect(readme).not.toContain('/opt/mydsh/current/deploy/alibaba-cloud/deploy-release.sh')
       expect(readme).toContain('DEPLOY_REF=')
       expect(readme).toContain('git archive "$DEPLOY_REF"')
+      expect(readme).toContain('package-release.sh "$DEPLOY_REF"')
+      expect(readme).toContain('node:24-bookworm')
       expect(readme).not.toContain('scp deploy/alibaba-cloud/{Caddyfile')
       expect(readme).not.toContain('feat/invite-auth-deployment')
       expect(readme).toContain('mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
-      expect(readme).toContain('git bundle verify')
-      expect(readme).toMatch(/(?:does not|不).*authentic|真实性/i)
+      expect(readme).not.toContain('git bundle verify')
+      expect(readme).toContain('SHA-256')
+      expect(readme).toMatch(/does not establish signer identity|不能证明签名者身份|真实性/i)
       expect(readme).toMatch(/selected rollback|选定的回滚/)
       expect(readme).toContain('rm -rf')
       expect(readme).toContain('if [[ \\$status == 0 ]]')
@@ -875,13 +854,14 @@ wait "$holder"
     ]) {
       const note = readFileSync(resolve(noteRoot, name), 'utf8')
       expect(note).toContain('/usr/local/sbin/mydsh-deploy-release')
-      expect(note).toContain('mydsh-build')
-      expect(note).toContain('transient service')
+      expect(note).not.toContain('mydsh-build')
+      expect(note).toContain('package-release.sh')
+      expect(note).toContain('Node 24 Linux')
       expect(note).toContain('/var/lib/mydsh-deploy/activation')
       expect(note).toMatch(/serialized|串行/)
-      expect(note).toContain('Git bundle')
+      expect(note).toContain('SHA-256')
       expect(note).toMatch(/release-contained|release 中的|release 内/)
-      expect(note).toMatch(/runtime-user|运行时用户/)
+      expect(note).toMatch(/production host|生产宿主/)
       expect(note).toMatch(/code-only rollback|仅代码回滚/)
     }
   })
@@ -894,13 +874,28 @@ wait "$holder"
     ]) {
       const design = readFileSync(resolve(designRoot, name), 'utf8')
       expect(design).toContain('/usr/local/sbin/mydsh-deploy-release')
-      expect(design).toContain('mydsh-build')
-      expect(design).toContain('transient service')
+      expect(design).not.toContain('mydsh-build')
+      expect(design).toContain('package-release.sh')
+      expect(design).toMatch(/official Node 24|官方 Node 24/)
       expect(design).toContain('/var/lib/mydsh-deploy/activation')
       expect(design).toContain('/run/lock/mydsh-deploy.lock')
       expect(design).toMatch(/systemd.*Caddy|systemd.*Caddy/)
       expect(design).toMatch(/public.*authenticated|公开.*认证/)
       expect(design).not.toMatch(/builds? as `mydsh`|以 `mydsh` 身份.*构建/)
+    }
+  })
+
+  it('keeps the implementation plan aligned with prebuilt artifact deployment', () => {
+    const planRoot = resolve(import.meta.dirname, '../docs/superpowers/plans')
+    for (const name of [
+      '2026-08-24-dsh-invite-auth-deployment.md',
+      '2026-08-24-dsh-invite-auth-deployment.zh.md',
+    ]) {
+      const plan = readFileSync(resolve(planRoot, name), 'utf8')
+      expect(plan).toContain('deploy/alibaba-cloud/package-release.sh')
+      expect(plan).toMatch(/prebuilt Linux artifact|预构建 Linux artifact/)
+      expect(plan).toContain('SHA-256')
+      expect(plan).not.toMatch(/mydsh-build|mydsh-release\.bundle|runuser -u mydsh|var\/cache\/mydsh-pnpm/)
     }
   })
 })

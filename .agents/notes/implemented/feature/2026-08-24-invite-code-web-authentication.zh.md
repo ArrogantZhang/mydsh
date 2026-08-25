@@ -20,11 +20,11 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 该认证模型面向共享同一 DSH 实例的小规模可信群体。有效 Cookie 传递实例既有的浏览器权限；它不会创建身份、按用户划分的工作区、会话所有权或命令隔离。
 
-阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。共享的非阻塞宿主锁将 bootstrap、部署、回滚和清理串行化。helper 会在变更前于 root-only 的同级 `activation.new.*` 目录中构建完整的 `prepared` 恢复 journal，其中包含之前的链接、root 所有的宿主文件备份和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复或重放该 journal，包括之前的启用或禁用状态，直到恢复成功；接受激活会启用服务并先记录 `committed` 再清理，因此清理失败绝不会回滚已上线且已接受的 release。
+阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。该稳定 helper 拥有 journal 格式 1，并被排除在自动 release 更新之外；更改它需要单独评审的维护流程。共享的非阻塞宿主锁将 bootstrap、部署、回滚和清理串行化。helper 会在变更前于 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` 恢复 journal，其中包含之前的链接、root 所有的宿主文件备份和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复并同步该状态，直到恢复成功；接受激活会验证监听与认证行为、启用服务、同步受影响文件系统，并在清理前记录 `committed`。
 
-`mydsh-build` 为每次操作获得新的 HOME、XDG 配置、缓存和运行时目录、私有 `TMPDIR`、pnpm 缓存、临时 `DSH_HOME` 以及 checkout。一个启用 `PrivateTmp` 的 transient service 使用 `KillMode=control-group` 运行完整构建流水线；systemd 会终止并等待全部 descendant，之后 root 才用可信提取结果校验 builder 写入的普通 commit marker，并禁用 reflink，把结果复制到新的 root-private inode 中。root 绝不会在 builder 所有的 checkout 中调用 Git。builder 无法在已发布 tree 中保留可写 inode 或打开的文件描述符，也无法读取运行时状态、工作区文件、私有环境文件或认证密钥。
+候选 release 绝不会在生产宿主上构建。`package-release.sh` 读取精确的具名 Git ref，在使用全新本地状态且没有生产环境的受资源限制临时官方 Node 24 Linux 容器中，执行固定 pnpm 安装、冻结依赖、invite-auth 测试、完整构建和配置转储，并生成完整的确定性 Linux 运行时 archive 与 checksum。服务器没有 builder 身份、pnpm、源码 checkout、生命周期执行、测试运行器或候选构建缓存。
 
-Git bundle 是传输格式，不是真实性证明：`git bundle verify` 检查结构、前置对象和对象连通性。部署信任管理员经过评审的本地 checkout，以及创建 bundle 时另行验证的签名 ref。helper 会保留该 bundle 的 root-only 副本，从可信 commit 的 root-only 提取目录取得每项特权部署资产，并先拒绝存在差异的 builder 侧副本，再验证候选宿主配置以及公开和认证行为。
+通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。宿主 helper 会把上传文件复制到 root-private 新 inode，拒绝不安全 archive member 和越界链接，验证 manifest 格式、commit、具名 ref、Linux 平台、运行时输出和 helper journal 兼容版本，并且只把 unit 和 Caddy 文件当作数据。它绝不会执行 release 内的控制流。
 
 ## 会话和滥用控制
 
@@ -46,7 +46,7 @@ Git bundle 是传输格式，不是真实性证明：`git bundle verify` 检查�
 
 **运行 release 内的 root helper。** 从 `/opt/mydsh/current` 执行部署控制流，会让正在激活的候选 release 选择负责安装 unit、处理密钥和执行回滚的 root 程序。独立安装且受管理的 helper 将这项权限保留在此前经过评审的宿主控制平面中。
 
-**以运行时用户执行构建。** 依赖生命周期脚本和仓库构建工具将因此获得持久 DSH 状态、共享工作区和运行时可读凭据的访问权。独立构建身份只向不受信任的构建步骤提供可丢弃的候选数据和缓存状态。
+**在生产宿主上构建，无论使用运行时用户还是独立 builder。** 即使无法读取运行时密钥，依赖生命周期脚本仍可留下 descendant、消耗宿主资源、接触内核和服务状态，并扩大生产信任边界。本地临时容器会在 SSH 传输前生成完整 artifact，因此生产只执行验证和激活。
 
 **使用仅代码回滚。** release 可以同时更改 systemd unit、Caddy 配置和代码。只回滚符号链接可能让旧代码与新宿主配置配对，因此激活和恢复将这 4 个值作为一个串行事务处理。
 
@@ -58,5 +58,5 @@ Git bundle 是传输格式，不是真实性证明：`git bundle verify` 检查�
 - 登录限流会在进程重启时重置，且不会跨副本协调，因此该部署只运行一个 DSH 进程。
 - 所有通过认证的人共享相同的实例权限；多租户或互不信任的访问需要不同的身份与授权设计。
 - bootstrap 和 release 操作不会在特权路径覆盖不受管理的文件或跟随符号链接，而是直接失败。
-- 构建无法使用生产状态或密钥，代价是增加第二个系统账户和单次操作构建存储。
-- 可部署的 Git bundle 必须来自可信且经过评审的 checkout；仅验证 bundle 并不足够。
+- 构建无法使用生产状态或密钥，代价是本地必须具备 Docker 和完成完整 Linux 构建所需的资源。
+- 可部署 artifact 必须来自可信且经过评审的 ref；仅有 checksum 并不足够。

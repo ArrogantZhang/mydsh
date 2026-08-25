@@ -91,13 +91,15 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/opt/mydsh/current` 指向当前 release。
 - `/var/lib/mydsh` 是持久化 `DSH_HOME`，独立于 release。
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
-- `/usr/local/sbin/mydsh-deploy-release` 是 root 所有的部署、回滚和清理控制 helper；release 内容绝不提供 root 控制流。
+- `/usr/local/sbin/mydsh-deploy-release` 是 root 所有、拥有 journal 格式 1 的部署、回滚和清理控制 helper；release 内容绝不提供或更新 root 控制流。
 - `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/activation` 是持久激活 journal。每个 builder tree 使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
 - `/run/lock/mydsh-deploy.lock` 将 bootstrap、部署、回滚和清理串行化。
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 
-服务器使用 Node.js 24 和具有固定 tarball integrity 的 pnpm 11.7.0。一个启用 `PrivateTmp` 的 transient service 在 `env -i` 下以 `mydsh-build` 身份使用单次操作 HOME、包含 `XDG_RUNTIME_DIR` 的 XDG 目录、私有 `TMPDIR`、缓存、临时 `DSH_HOME` 和 checkout，执行 clone、commit 验证、冻结依赖安装、生命周期脚本、测试、构建和配置转储。`KillMode=control-group` 让 systemd 终止并等待每个 descendant；之后 root 读取普通 commit marker，在不对 builder 所有 tree 运行 Git 的情况下用可信 commit 校验 marker，再禁用 reflink、将完成的 tree 复制到新的私有 inode。helper 从 root-only 的可信 Git 提取目录取得特权部署输入。之后 systemd 以独立的非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
+服务器只安装 Node.js 24 运行时和 Caddy，不存在 builder 账户、pnpm、源码 checkout、依赖生命周期执行、测试运行器或构建缓存。在开发机上，`package-release.sh` 归档精确的具名 Git ref，并在受资源限制的临时官方 Node 24 Linux 容器中使用全新状态和固定 pnpm tarball integrity，执行冻结依赖安装、invite-auth 测试、完整构建和配置转储。生成的确定性 archive 包含完整 Linux 运行时 tree、依赖、已构建前端和库、部署数据，以及记录格式、commit、具名 ref、平台、Node、pnpm 和 helper journal 兼容版本的 manifest。
+
+稳定的宿主 helper 会把 artifact 和 checksum 复制到 root-private 新 inode，验证 SHA-256，拒绝绝对路径、父目录穿越、特殊文件、重复条目和越界链接，不保留上传所有权地解压，验证 manifest 与必要输出，再发布 root 所有的不可变 commit 目录。它绝不会运行候选 Git、包管理、生命周期 hook、测试、构建命令、配置脚本或 release 内的 helper。之后 systemd 以非登录 `mydsh` 运行时用户从 `/srv/mydsh/workspace` 启动已接受的 release；Caddy 只读取公共环境文件。
 
 Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:3080`。`caddy validate` 必须在重新加载配置前通过。
 
@@ -105,7 +107,7 @@ Caddy 监听 80 和 443、自动申请与续期证书，并代理到 `127.0.0.1:
 
 本地仓库保留 DeepSeek 上游 remote 和邀请码扩展提交。升级先获取最新 `master`，再把本地提交合并到新的已评审部署 ref。上游处于 developer preview，因此每次升级都视为需要重新验证的显式发布。
 
-root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构建完整的 `prepared` journal，其中包含之前的链接、宿主文件备份和服务之前的启用状态；完成 fsync 后，helper 将其原子重命名为 `activation`，然后才安装候选 helper、unit、Caddyfile 和 Caddy drop-in。部署锁保护下会删除经过验证的遗留同级目录；不安全的条目会保留供检查，但不会成为恢复状态。helper 随后重新加载 systemd，切换 `current`，重启 DSH，执行回环、公开和认证验收，启用服务，最后才原子记录 `committed`。在该提交前发生的任何中断或失败都会恢复之前的链接、宿主文件、进程状态以及启用或禁用状态；恢复失败会保留完整 journal 并阻止新工作。已提交 journal 的清理失败只会留下供下一次操作删除且不会触发回滚的状态。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
+root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` journal，其中包含之前的链接、宿主文件备份和服务之前的启用状态；完成 fsync 后，helper 将其原子重命名为 `activation`，然后才安装候选 unit、Caddyfile 和 Caddy drop-in。helper 本身不属于 release 事务；更改 helper 或 journal 格式需要在 DSH 停止时执行单独评审的维护流程。部署锁保护下会删除经过验证的遗留同级目录；不安全的条目会保留供检查，但不会成为恢复状态。helper 随后重新加载 systemd，切换 `current`，重启 DSH，验证 PID 所有者、精确且仅限回环的 `127.0.0.1:3080` 监听、回环登录、公开拒绝和认证访问，启用服务，同步每个受影响的 `/opt`、`/etc` 和 `/var` 路径，最后才记录 `committed`。在该提交前发生的任何中断或失败都会恢复并同步之前的链接、宿主文件、进程状态以及启用或禁用状态；恢复失败会保留完整 journal 并阻止新工作。已提交 journal 的清理失败只会留下供下一次操作删除且不会触发回滚的状态。`DSH_HOME` 不随代码回滚，因此任何未来数据迁移都需要单独评估向后兼容性。
 
 ## 测试与验收
 
@@ -115,7 +117,7 @@ root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构
 
 实现按仓库规则增加对应包 README、中文配对文档与 Agent Note，并运行相关单元/集成测试、类型检查、构建、配置检查、文档同步检查和 `git diff --check`。登录页面属于产品可见行为，因此增加一个无需模型密钥的真实 Web 组合快照。
 
-服务器验收必须证明候选和已安装 Caddy 配置有效、候选 systemd unit 和 drop-in 通过验证、活动 MainPID 属于 `mydsh`、`current` 指向候选 release，并且 3080 仅监听回环地址。有界的公开 HTTPS 检查要求未认证 HTML 重定向且 API 流量返回 `401`；root helper 还会执行认证登录，且不打印邀请码、Cookie 或响应头。手动验收还会证明公网证书、SSE 和 WebSocket 拒绝、退出登录、30 天浏览器复用、篡改拒绝、串行化回滚以及 `DSH_HOME` 数据保留。
+服务器验收必须证明候选和已安装 Caddy 配置有效、候选 systemd unit 和 drop-in 通过验证、活动 MainPID 属于 `mydsh`、`current` 指向候选 release，并且恰好只有一个 `127.0.0.1:3080` listener，不存在通配、公网、IPv6 或重复 listener。有界的公开 HTTPS 检查要求未认证 HTML 重定向且 API 流量返回 `401`；root helper 还会执行认证登录，且不打印邀请码、Cookie 或响应头。手动验收还会证明公网证书、SSE 和 WebSocket 拒绝、退出登录、30 天浏览器复用、篡改拒绝、串行化回滚以及 `DSH_HOME` 数据保留。
 
 管理员最后在 Web UI 中配置 Kimi 自定义 OpenAI 兼容提供方，并以一次真实对话验证模型连接。该验证不把 API key 写入测试、部署日志或仓库。
 

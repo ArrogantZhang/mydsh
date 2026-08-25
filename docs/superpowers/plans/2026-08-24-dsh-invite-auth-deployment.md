@@ -50,7 +50,8 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 - `deploy/alibaba-cloud/mydsh.service` — low-privilege DSH runtime.
 - `deploy/alibaba-cloud/caddy-mydsh.conf` — Caddy systemd drop-in for the public host only.
 - `deploy/alibaba-cloud/bootstrap-host.sh` — installs Node/Caddy, creates users and private configuration, and installs units.
-- `deploy/alibaba-cloud/deploy-release.sh` — builds an immutable Git-bundle release, switches atomically, and rolls back failed activation.
+- `deploy/alibaba-cloud/package-release.sh` — packages an exact reviewed ref in a bounded official Node 24 Linux container.
+- `deploy/alibaba-cloud/deploy-release.sh` — validates a prebuilt Linux artifact, switches atomically, and rolls back failed activation without running candidate code.
 - `deploy/alibaba-cloud/README.md`, `README.zh.md`, `README.i18n.yaml` — initial deploy, upgrade, rollback, and secret retrieval procedure.
 - `.agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.md`, `.zh.md`, `.i18n.yaml` — decision, rejected alternatives, and consequences.
 
@@ -850,6 +851,7 @@ git commit -m "test(invite-auth): snapshot the login page"
 - Create: `deploy/alibaba-cloud/mydsh.service`
 - Create: `deploy/alibaba-cloud/caddy-mydsh.conf`
 - Create: `deploy/alibaba-cloud/bootstrap-host.sh`
+- Create: `deploy/alibaba-cloud/package-release.sh`
 - Create: `deploy/alibaba-cloud/deploy-release.sh`
 - Create: `deploy/alibaba-cloud/README.md`
 - Create: `deploy/alibaba-cloud/README.zh.md`
@@ -922,7 +924,7 @@ EnvironmentFile=/etc/mydsh/public.env
 
 - [ ] **Step 2: Implement idempotent host bootstrap**
 
-`bootstrap-host.sh` accepts exactly one lowercase DNS hostname, refuses non-root execution, installs NodeSource Node 24 and the official Caddy stable apt repository, installs `pnpm@11.7.0`, creates the non-login `mydsh` user and owned runtime/cache directories, writes `/etc/mydsh/public.env`, and creates `/etc/mydsh/mydsh.env` only when absent.
+`bootstrap-host.sh` accepts exactly one lowercase DNS hostname, refuses non-root execution, installs the NodeSource Node 24 runtime and official Caddy stable apt repository, creates the non-login `mydsh` runtime user and owned data directories, writes `/etc/mydsh/public.env`, and creates `/etc/mydsh/mydsh.env` only when absent. It installs no builder account, pnpm, source checkout, or build cache. Once a release exists, only a byte-identical no-op is allowed; control-plane or hostname changes require separate maintenance.
 
 Install the unit files and Caddyfile, run `systemctl daemon-reload`, validate Caddy with the public environment loaded, enable Caddy, and leave `mydsh.service` disabled until a release exists. Trap and remove only temporary files created by this run.
 
@@ -946,16 +948,14 @@ caddy_source_tmp="$(mktemp)"
 trap 'rm -f -- "$node_setup" "$public_tmp" "$private_tmp" "$caddy_key_tmp" "$caddy_source_tmp"' EXIT
 printf 'DSH_PUBLIC_HOST=%s\n' "$public_host" >"$public_tmp"
 apt-get update
-apt-get install -y ca-certificates curl gnupg git openssl build-essential python3 debian-keyring debian-archive-keyring apt-transport-https
+apt-get install -y ca-certificates curl gnupg gzip iproute2 openssl python3 tar debian-keyring debian-archive-keyring apt-transport-https
 umask 077
 printf '%s\n' \
   'DSH_HOME=/var/lib/mydsh' \
   "DSH_INVITE_CODE_SECRET=$(openssl rand -hex 16)" \
   "DSH_INVITE_SESSION_SECRET=$(openssl rand -hex 32)" >"$private_tmp"
-curl -fsSL https://deb.nodesource.com/setup_24.x -o "$node_setup"
-bash "$node_setup"
+curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o "$node_setup"
 apt-get install -y nodejs
-npm install --global pnpm@11.7.0
 curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/gpg.key | gpg --batch --yes --dearmor -o "$caddy_key_tmp"
 curl -1sLf https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt -o "$caddy_source_tmp"
 install -o root -g root -m 0644 "$caddy_key_tmp" /usr/share/keyrings/caddy-stable-archive-keyring.gpg
@@ -966,7 +966,7 @@ apt-get install -y caddy
 id mydsh >/dev/null 2>&1 || useradd --system --home-dir /var/lib/mydsh --shell /usr/sbin/nologin mydsh
 install -d -o root -g root -m 0755 /opt/mydsh /opt/mydsh/releases /etc/mydsh
 install -d -o mydsh -g mydsh -m 0700 /var/lib/mydsh
-install -d -o mydsh -g mydsh -m 0750 /srv/mydsh/workspace /var/cache/mydsh-pnpm
+install -d -o mydsh -g mydsh -m 0750 /srv/mydsh/workspace
 install -o root -g root -m 0644 "$public_tmp" /etc/mydsh/public.env
 if [[ ! -e /etc/mydsh/mydsh.env ]]; then
   install -o root -g root -m 0600 "$private_tmp" /etc/mydsh/mydsh.env
@@ -983,7 +983,9 @@ systemctl enable --now caddy.service
 
 - [ ] **Step 3: Implement immutable release activation and rollback**
 
-`deploy-release.sh` accepts a Git bundle path and branch name, clones into `/opt/mydsh/releases/.staging.*` as `mydsh`, installs with `--frozen-lockfile --store-dir /var/cache/mydsh-pnpm`, builds, runs the focused invite-auth tests, runs the overlay config dump, makes the tree root-owned and non-writable, and renames it to a directory under `/opt/mydsh/releases/` whose name is the full Git commit hash.
+`package-release.sh` accepts a named reviewed Git ref and output directory, reads only that ref's Git objects, and uses a resource-bounded ephemeral official Node 24 Linux container to install the integrity-pinned pnpm 11.7.0 artifact, install frozen dependencies, run invite-auth tests, build, dump config, and emit a deterministic complete Linux runtime archive, format-1 manifest, and SHA-256 sidecar. Docker is mandatory and there is no host-build fallback.
+
+`deploy-release.sh` accepts only the prebuilt artifact and sidecar. Under the shared lock it copies uploads into root-private new inodes, verifies SHA-256, rejects unsafe archive paths and links, validates the manifest, helper-journal compatibility, built CLI, dependencies, overlay, unit, and Caddy configuration, and publishes the root-owned commit directory. It never runs candidate Git, pnpm, hooks, tests, builds, config scripts, or helpers. The stable installed helper is excluded from release transactions.
 
 Use an atomic symlink switch and retain the previous target:
 
@@ -1014,30 +1016,27 @@ fi
 
 Validate and reload Caddy only after DSH answers. Never delete old releases automatically and never print either secret.
 
-The release build and switch must use these exact command families; add argument/path validation and the staging-only cleanup trap around them:
+Artifact validation and publication use these command families after copying both uploads into root-private new inodes; no candidate command is executed:
 
 ```bash
-staging="$(mktemp -d /opt/mydsh/releases/.staging.XXXXXX)"
-chown mydsh:mydsh "$staging"
-runuser -u mydsh -- git clone --branch "$branch" --single-branch "$bundle" "$staging"
-commit="$(git -C "$staging" rev-parse HEAD)"
-runuser -u mydsh -- pnpm --dir "$staging" install --frozen-lockfile --store-dir /var/cache/mydsh-pnpm
-runuser -u mydsh -- pnpm --dir "$staging" exec vitest run packages/host/invite-auth/tests
-runuser -u mydsh -- pnpm --dir "$staging" run build
-runuser -u mydsh -- env DSH_HOME=/var/lib/mydsh node "$staging/apps/cli/lib/bin.js" web --patch "$staging/deploy/alibaba-cloud/invite-auth.cordis.yml" --dump-config >/dev/null
+extract="$(mktemp -d /opt/mydsh/releases/.extract.XXXXXX)"
+sha256sum "$artifact"
+python3 validate_archive_members.py "$artifact"
+tar -xzf "$artifact" --no-same-owner -C "$extract"
+commit="$(sed -n 's/^commit=//p' "$extract/.mydsh-release-manifest")"
 release="/opt/mydsh/releases/$commit"
-chown -R root:root "$staging"
-chmod -R go-w "$staging"
-mv "$staging" "$release"
+chown -R root:root "$extract"
+chmod -R go-w "$extract"
+mv "$extract" "$release"
 ```
 
 - [ ] **Step 4: Write the bilingual deployment tutorial**
 
-Document prerequisites, DNS, security-group ports 22/80/443, bootstrap, bundle upload, release deployment, retrieving the invite code directly over SSH, Kimi setup through Settings → Models, update/redeploy, rollback, secret rotation, journald diagnosis, and all acceptance commands. Link the official NodeSource Node 24 and Caddy package instructions.
+Document prerequisites, local Docker packaging, DNS, security-group ports 22/80/443, initialization-only bootstrap, artifact and checksum upload, release deployment, retrieving the invite code directly over SSH, Kimi setup through Settings → Models, artifact-only upgrades, rollback, stable-helper maintenance limits, secret rotation, journald diagnosis, and all acceptance commands. Link the official NodeSource Node 24 and Caddy package instructions.
 
 - [ ] **Step 5: Validate scripts and record the README pair**
 
-Run on a Linux shell: `bash -n deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh`
+Run on a Linux shell: `bash -n deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/package-release.sh deploy/alibaba-cloud/deploy-release.sh`
 
 Run with `DSH_PUBLIC_HOST=dsh.example.com`: `caddy validate --config deploy/alibaba-cloud/Caddyfile --adapter caddyfile`
 
@@ -1048,7 +1047,7 @@ Expected: all checks pass without displaying a secret.
 - [ ] **Step 6: Commit deployment assets**
 
 ```bash
-git add deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/README.md deploy/alibaba-cloud/README.zh.md deploy/alibaba-cloud/README.i18n.yaml
+git add deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/package-release.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/README.md deploy/alibaba-cloud/README.zh.md deploy/alibaba-cloud/README.i18n.yaml
 git commit -m "ops: add Alibaba Cloud deployment"
 ```
 
@@ -1109,7 +1108,7 @@ Use the repository code-review workflow on `master...HEAD`. Resolve all findings
 
 **Files:**
 
-- Create locally: `.artifacts/mydsh-release.bundle` (gitignored, not committed)
+- Create locally: a commit-named Linux artifact and `.sha256` sidecar under `.artifacts/` (gitignored, not committed)
 - Create remotely: a commit-hash-named directory under `/opt/mydsh/releases/`, `/opt/mydsh/current`, `/etc/mydsh/*`, `/etc/caddy/Caddyfile`, and systemd units
 
 - [ ] **Step 1: Collect only non-secret deployment inputs**
@@ -1120,20 +1119,19 @@ Obtain the exact public subdomain, ECS public IP or SSH hostname, SSH username, 
 
 Run `ssh` to inspect `/etc/os-release`, architecture, disk space, active listeners, and whether ports 80/443 are already owned. Run local DNS resolution for the public subdomain. Stop if the host is not Ubuntu 22.04/24.04, if another production service owns 80/443, or if DNS points elsewhere.
 
-- [ ] **Step 3: Build and upload the release bundle plus bootstrap assets**
+- [ ] **Step 3: Package locally and upload the artifact plus initialization assets**
 
 ```bash
 mkdir -p .artifacts
-git bundle create .artifacts/mydsh-release.bundle feat/invite-auth-deployment
-git bundle verify .artifacts/mydsh-release.bundle
-scp .artifacts/mydsh-release.bundle deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:/tmp/"
+bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" .artifacts
+scp .artifacts/mydsh-*-linux-amd64.tar.gz .artifacts/mydsh-*-linux-amd64.tar.gz.sha256 deploy/alibaba-cloud/bootstrap-host.sh deploy/alibaba-cloud/deploy-release.sh deploy/alibaba-cloud/Caddyfile deploy/alibaba-cloud/mydsh.service deploy/alibaba-cloud/caddy-mydsh.conf "$SSH_TARGET:$REMOTE_STAGE/"
 ```
 
-Expected: bundle verification names the branch and upload succeeds.
+Expected: the bounded official Node 24 container passes install, invite-auth tests, full build, and config dump; the artifact and strict checksum sidecar upload succeeds. The checksum detects corruption but does not authenticate the signer.
 
 - [ ] **Step 4: Bootstrap and activate over SSH**
 
-Run the uploaded `bootstrap-host.sh` with `sudo` and the exact public host, then run `deploy-release.sh` with the uploaded bundle and `feat/invite-auth-deployment`. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
+For initial setup only, run the Git-ref-extracted `bootstrap-host.sh` with `sudo` and the exact public host. Then invoke the installed stable `/usr/local/sbin/mydsh-deploy-release` with the uploaded artifact and checksum. Upgrades upload only those two artifact files and never replace the helper automatically. These commands install OS packages and write `/etc`, `/opt`, `/var/lib`, and systemd state; execute them only on the inspected ECS target.
 
 Expected: both scripts exit 0, `systemctl is-active mydsh caddy` prints `active` twice, and `ss -lntp` shows DSH only on `127.0.0.1:3080` while Caddy owns public 80/443.
 

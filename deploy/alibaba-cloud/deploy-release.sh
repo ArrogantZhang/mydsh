@@ -14,15 +14,18 @@ readonly PRIVATE_ENV=/etc/mydsh/mydsh.env
 readonly ROOT_HELPER=/usr/local/sbin/mydsh-deploy-release
 readonly DEPLOY_STATE_ROOT=/var/lib/mydsh-deploy
 readonly ACTIVATION_DIR=/var/lib/mydsh-deploy/activation
+readonly RELEASE_FORMAT=1
+readonly HELPER_JOURNAL_FORMAT=1
 DEPLOY_LOCK_FD=''
 TRUST_ROOT=''
 CREATED_TEMP_FILE=''
 REGISTERED_TEMP_FILES=()
 OPERATION_ROOT=''
-PUBLISH_ROOT=''
+MANIFEST_COMMIT=''
+MANIFEST_REF=''
 
 usage() {
-  printf 'Usage: sudo %s <git-bundle-file> <ref>\n' "${0##*/}" >&2
+  printf 'Usage: sudo %s <prebuilt-linux-artifact.tar.gz> <sha256-sidecar>\n' "${0##*/}" >&2
   printf '       sudo %s --rollback <40-character-lowercase-commit>\n' "${0##*/}" >&2
   printf '       sudo %s --prune <40-character-lowercase-commit>\n' "${0##*/}" >&2
 }
@@ -30,10 +33,6 @@ usage() {
 fail() {
   printf 'mydsh-deploy-release: %s\n' "$1" >&2
   exit 1
-}
-
-trusted_git() {
-  env -i PATH=/usr/bin:/bin GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null git "$@"
 }
 
 acquire_operation_lock() {
@@ -74,12 +73,11 @@ cleanup_operation() {
   cleanup_registered_temp_files
   if [[ -n "$TRUST_ROOT" ]]; then
     case "$TRUST_ROOT" in
-      /run/mydsh-bundle.*) rm -rf -- "$TRUST_ROOT" || true ;;
+      /run/mydsh-artifact.*) rm -rf -- "$TRUST_ROOT" || true ;;
       *) printf 'mydsh-deploy-release: refusing unsafe trust-root cleanup: %s\n' "$TRUST_ROOT" >&2 ;;
     esac
   fi
-  if [[ -n "$OPERATION_ROOT" && "$OPERATION_ROOT" == "$RELEASES_DIR/.build."* ]]; then rm -rf -- "$OPERATION_ROOT" || true; fi
-  if [[ -n "$PUBLISH_ROOT" && "$PUBLISH_ROOT" == /opt/mydsh/releases/.publish.* ]]; then rm -rf -- "$PUBLISH_ROOT" || true; fi
+  if [[ -n "$OPERATION_ROOT" && "$OPERATION_ROOT" == "$RELEASES_DIR/.extract."* ]]; then rm -rf -- "$OPERATION_ROOT" || true; fi
 }
 
 registered_temp_path_is_safe() {
@@ -184,7 +182,7 @@ validate_existing_managed_file() {
 
 require_host_tools() {
   local tool
-  for tool in bash caddy cmp cp curl flock getent git install node pnpm realpath sed stat sync systemctl systemd-analyze systemd-run; do
+  for tool in awk bash caddy cp curl flock getent install node python3 realpath sed sha256sum ss stat sync systemctl systemd-analyze tar uname; do
     command -v "$tool" >/dev/null 2>&1 || fail "required tool is unavailable: $tool"
   done
 }
@@ -251,77 +249,6 @@ atomic_replace_link() {
   }
 }
 
-run_builder() {
-  local operation_root=$1
-  local bundle=$2
-  local ref=$3
-  local expected_commit=$4
-  local checkout=$5
-  local unit="mydsh-build-$$"
-  systemd-run --wait --collect --pipe \
-    --unit="$unit" \
-    --uid=mydsh-build --gid=mydsh-build \
-    --property=Type=exec --property=KillMode=control-group --property=PrivateTmp=yes --property=TimeoutStopSec=30s \
-    /usr/bin/env -i \
-    HOME="$operation_root/home" \
-    TMPDIR="$operation_root/tmp" \
-    XDG_CONFIG_HOME="$operation_root/xdg-config" \
-    XDG_CACHE_HOME="$operation_root/xdg-cache" \
-    XDG_RUNTIME_DIR="$operation_root/xdg-runtime" \
-    NPM_CONFIG_USERCONFIG=/dev/null \
-    NPM_CONFIG_GLOBALCONFIG=/dev/null \
-    GIT_CONFIG_NOSYSTEM=1 \
-    GIT_CONFIG_GLOBAL=/dev/null \
-    PATH=/usr/local/bin:/usr/bin:/bin \
-    DSH_HOME="$operation_root/dsh-home" \
-    /usr/local/sbin/mydsh-deploy-release --internal-build "$bundle" "$ref" "$expected_commit" "$checkout" "$operation_root/cache" "$operation_root/result.commit" || return 1
-  if systemctl is-active --quiet "$unit"; then return 1; fi
-}
-
-write_builder_commit_marker() {
-  local checkout=$1
-  local expected_commit=$2
-  local marker=$3
-  local commit
-  local temporary="${marker}.new"
-  commit=$(git -C "$checkout" rev-parse HEAD) || return 1
-  [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$expected_commit" ]] || return 1
-  [[ ! -e "$marker" && ! -L "$marker" && ! -e "$temporary" && ! -L "$temporary" ]] || return 1
-  printf '%s\n' "$commit" >"$temporary" || return 1
-  mv -- "$temporary" "$marker" || { rm -f -- "$temporary" || true; return 1; }
-}
-
-read_builder_commit_marker() {
-  local marker=$1
-  local expected_commit=$2
-  local commit
-  local resolved
-  local line_count
-  [[ -f "$marker" && ! -L "$marker" ]] || return 1
-  resolved=$(realpath -e -- "$marker") || return 1
-  [[ $resolved == "$marker" ]] || return 1
-  line_count=$(wc -l <"$marker") || return 1
-  [[ $line_count == 1 ]] || return 1
-  commit=$(<"$marker") || return 1
-  [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$expected_commit" ]] || return 1
-  printf '%s\n' "$commit"
-}
-
-internal_build() {
-  local bundle=$1
-  local ref=$2
-  local expected_commit=$3
-  local checkout=$4
-  local cache=$5
-  local marker=$6
-  git clone --branch "$ref" --single-branch "$bundle" "$checkout"
-  write_builder_commit_marker "$checkout" "$expected_commit" "$marker"
-  pnpm --dir "$checkout" install --frozen-lockfile --store-dir "$cache"
-  pnpm --dir "$checkout" exec vitest run packages/host/invite-auth/tests
-  pnpm --dir "$checkout" run build
-  /usr/bin/node "$checkout/apps/cli/lib/bin.js" web --patch "$checkout/deploy/alibaba-cloud/invite-auth.cordis.yml" --dump-config >/dev/null
-}
-
 load_public_environment() {
   set -a
   # Bootstrap owns this root-controlled file.
@@ -343,6 +270,8 @@ current_release() {
 
 validate_host() {
   require_host_tools
+  [[ $(uname -m) == x86_64 ]] || fail 'prebuilt artifacts require an x86_64 host'
+  [[ $(node --version) == v24.* ]] || fail 'prebuilt artifacts require the Node.js 24 runtime'
   validate_host_directory /opt/mydsh root:root 755
   validate_host_directory "$RELEASES_DIR" root:root 755
   validate_host_directory /srv/mydsh root:root 755
@@ -351,8 +280,6 @@ validate_host() {
   validate_host_directory "$DEPLOY_STATE_ROOT" root:root 700
   validate_host_directory /etc/mydsh root:root 755
   validate_system_account mydsh /var/lib/mydsh
-  validate_system_account mydsh-build /nonexistent
-  [[ $(id -u mydsh) != "$(id -u mydsh-build)" && $(id -g mydsh) != "$(id -g mydsh-build)" ]] || fail 'runtime and builder identities must be distinct'
   for path in "$PUBLIC_ENV" "$PRIVATE_ENV" "$CADDY_CONFIG" "$DSH_UNIT" "$CADDY_DROPIN" "$ROOT_HELPER"; do
     validate_existing_managed_file "$path" || fail "unsafe or unmanaged host file: $path"
   done
@@ -363,12 +290,11 @@ validate_candidate_configs() {
   local caddy_candidate="$asset_root/Caddyfile"
   local unit_candidate="$asset_root/mydsh.service"
   local dropin_candidate="$asset_root/caddy-mydsh.conf"
-  local helper_candidate="$asset_root/deploy-release.sh"
   local candidate
   local resolved
   local verify_root
 
-  for candidate in "$caddy_candidate" "$unit_candidate" "$dropin_candidate" "$helper_candidate"; do
+  for candidate in "$caddy_candidate" "$unit_candidate" "$dropin_candidate"; do
     [[ -f "$candidate" && ! -L "$candidate" ]] || return 1
     resolved=$(realpath -e -- "$candidate") || return 1
     [[ $resolved == "$candidate" ]] || return 1
@@ -376,8 +302,17 @@ validate_candidate_configs() {
   grep -Fqx "$MANAGED_MARKER" "$caddy_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$unit_candidate" || return 1
   grep -Fqx "$MANAGED_MARKER" "$dropin_candidate" || return 1
-  grep -Fqx "$MANAGED_MARKER" "$helper_candidate" || return 1
-  bash -n "$helper_candidate" || return 1
+  grep -Fqx 'User=mydsh' "$unit_candidate" || return 1
+  grep -Fqx 'Group=mydsh' "$unit_candidate" || return 1
+  grep -Fqx 'NoNewPrivileges=true' "$unit_candidate" || return 1
+  grep -Fqx 'ProtectSystem=strict' "$unit_candidate" || return 1
+  grep -Fqx 'ProtectHome=true' "$unit_candidate" || return 1
+  # systemd, not this validation shell, expands the public-host variable.
+  # shellcheck disable=SC2016
+  grep -Fqx 'ExecStart=/usr/bin/node /opt/mydsh/current/apps/cli/lib/bin.js web --patch /opt/mydsh/current/deploy/alibaba-cloud/invite-auth.cordis.yml --no-open --trusted-host ${DSH_PUBLIC_HOST}' "$unit_candidate" || return 1
+  [[ $(grep -Fvc "$MANAGED_MARKER" "$dropin_candidate") == 2 ]] || return 1
+  grep -Fqx '[Service]' "$dropin_candidate" || return 1
+  grep -Fqx 'EnvironmentFile=/etc/mydsh/public.env' "$dropin_candidate" || return 1
   caddy validate --config "$caddy_candidate" --adapter caddyfile || return 1
   verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX) || return 1
   validate_temp_directory "$verify_root" /run mydsh-systemd-verify. || return 1
@@ -402,26 +337,6 @@ validate_temp_directory() {
   [[ $(realpath -e -- "$path") == "$path" ]] || return 1
 }
 
-publish_builder_checkout() {
-  local checkout=$1
-  local target=$2
-  local releases_root=${3:-$RELEASES_DIR}
-  local publish_root
-  [[ -d "$checkout" && ! -L "$checkout" && $(realpath -e -- "$checkout") == "$checkout" ]] || return 1
-  [[ ! -e "$target" && ! -L "$target" && ${target%/*} == "$releases_root" ]] || return 1
-  publish_root=$(mktemp -d "$releases_root/.publish.XXXXXX") || return 1
-  validate_temp_directory "$publish_root" "$releases_root" .publish. || return 1
-  PUBLISH_ROOT=$publish_root
-  cp -a --reflink=never "$checkout/." "$publish_root/" || { rm -rf -- "$publish_root" || true; return 1; }
-  [[ $(stat -c %i "$checkout/package.json") != "$(stat -c %i "$publish_root/package.json")" ]] || { rm -rf -- "$publish_root" || true; return 1; }
-  chown -R root:root "$publish_root" || { rm -rf -- "$publish_root" || true; return 1; }
-  chmod 0755 "$publish_root" || { rm -rf -- "$publish_root" || true; return 1; }
-  chmod -R go-w "$publish_root" || { rm -rf -- "$publish_root" || true; return 1; }
-  mv -- "$publish_root" "$target" || { rm -rf -- "$publish_root" || true; return 1; }
-  PUBLISH_ROOT=''
-  if ! validate_release_target "$target" "$releases_root"; then remove_new_publication "$target" "$releases_root" || true; return 1; fi
-}
-
 remove_new_publication() {
   local target=$1
   local releases_root=${2:-$RELEASES_DIR}
@@ -432,22 +347,111 @@ remove_new_publication() {
   if [[ -e "$target" || -L "$target" ]]; then rm -rf -- "$target" || return 1; fi
 }
 
-install_trusted_release_assets() {
-  local target=$1
-  local asset_root=$2
-  local releases_root=${3:-$RELEASES_DIR}
-  local name
-  local trusted_dir="$target/.mydsh-trusted-deploy"
-  validate_release_target "$target" "$releases_root" || return 1
-  if [[ -e "$trusted_dir" || -L "$trusted_dir" ]]; then remove_new_publication "$target" "$releases_root" || true; return 1; fi
-  install -d -o root -g root -m 0700 "$trusted_dir" || { remove_new_publication "$target" "$releases_root" || true; return 1; }
-  [[ -d "$trusted_dir" && ! -L "$trusted_dir" && $(realpath -e -- "$trusted_dir") == "$trusted_dir" ]] || { remove_new_publication "$target" "$releases_root" || true; return 1; }
-  for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml deploy-release.sh; do
-    copy_durable_file "$asset_root/$name" "$trusted_dir/$name" || { remove_new_publication "$target" "$releases_root" || true; return 1; }
+verify_artifact_checksum() {
+  local artifact=$1
+  local sidecar=$2
+  local expected_name=${artifact##*/}
+  local digest
+  local listed_name
+  local line
+  local actual
+  [[ -f "$artifact" && ! -L "$artifact" && -f "$sidecar" && ! -L "$sidecar" ]] || return 1
+  line=$(<"$sidecar") || return 1
+  [[ $line =~ ^([0-9a-f]{64})[[:space:]][[:space:]]([A-Za-z0-9._-]+)$ ]] || return 1
+  digest=${BASH_REMATCH[1]}
+  listed_name=${BASH_REMATCH[2]}
+  [[ $listed_name == "$expected_name" ]] || return 1
+  actual=$(sha256sum "$artifact") || return 1
+  actual=${actual%% *}
+  [[ $actual == "$digest" ]] || return 1
+}
+
+validate_archive_members() {
+  local artifact=$1
+  python3 - "$artifact" <<'PY'
+import posixpath
+import sys
+import tarfile
+from pathlib import PurePosixPath
+
+archive = sys.argv[1]
+seen = set()
+with tarfile.open(archive, "r:gz") as stream:
+    for member in stream.getmembers():
+        path = PurePosixPath(member.name)
+        normalized = posixpath.normpath(member.name)
+        if path.is_absolute() or normalized == ".." or normalized.startswith("../"):
+            raise SystemExit(f"unsafe archive path: {member.name}")
+        key = normalized.removeprefix("./")
+        if key in seen:
+            raise SystemExit(f"duplicate archive path: {member.name}")
+        seen.add(key)
+        if not (member.isfile() or member.isdir() or member.issym() or member.islnk()):
+            raise SystemExit(f"unsupported archive member: {member.name}")
+        if member.issym() or member.islnk():
+            link = PurePosixPath(member.linkname)
+            if link.is_absolute():
+                raise SystemExit(f"absolute archive link: {member.name}")
+            base = path.parent if member.issym() else PurePosixPath(".")
+            resolved = posixpath.normpath(str(base / link))
+            if resolved == ".." or resolved.startswith("../"):
+                raise SystemExit(f"escaping archive link: {member.name}")
+PY
+}
+
+validate_release_manifest() {
+  local release_root=$1
+  local manifest="$release_root/.mydsh-release-manifest"
+  local key
+  local value
+  local line_count
+  declare -A fields=()
+  [[ -f "$manifest" && ! -L "$manifest" && $(realpath -e -- "$manifest") == "$manifest" ]] || return 1
+  while IFS='=' read -r key value; do
+    [[ $key =~ ^[a-z_]+$ && -n "$value" && -z ${fields[$key]+present} ]] || return 1
+    fields[$key]=$value
+  done <"$manifest"
+  line_count=$(wc -l <"$manifest") || return 1
+  [[ $line_count == 7 ]] || return 1
+  grep -Fqx 'format=1' "$manifest" || return 1
+  grep -Fqx 'helper_journal_format=1' "$manifest" || return 1
+  [[ ${fields[format]:-} == "$RELEASE_FORMAT" ]] || return 1
+  [[ ${fields[helper_journal_format]:-} == "$HELPER_JOURNAL_FORMAT" ]] || return 1
+  [[ ${fields[commit]:-} =~ ^[0-9a-f]{40}$ ]] || return 1
+  [[ ${fields[ref]:-} =~ ^[A-Za-z0-9._/-]+$ ]] || return 1
+  [[ ${fields[platform]:-} == linux-amd64 && ${fields[node_major]:-} == 24 && ${fields[pnpm_version]:-} == 11.7.0 ]] || return 1
+  MANIFEST_COMMIT=${fields[commit]}
+  MANIFEST_REF=${fields[ref]}
+}
+
+validate_required_release_outputs() {
+  local release_root=$1
+  local path
+  for path in \
+    apps/cli/lib/bin.js \
+    apps/web/dist/index.html \
+    deploy/alibaba-cloud/Caddyfile \
+    deploy/alibaba-cloud/mydsh.service \
+    deploy/alibaba-cloud/caddy-mydsh.conf \
+    deploy/alibaba-cloud/invite-auth.cordis.yml; do
+    [[ -f "$release_root/$path" && ! -L "$release_root/$path" && $(realpath -e -- "$release_root/$path") == "$release_root/$path" ]] || return 1
   done
-  chown -R root:root "$trusted_dir" || { remove_new_publication "$target" "$releases_root" || true; return 1; }
-  chmod -R go-rwx "$trusted_dir" || { remove_new_publication "$target" "$releases_root" || true; return 1; }
-  sync -f "$trusted_dir" "$target" "$releases_root" || { remove_new_publication "$target" "$releases_root" || true; return 1; }
+  [[ -d "$release_root/node_modules" && ! -L "$release_root/node_modules" && $(realpath -e -- "$release_root/node_modules") == "$release_root/node_modules" ]] || return 1
+}
+
+publish_extracted_release() {
+  local extract_root=$1
+  local target=$2
+  local releases_root=${3:-$RELEASES_DIR}
+  [[ -d "$extract_root" && ! -L "$extract_root" && $(realpath -e -- "$extract_root") == "$extract_root" ]] || return 1
+  [[ ! -e "$target" && ! -L "$target" && ${target%/*} == "$releases_root" ]] || return 1
+  chown -R root:root "$extract_root" || return 1
+  chmod 0755 "$extract_root" || return 1
+  chmod -R u-s,g-s "$extract_root" || return 1
+  chmod -R go-w "$extract_root" || return 1
+  mv -- "$extract_root" "$target" || return 1
+  OPERATION_ROOT=''
+  if ! validate_release_target "$target" "$releases_root"; then remove_new_publication "$target" "$releases_root" || true; return 1; fi
 }
 
 host_path() {
@@ -463,7 +467,6 @@ backup_host_configs() {
   copy_durable_file "$(host_path "$host_root" "$CADDY_CONFIG")" "$backup/Caddyfile" || return 1
   copy_durable_file "$(host_path "$host_root" "$DSH_UNIT")" "$backup/mydsh.service" || return 1
   copy_durable_file "$(host_path "$host_root" "$CADDY_DROPIN")" "$backup/caddy-mydsh.conf" || return 1
-  copy_durable_file "$(host_path "$host_root" "$ROOT_HELPER")" "$backup/root-helper" || return 1
   sync -f "$backup" || return 1
 }
 
@@ -481,7 +484,7 @@ write_journal_value() {
   local name=$2
   local value=$3
   local temporary
-  [[ $name == previous || $name == target || $name == service-enabled || $name == rollback-required ]] || return 1
+  [[ $name == previous || $name == target || $name == service-enabled || $name == rollback-required || $name == journal-format ]] || return 1
   create_registered_temp_file "$journal" || return 1
   temporary=$CREATED_TEMP_FILE
   printf '%s\n' "$value" >"$temporary" || { discard_registered_temp_file "$temporary" || true; return 1; }
@@ -565,11 +568,11 @@ prepare_activation_journal() {
   copy_durable_file "$asset_root/Caddyfile" "$staging/candidate/Caddyfile" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   copy_durable_file "$asset_root/mydsh.service" "$staging/candidate/mydsh.service" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   copy_durable_file "$asset_root/caddy-mydsh.conf" "$staging/candidate/caddy-mydsh.conf" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
-  copy_durable_file "$asset_root/deploy-release.sh" "$staging/candidate/deploy-release.sh" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   sync -f "$staging/candidate" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" previous "${previous:-none}" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" target "$target" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" service-enabled "$previous_enabled" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
+  write_journal_value "$staging" journal-format "$HELPER_JOURNAL_FORMAT" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_value "$staging" rollback-required 1 || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   write_journal_state "$staging" prepared || { discard_journal_staging "$staging" "$parent" || true; return 1; }
   sync -f "$staging" || { discard_journal_staging "$staging" "$parent" || true; return 1; }
@@ -599,9 +602,13 @@ recover_activation_journal() {
   local previous_enabled
   local target
   local installed_caddy
+  local journal_format
+  local restored_release
   [[ $mode == normal || $mode == force ]] || return 1
   [[ ! -e "$journal" && ! -L "$journal" ]] && return 0
   [[ -d "$journal" && ! -L "$journal" ]] || return 1
+  journal_format=$(<"$journal/journal-format") || return 1
+  [[ $journal_format == "$HELPER_JOURNAL_FORMAT" ]] || return 1
   state=$(sed -n 's/^state=//p' "$journal/state") || return 1
   if [[ -e "$journal/rollback-required" || -L "$journal/rollback-required" ]]; then
     [[ -f "$journal/rollback-required" && ! -L "$journal/rollback-required" ]] || return 1
@@ -626,14 +633,17 @@ recover_activation_journal() {
   if [[ $previous == none ]]; then
     remove_first_link "$target" "$current_path" || return 1
     systemctl stop mydsh || return 1
+    restored_release=$target
   else
     atomic_replace_link "$current_path" "$previous" || return 1
     systemctl restart mydsh || return 1
     health_check "$previous" || return 1
+    restored_release=$previous
   fi
   restore_service_enable_state "$previous_enabled" || return 1
   caddy validate --config "$installed_caddy" --adapter caddyfile || return 1
   systemctl reload caddy || return 1
+  sync_activated_state "$restored_release" "$journal" "$host_root" "$current_path" || return 1
   remove_activation_journal "$journal" || return 1
 }
 
@@ -678,7 +688,6 @@ stage_candidate_configs() {
   install_managed_file "$asset_root/Caddyfile" "$(host_path "$host_root" "$CADDY_CONFIG")" 0644 || return 1
   install_managed_file "$asset_root/mydsh.service" "$(host_path "$host_root" "$DSH_UNIT")" 0644 || return 1
   install_managed_file "$asset_root/caddy-mydsh.conf" "$(host_path "$host_root" "$CADDY_DROPIN")" 0644 || return 1
-  install_managed_file "$asset_root/deploy-release.sh" "$(host_path "$host_root" "$ROOT_HELPER")" 0755 || return 1
 }
 
 restore_host_configs() {
@@ -687,7 +696,6 @@ restore_host_configs() {
   install_managed_file "$backup/Caddyfile" "$(host_path "$host_root" "$CADDY_CONFIG")" 0644 || return 1
   install_managed_file "$backup/mydsh.service" "$(host_path "$host_root" "$DSH_UNIT")" 0644 || return 1
   install_managed_file "$backup/caddy-mydsh.conf" "$(host_path "$host_root" "$CADDY_DROPIN")" 0644 || return 1
-  install_managed_file "$backup/root-helper" "$(host_path "$host_root" "$ROOT_HELPER")" 0755 || return 1
 }
 
 health_check() {
@@ -704,6 +712,7 @@ health_check() {
         owner=$(stat -c %U "/proc/$main_pid") || owner=''
         active=$(realpath -e -- "$CURRENT_LINK") || active=''
         if [[ $owner == mydsh && $active == "$target" ]] && curl --fail --silent --show-error --output /dev/null --max-time 2 http://127.0.0.1:3080/__invite/login; then
+          listener_check || return 1
           return 0
         fi
       fi
@@ -711,6 +720,37 @@ health_check() {
     sleep 1 || return 1
   done
   return 1
+}
+
+listener_check() {
+  local endpoints=()
+  mapfile -t endpoints < <(ss -H -ltn 'sport = :3080' | awk '{ print $4 }')
+  [[ ${#endpoints[@]} -eq 1 && ${endpoints[0]} == 127.0.0.1:3080 ]]
+}
+
+sync_activated_state() {
+  local release=$1
+  local journal=$2
+  local host_root=${3:-}
+  local current_path=${4:-$CURRENT_LINK}
+  local path
+  local paths=(
+    "$release"
+    "$(dirname -- "$release")"
+    "$(dirname -- "$current_path")"
+    "$(host_path "$host_root" "$CADDY_CONFIG")"
+    "$(dirname -- "$(host_path "$host_root" "$CADDY_CONFIG")")"
+    "$(host_path "$host_root" "$DSH_UNIT")"
+    "$(dirname -- "$(host_path "$host_root" "$DSH_UNIT")")"
+    "$(host_path "$host_root" "$CADDY_DROPIN")"
+    "$(dirname -- "$(host_path "$host_root" "$CADDY_DROPIN")")"
+    "$(host_path "$host_root" /etc/systemd/system/multi-user.target.wants)"
+    "$journal"
+    "$(dirname -- "$journal")"
+  )
+  for path in "${paths[@]}"; do
+    if [[ -e "$path" || -L "$path" ]]; then sync -f "$path" || return 1; else return 1; fi
+  done
 }
 
 public_acceptance() {
@@ -777,7 +817,7 @@ activate_transaction() {
       if health_check "$target"; then
         if caddy validate --config "$installed_caddy" --adapter caddyfile && systemctl reload caddy; then
           if public_acceptance && authenticated_acceptance && systemctl enable mydsh; then
-            if write_journal_state "$journal" committed && finalize_committed_journal "$journal"; then
+            if sync_activated_state "$target" "$journal" "$host_root" "$current_path" && write_journal_state "$journal" committed && finalize_committed_journal "$journal"; then
               if ! remove_activation_journal "$journal"; then
                 printf 'mydsh-deploy-release: activation accepted but committed journal cleanup was not durable at %s; the next operation will retry if it remains\n' "$journal" >&2
               fi
@@ -804,9 +844,11 @@ rollback_to_commit() {
   [[ $commit =~ ^[0-9a-f]{40}$ ]] || fail 'rollback commit must be 40 lowercase hexadecimal characters'
   target="$releases_root/$commit"
   validate_release_target "$target" "$releases_root" || fail 'rollback target is outside the canonical release directory'
+  validate_release_manifest "$target" || fail 'rollback release manifest is invalid or incompatible'
+  [[ $MANIFEST_COMMIT == "$commit" ]] || fail 'rollback release manifest commit does not match its directory'
+  validate_required_release_outputs "$target" || fail 'rollback release is missing required runtime outputs'
   previous=$(current_release "$current_path" "$releases_root") || fail 'current release link is unsafe'
-  asset_root="$target/.mydsh-trusted-deploy"
-  [[ -d "$asset_root" && ! -L "$asset_root" ]] || fail 'rollback release lacks root-trusted deployment assets'
+  asset_root="$target/deploy/alibaba-cloud"
   load_public_environment
   activate_transaction "$target" "$previous" "$asset_root" '' "$current_path" || return 1
   printf 'Rolled back to release %s after public and authenticated acceptance.\n' "$commit"
@@ -828,82 +870,52 @@ prune_release() {
   printf 'Pruned inactive release %s.\n' "$commit"
 }
 
-deploy_bundle() {
-  local bundle_path
-  local ref=$2
-  local checkout
-  local clone_ref
+deploy_artifact() {
+  local artifact_input=$1
+  local checksum_input=$2
+  local artifact_path
+  local checksum_path
   local commit
-  local operation_root
-  local trusted_assets
+  local extract_root
   local previous
-  local staged_bundle
   local target
-  local trusted_bundle
-  local trusted_commit
-  local trusted_repository
-  local candidate_path
+  local trusted_artifact
+  local trusted_checksum
 
-  bundle_path=$(realpath -e -- "$1") || fail 'bundle path does not exist'
-  [[ -f "$bundle_path" && -r "$bundle_path" ]] || fail 'bundle must be a readable regular file'
-  git check-ref-format --branch "$ref" >/dev/null || git check-ref-format "$ref" >/dev/null || fail 'invalid deployment ref'
+  [[ -f "$artifact_input" && ! -L "$artifact_input" && -r "$artifact_input" ]] || fail 'artifact must be a readable regular non-symlink file'
+  [[ -f "$checksum_input" && ! -L "$checksum_input" && -r "$checksum_input" ]] || fail 'checksum sidecar must be a readable regular non-symlink file'
+  artifact_path=$(realpath -e -- "$artifact_input") || fail 'cannot resolve artifact path'
+  checksum_path=$(realpath -e -- "$checksum_input") || fail 'cannot resolve checksum path'
   previous=$(current_release) || fail 'current release link is unsafe'
-  clone_ref=${ref#refs/heads/}
-  clone_ref=${clone_ref#refs/tags/}
-  TRUST_ROOT=$(mktemp -d /run/mydsh-bundle.XXXXXX) || fail 'cannot create trusted bundle directory'
-  validate_temp_directory "$TRUST_ROOT" /run mydsh-bundle. || fail 'unsafe trusted bundle directory'
+  TRUST_ROOT=$(mktemp -d /run/mydsh-artifact.XXXXXX) || fail 'cannot create root-private artifact directory'
+  validate_temp_directory "$TRUST_ROOT" /run mydsh-artifact. || fail 'unsafe root-private artifact directory'
   trap cleanup_operation EXIT
-  trusted_bundle="$TRUST_ROOT/release.bundle"
-  trusted_repository="$TRUST_ROOT/repository.git"
-  install -o root -g root -m 0400 -- "$bundle_path" "$trusted_bundle"
-  trusted_git init --bare --quiet "$trusted_repository"
-  trusted_git -C "$trusted_repository" bundle verify "$trusted_bundle"
-  trusted_git -C "$trusted_repository" fetch --quiet "$trusted_bundle" "$ref"
-  trusted_commit=$(trusted_git -C "$trusted_repository" rev-parse 'FETCH_HEAD^{commit}') || fail 'cannot resolve the trusted bundle ref'
-  trusted_assets="$TRUST_ROOT/assets"
-  install -d -o root -g root -m 0700 "$trusted_assets"
-  for candidate_path in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml deploy-release.sh; do
-    trusted_git -C "$trusted_repository" show "$trusted_commit:deploy/alibaba-cloud/$candidate_path" >"$trusted_assets/$candidate_path"
-    chmod 0600 "$trusted_assets/$candidate_path"
-  done
-  operation_root=$(mktemp -d "$RELEASES_DIR/.build.XXXXXX") || fail 'cannot create per-operation builder root'
-  OPERATION_ROOT=$operation_root
-  validate_temp_directory "$operation_root" "$RELEASES_DIR" .build. || fail 'unsafe per-operation builder root'
-  checkout="$operation_root/checkout"
-  staged_bundle="$operation_root/release.bundle"
-  for candidate_path in home tmp xdg-config xdg-cache xdg-runtime dsh-home cache; do install -d -o mydsh-build -g mydsh-build -m 0700 "$operation_root/$candidate_path"; done
-  chown mydsh-build:mydsh-build "$operation_root"
-  chmod 0700 "$operation_root"
-  install -o mydsh-build -g mydsh-build -m 0400 -- "$trusted_bundle" "$staged_bundle"
-  run_builder "$operation_root" "$staged_bundle" "$clone_ref" "$trusted_commit" "$checkout" || fail 'transient builder service failed or did not quiesce'
-  [[ -d "$checkout" && ! -L "$checkout" && $(realpath -e -- "$checkout") == "$checkout" ]] || fail 'builder checkout is not a canonical real directory'
-  read_builder_commit_marker "$operation_root/result.commit" "$trusted_commit" >/dev/null || fail 'builder commit marker does not match the trusted bundle ref'
-  commit=$trusted_commit
-  [[ $commit =~ ^[0-9a-f]{40}$ && $commit == "$trusted_commit" ]] || fail 'candidate commit does not match the trusted bundle ref'
+  trusted_artifact="$TRUST_ROOT/${artifact_path##*/}"
+  trusted_checksum="$TRUST_ROOT/checksum.sha256"
+  install -o root -g root -m 0400 -- "$artifact_path" "$trusted_artifact"
+  install -o root -g root -m 0400 -- "$checksum_path" "$trusted_checksum"
+  [[ $(stat -c '%d:%i' "$artifact_path") != "$(stat -c '%d:%i' "$trusted_artifact")" ]] || fail 'artifact root-private copy reused the upload inode'
+  verify_artifact_checksum "$trusted_artifact" "$trusted_checksum" || fail 'artifact SHA-256 verification failed'
+  validate_archive_members "$trusted_artifact" || fail 'artifact archive contains an unsafe member'
+  extract_root=$(mktemp -d "$RELEASES_DIR/.extract.XXXXXX") || fail 'cannot create root-private extraction directory'
+  OPERATION_ROOT=$extract_root
+  validate_temp_directory "$extract_root" "$RELEASES_DIR" .extract. || fail 'unsafe extraction directory'
+  tar -xzf "$trusted_artifact" --no-same-owner -C "$extract_root" || fail 'artifact extraction failed'
+  validate_release_manifest "$extract_root" || fail 'release manifest is invalid or incompatible'
+  validate_required_release_outputs "$extract_root" || fail 'artifact is missing required built runtime outputs'
+  commit=$MANIFEST_COMMIT
   target="$RELEASES_DIR/$commit"
   [[ ! -e "$target" && ! -L "$target" ]] || fail "release already exists: $commit"
-  for candidate_path in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do
-    cmp -- "$trusted_assets/$candidate_path" "$checkout/deploy/alibaba-cloud/$candidate_path" || fail "builder modified deployment asset: $candidate_path"
-  done
   load_public_environment
-  validate_candidate_configs "$trusted_assets" || fail 'trusted candidate deployment assets failed validation before publication'
-  publish_builder_checkout "$checkout" "$target" "$RELEASES_DIR" || fail 'candidate publication failed safely'
-  install_trusted_release_assets "$target" "$trusted_assets" "$RELEASES_DIR" || fail 'trusted deployment asset publication failed safely'
-  rm -rf -- "$operation_root"
-  OPERATION_ROOT=''
+  validate_candidate_configs "$extract_root/deploy/alibaba-cloud" || fail 'artifact deployment configuration validation failed'
+  publish_extracted_release "$extract_root" "$target" "$RELEASES_DIR" || fail 'artifact publication failed safely'
   rm -rf -- "$TRUST_ROOT"
   TRUST_ROOT=''
-  activate_transaction "$target" "$previous" "$target/.mydsh-trusted-deploy" || return 1
-  printf 'Deployed release %s after public and authenticated acceptance.\n' "$commit"
+  activate_transaction "$target" "$previous" "$target/deploy/alibaba-cloud" || return 1
+  printf 'Deployed prebuilt release %s (%s) after public and authenticated acceptance.\n' "$commit" "$MANIFEST_REF"
 }
 
 main() {
-  if [[ ${1:-} == --internal-build ]]; then
-    [[ $# -eq 7 ]] || return 64
-    [[ $(id -un) == mydsh-build ]] || fail '--internal-build requires the mydsh-build identity'
-    internal_build "$2" "$3" "$4" "$5" "$6" "$7"
-    return
-  fi
   [[ $EUID -eq 0 ]] || fail 'run this script as root'
   [[ $# -eq 2 ]] || { usage; return 64; }
   [[ $(realpath -e -- "$0") == /usr/local/sbin/mydsh-deploy-release ]] || fail 'run the root-installed deployment helper'
@@ -919,7 +931,7 @@ main() {
   elif [[ $1 == --prune ]]; then
     prune_release "$2"
   else
-    deploy_bundle "$1" "$2"
+    deploy_artifact "$1" "$2"
   fi
 }
 

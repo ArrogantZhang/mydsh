@@ -8,55 +8,58 @@ This tutorial deploys one invite-protected DeepSeek Harness Web process on an Al
 
 Use a fresh Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
 
-The bootstrap installs Node.js 24 from the [official NodeSource repository](https://github.com/nodesource/distributions), pnpm 11.7.0, and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`, Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`, and the pinned SHA-512 integrity of the official pnpm 11.7.0 tarball. Signed-repository patch versions may advance. Review both repository procedures before running a root script on a long-lived host.
+The host bootstrap installs only the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian). It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
 
 The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed named ref stored in `DEPLOY_REF`. Replace all three values with the DNS name, SSH destination, and reviewed ref selected for this deployment; a verified signed tag is preferable when available.
 
 ## Prepare and upload a release
 
-Run these commands from the repository root on your development machine. The bundle contains the selected named ref and its reachable commits without copying your working tree or untracked files.
+Run these commands from the repository root on your development machine. The packager reads only Git objects from the selected named ref, runs install, tests, build, and config validation in a resource-bounded ephemeral `node:24-bookworm` container, and emits a complete Linux runtime tarball plus SHA-256 sidecar. It fails when Docker is unavailable and never falls back to a host build.
 
 ```bash
 set -euo pipefail
 DEPLOY_REF=refs/tags/dsh-reviewed-YYYYMMDD
 REMOTE=ecs-admin@203.0.113.10
-git status --short
-git bundle create mydsh.bundle "$DEPLOY_REF"
-git bundle verify mydsh.bundle
 LOCAL_STAGE=$(mktemp -d)
 trap 'rm -rf -- "$LOCAL_STAGE"' EXIT
+bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$LOCAL_STAGE"
+ARTIFACT=$(find "$LOCAL_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
+[[ -f $ARTIFACT ]]
+CHECKSUM="$ARTIFACT.sha256"
+ARTIFACT_NAME=${ARTIFACT##*/}
+CHECKSUM_NAME=${CHECKSUM##*/}
 git archive "$DEPLOY_REF" deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} | tar -x -C "$LOCAL_STAGE"
 REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
 [[ $REMOTE_STAGE == */mydsh-deploy.* ]]
 scp "$LOCAL_STAGE"/deploy/alibaba-cloud/{Caddyfile,mydsh.service,caddy-mydsh.conf,bootstrap-host.sh,deploy-release.sh} "$REMOTE:$REMOTE_STAGE/"
-scp mydsh.bundle "$REMOTE:$REMOTE_STAGE/"
+scp "$ARTIFACT" "$CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
 ```
 
-The first `scp` uploads all five bootstrap and deployment assets to the same unpredictable, SSH-user-owned directory. The overlay stays in the Git bundle and is validated from the checked-out release. `git bundle verify` checks bundle structure, prerequisites, and object connectivity; it does not prove authenticity. Trust comes from the reviewed local checkout and, when used, verification of the selected signed tag or commit before bundle creation.
+The first `scp` uploads all five initialization assets to the same unpredictable, SSH-user-owned directory as the artifact. The SHA-256 sidecar detects corruption during transfer but does not establish signer identity. Trust comes from the exact reviewed local ref and, when used, verification of its signed tag or commit before packaging. The artifact contains the overlay, built outputs, dependencies, release manifest, and release configuration; it contains no host absolute path or production secret.
 
 ## Bootstrap the host
 
-Run bootstrap from the uploaded directory. It installs the reviewed control-plane helper at `/usr/local/sbin/mydsh-deploy-release`; deployments and rollbacks never execute root control flow from a release directory. Re-running bootstrap updates files carrying the stable managed marker and refuses symlinks, wrong file types, non-root ownership, or unmanaged targets instead of replacing them.
+Run bootstrap from the uploaded directory only for initial host setup. It installs the reviewed control-plane helper at `/usr/local/sbin/mydsh-deploy-release`; deployments and rollbacks never execute root control flow from a release directory. Once `current` exists, a byte-identical rerun is a no-op and any hostname, helper, unit, Caddyfile, or drop-in difference is refused. Changing the hostname or stable helper requires a separate reviewed maintenance procedure outside this tutorial.
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.example.com"
 ```
 
-The script creates separate `mydsh` runtime and `mydsh-build` builder accounts, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range, a non-root UID, distinct groups, and a nologin shell. Every candidate gets a new builder HOME, XDG directories including runtime state, private `TMPDIR`, cache, scratch `DSH_HOME`, and checkout; none is reused, and the helper removes them after the transient systemd build service and its descendant cgroup stop and publication finishes or fails normally. Runtime data, workspace, the private environment file, and secrets remain inaccessible. With an active release, bootstrap is a byte-for-byte no-op or refuses and directs changes through normal deployment.
+The script creates the non-login `mydsh` runtime account, persistent and release directories, `/etc/mydsh/public.env`, and a root-readable-only private environment file. Ubuntu 22.04 and 24.04 assign system accounts a UID below 1000; bootstrap requires that range and a non-root UID. No builder account, pnpm installation, candidate lifecycle script, or build cache exists on the server. With an active release, bootstrap is a byte-for-byte no-op; any hostname, helper, unit, Caddyfile, or drop-in difference is refused before mutation.
 
 ## Deploy the release
 
-Deploy the exact ref carried by the bundle through the root-installed helper. One `PrivateTmp` transient systemd service runs clone, commit verification, dependency lifecycle scripts, tests, build, and config dump as `mydsh-build` under an empty per-operation environment; systemd kills and awaits the entire descendant cgroup. The builder writes the verified commit to a plain marker, so root validates that marker against its trusted Git extraction without invoking Git on the builder-owned checkout, then copies the completed tree without reflinks into new private inodes before publication. Activation builds a complete root-only `prepared` recovery journal in a sibling staging directory, records the prior service enablement state, and atomically renames it into place before changing the helper, unit, Caddy files, release link, or enablement. Any failure retains or replays that journal until the previous coherent state is restored; accepted activation enables the service and records `committed` before cleanup, so later cleanup can never roll it back.
+Deploy the prebuilt artifact through the stable root-installed helper. It copies both uploads into root-private new inodes, verifies the strict sidecar and SHA-256 value, rejects unsafe tar paths and escaping links, extracts into a root-private directory, validates manifest format `1`, helper journal compatibility `1`, commit, ref label, platform, required dependencies, built CLI, overlay, unit, and Caddy configuration, and publishes the commit directory. It never runs Git, pnpm, install hooks, tests, build commands, config scripts, or a helper from the artifact. Activation journals and transacts the unit, Caddy files, release link, and service enablement; the stable helper itself is not part of the release transaction.
 
 ```bash
-ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release ./mydsh.bundle '$DEPLOY_REF'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_NAME' './$CHECKSUM_NAME'; status=\$?; if [[ \$status == 0 ]]; then rm -rf -- '$REMOTE_STAGE'; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; fi; exit \$status"
 ```
 
-The remote command removes the upload only after success. A failed update retains the exact bundle and uploaded assets, restores the previous `current` target, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, and stops `mydsh`.
+The remote command removes the upload only after success. A failed update retains the exact artifact and checksum, restores the previous `current` target, configuration, listener state, and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
 
 ## Verify HTTPS and login
 
-Check both services, listeners, the public certificate, and the unauthenticated login page. The listener output must show Caddy on ports 80 and 443 and DSH only on `127.0.0.1:3080` or `[::1]:3080`, never a wildcard or public address.
+Check both services, listeners, the public certificate, and the unauthenticated login page. The listener output must show Caddy on ports 80 and 443 and exactly one DSH listener at `127.0.0.1:3080`, never IPv6 wildcard, IPv4 wildcard, a public address, or a duplicate listener. The deployment helper enforces the same condition before commit.
 
 ```bash
 sudo systemctl status --no-pager caddy mydsh
@@ -109,11 +112,24 @@ printf "Authenticated smoke passed.\n"
 
 In the Web UI, open **Settings → Models**, add a custom OpenAI-compatible provider, and enter the API base URL, model identifier, and API key issued by Kimi. Follow the current [Kimi API documentation](https://platform.moonshot.cn/docs/guide/start-using-kimi-api) for account-specific values, save the provider, select its model, and send one test conversation.
 
-Keep model keys in the DSH credential store. Never add them to this directory, a Git bundle, `/etc/mydsh/public.env`, shell tracing, deployment output, or repository logs.
+Keep model keys in the DSH credential store. Never add them to this directory, a release artifact, `/etc/mydsh/public.env`, shell tracing, deployment output, or repository logs.
 
 ## Upgrade and roll back
 
-Create a new bundle from a reviewed deployment ref, upload it beside the five assets, and invoke `/usr/local/sbin/mydsh-deploy-release` with that bundle and exact ref. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
+For an upgrade, run `package-release.sh` for the new reviewed ref, create a fresh remote staging directory, upload only the new artifact and checksum, and invoke `/usr/local/sbin/mydsh-deploy-release` with those two files. Do not upload or replace bootstrap assets during an upgrade. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
+
+```bash
+UPGRADE_STAGE=$(mktemp -d)
+trap 'rm -rf -- "$UPGRADE_STAGE"' EXIT
+bash deploy/alibaba-cloud/package-release.sh "$DEPLOY_REF" "$UPGRADE_STAGE"
+UPGRADE_ARTIFACT=$(find "$UPGRADE_STAGE" -maxdepth 1 -type f -name 'mydsh-*-linux-amd64.tar.gz')
+UPGRADE_CHECKSUM="$UPGRADE_ARTIFACT.sha256"
+REMOTE_STAGE=$(ssh "$REMOTE" 'mktemp -d "$HOME/mydsh-deploy.XXXXXX"')
+scp "$UPGRADE_ARTIFACT" "$UPGRADE_CHECKSUM" "$REMOTE:$REMOTE_STAGE/"
+ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './${UPGRADE_ARTIFACT##*/}' './${UPGRADE_CHECKSUM##*/}'"
+```
+
+The installed helper owns journal format `1` and is intentionally outside automatic release updates. A helper or journal-format upgrade requires a separate reviewed maintenance procedure while DSH is stopped; this tutorial does not automate that control-plane change.
 
 The deploy script rolls back automatically when restart, health acceptance, Caddy validation, or Caddy reload fails. For an operator-directed rollback, choose a known-good full commit from `sudo ls -1 /opt/mydsh/releases`. The preflight below requires 40 lowercase hexadecimal characters, resolves the directory canonically, and proves that its parent and basename are exact before the script performs the same validation, atomic switch, restart, health check, and Caddy activation.
 

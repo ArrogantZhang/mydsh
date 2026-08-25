@@ -5,8 +5,6 @@ readonly MANAGED_MARKER='# Managed by DeepSeek Harness Alibaba Cloud deployment'
 readonly DEPLOY_LOCK=/run/lock/mydsh-deploy.lock
 readonly NODESOURCE_FINGERPRINT=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 readonly CADDY_FINGERPRINT=65760C51EDEA2017CEA2CA15155B6D79CA56EA34
-readonly PNPM_INTEGRITY='sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA=='
-readonly PNPM_TARBALL=https://registry.npmjs.org/pnpm/-/pnpm-11.7.0.tgz
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 readonly SCRIPT_DIR
 DEPLOY_LOCK_FD=''
@@ -351,13 +349,6 @@ create_accounts_and_directories() {
     useradd --system --home-dir /var/lib/mydsh --shell /usr/sbin/nologin --user-group mydsh
   fi
   validate_system_account mydsh /var/lib/mydsh
-  if ! id mydsh-build >/dev/null 2>&1; then
-    useradd --system --home-dir /nonexistent --shell /usr/sbin/nologin --user-group mydsh-build
-  fi
-  validate_system_account mydsh-build /nonexistent
-  [[ $(id -u mydsh) != "$(id -u mydsh-build)" ]] || fail 'runtime and builder accounts must be distinct'
-  [[ $(id -g mydsh) != "$(id -g mydsh-build)" ]] || fail 'runtime and builder groups must be distinct'
-
   ensure_managed_directory /opt/mydsh root root 0755
   ensure_managed_directory /opt/mydsh/releases root root 0755
   ensure_managed_directory /etc/mydsh root root 0755
@@ -412,19 +403,9 @@ configure_package_repositories() {
   write_managed_file /etc/apt/sources.list.d/caddy-stable.list 0644 'deb [signed-by=/usr/share/keyrings/mydsh-caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main'
 }
 
-install_pnpm() {
-  local tarball="$TEMP_DIR/pnpm-11.7.0.tgz"
-  local digest
-  curl --fail --silent --show-error --location "$PNPM_TARBALL" --output "$tarball"
-  digest=$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A) || fail 'cannot calculate pnpm tarball integrity'
-  [[ "sha512-$digest" == "$PNPM_INTEGRITY" ]] || fail 'pnpm tarball integrity mismatch'
-  npm install --global --ignore-scripts "$tarball"
-}
-
 main() {
   local public_host
   local node_version
-  local pnpm_version
   readonly HOST_PATTERN='^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$'
 
   [[ $EUID -eq 0 ]] || fail 'run this script as root'
@@ -458,7 +439,7 @@ main() {
   trap cleanup EXIT
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https build-essential ca-certificates curl debian-archive-keyring debian-keyring git gnupg openssl python3
+  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring gnupg gzip iproute2 openssl python3 tar
   create_accounts_and_directories
   configure_package_repositories
   install_managed_file "$SCRIPT_DIR/Caddyfile" /etc/caddy/Caddyfile 0644
@@ -466,10 +447,6 @@ main() {
   DEBIAN_FRONTEND=noninteractive apt-get -o Dpkg::Options::=--force-confold install -y nodejs caddy
   node_version=$(node --version)
   [[ $node_version =~ ^v24\. ]] || fail "Node.js 24 is required; installed $node_version"
-  install_pnpm
-  pnpm_version=$(pnpm --version)
-  [[ $pnpm_version == 11.7.0 ]] || fail "pnpm 11.7.0 is required; installed $pnpm_version"
-
   write_environment_files "$public_host"
   install_managed_file "$SCRIPT_DIR/mydsh.service" /etc/systemd/system/mydsh.service 0644
   install_managed_file "$SCRIPT_DIR/caddy-mydsh.conf" /etc/systemd/system/caddy.service.d/mydsh.conf 0644
