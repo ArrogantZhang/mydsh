@@ -93,7 +93,7 @@ When DSH is unavailable, Caddy returns `502`, and systemd restores the service a
 - `/srv/mydsh/workspace` is the systemd working directory and default DSH workspace.
 - `/usr/local/sbin/mydsh-deploy-release` is the root-owned journal-format-1 deployment, rollback, and pruning control helper; release content never supplies or updates root control flow.
 - `/var/lib/mydsh-deploy` is root-only transaction state, `/var/lib/mydsh-deploy/uploads` holds persistent root-private upload copies during validation, `/var/lib/mydsh-deploy/activation` is the format-1 activation journal, and `/var/lib/mydsh-deploy/rotation` is the format-1 rotation journal. Extraction uses a hidden, single-operation directory under the root-owned releases parent and removes it after publication or failure.
-- `/run/lock/mydsh-deploy.lock` serializes bootstrap, deployment, rollback, and pruning.
+- `/run/mydsh-deploy.lock`, directly under the root-owned non-world-writable `/run`, serializes bootstrap, deployment, rollback, and pruning. Lock validation rejects symlinks, ownership drift, and world-writable parent directories.
 - `/etc/mydsh/public.env` stores the non-secret `DSH_PUBLIC_HOST` for both systemd services.
 - `/etc/mydsh/mydsh.env` stores root-only secrets and the persistent `DSH_HOME` path.
 

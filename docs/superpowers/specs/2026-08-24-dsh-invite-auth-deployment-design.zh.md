@@ -93,7 +93,7 @@ DSH 不可用时，Caddy 返回 `502`；systemd 根据有界重启策略恢复�
 - `/srv/mydsh/workspace` 是 systemd 的工作目录和默认 DSH workspace。
 - `/usr/local/sbin/mydsh-deploy-release` 是 root 所有、拥有 journal 格式 1 的部署、回滚和清理控制 helper；release 内容绝不提供或更新 root 控制流。
 - `/var/lib/mydsh-deploy` 是 root-only 事务状态，`/var/lib/mydsh-deploy/uploads` 在验证期间保存持久的 root-private 上传副本，`/var/lib/mydsh-deploy/activation` 是格式 1 激活 journal，`/var/lib/mydsh-deploy/rotation` 是格式 1 轮换 journal。解压使用 root 所有的 releases 父目录下一个隐藏的单次操作目录，并在发布或失败后删除。
-- `/run/lock/mydsh-deploy.lock` 将 bootstrap、部署、回滚和清理串行化。
+- `/run/mydsh-deploy.lock` 直接位于 root 所有且非全局可写的 `/run` 下，将 bootstrap、部署、回滚和清理串行化。锁验证拒绝符号链接、所有权漂移和全局可写的父目录。
 - `/etc/mydsh/public.env` 保存供两个 systemd 服务使用的非秘密 `DSH_PUBLIC_HOST`。
 - `/etc/mydsh/mydsh.env` 保存仅 root 可读的秘密与持久化 `DSH_HOME` 路径。
 

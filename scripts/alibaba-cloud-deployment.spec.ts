@@ -82,6 +82,15 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(dropIn).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
 
+  it('uses one root-owned runtime lock for bootstrap and release operations', () => {
+    for (const name of ['bootstrap-host.sh', 'deploy-release.sh']) {
+      const script = asset(name)
+
+      expect(script).toContain('readonly DEPLOY_LOCK=/run/mydsh-deploy.lock')
+      expect(script).not.toContain('/run/lock/mydsh-deploy.lock')
+    }
+  })
+
   it('bootstraps the host without accepting or printing secrets', () => {
     const script = asset('bootstrap-host.sh')
 
@@ -128,7 +137,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('[[ $resolved_current == "$releases_root/$commit" ]]')
     expect(script).toContain('/usr/local/sbin/mydsh-deploy-release')
     expect(script).toMatch(/install_managed_file .*deploy-release\.sh.*\/usr\/local\/sbin\/mydsh-deploy-release 0755/)
-    expect(script).toContain('/run/lock/mydsh-deploy.lock')
+    expect(script).toContain('/run/mydsh-deploy.lock')
     expect(script).toContain('flock -n')
     expect(script).toContain('validate_lock_path')
     expect(script).toContain('ensure_managed_directory')
@@ -236,7 +245,7 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('[[ ${#entries[@]} -eq 1 ]]')
     expect(script).toContain('nologin')
     expect(script).toContain('if [[ ${BASH_SOURCE[0]} == "$0" ]]')
-    expect(script).toContain('/run/lock/mydsh-deploy.lock')
+    expect(script).toContain('/run/mydsh-deploy.lock')
     expect(script).toContain('flock -n')
     expect(script).toContain('validate_lock_path')
     expect(script).toContain('sha256sum')
@@ -343,6 +352,20 @@ describe('Alibaba Cloud deployment assets', () => {
   // atomic_replace_link uses GNU mv -T. Linux CI executes these tests; Windows
   // keeps static coverage without requiring WSL, and macOS avoids BSD mv.
   describe.runIf(linuxFilesystemTestsEnabled)('Linux release-link helpers', () => {
+    it('accepts the root-owned runtime directory and rejects world-writable lock parents', () => {
+      for (const name of ['bootstrap-host.sh', 'deploy-release.sh']) {
+        expectBashSuccess(`
+set -euo pipefail
+[[ $DEPLOY_LOCK == /run/mydsh-deploy.lock ]]
+validate_lock_path "$DEPLOY_LOCK" root:root
+root=$(mktemp -d)
+trap 'chmod 0700 "$root"; rm -rf -- "$root"' EXIT
+chmod 0777 "$root"
+if (validate_lock_path "$root/mydsh-deploy.lock" "$(id -un):$(id -gn)"); then exit 90; fi
+`, name)
+      }
+    })
+
     it('atomically replaces the current link with an adjacent next link', () => {
       expectBashSuccess(`
 set -euo pipefail
@@ -1354,7 +1377,7 @@ wait "$holder"
       expect(design).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
       expect(design).toContain('/var/lib/mydsh-deploy/activation')
       expect(design).toContain('/var/lib/mydsh-deploy/uploads')
-      expect(design).toContain('/run/lock/mydsh-deploy.lock')
+      expect(design).toContain('/run/mydsh-deploy.lock')
       expect(design).toMatch(/systemd.*Caddy|systemd.*Caddy/)
       expect(design).toMatch(/public.*authenticated|公开.*认证/)
       expect(design).toMatch(/byte for byte|逐字节相同/)

@@ -3,7 +3,7 @@
 set -euo pipefail
 
 readonly MANAGED_MARKER='# Managed by DeepSeek Harness Alibaba Cloud deployment'
-readonly DEPLOY_LOCK=/run/lock/mydsh-deploy.lock
+readonly DEPLOY_LOCK=/run/mydsh-deploy.lock
 readonly RELEASES_DIR=/opt/mydsh/releases
 readonly CURRENT_LINK=/opt/mydsh/current
 readonly CADDY_CONFIG=/etc/caddy/Caddyfile

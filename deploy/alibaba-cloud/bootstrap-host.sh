@@ -2,7 +2,7 @@
 set -euo pipefail
 
 readonly MANAGED_MARKER='# Managed by DeepSeek Harness Alibaba Cloud deployment'
-readonly DEPLOY_LOCK=/run/lock/mydsh-deploy.lock
+readonly DEPLOY_LOCK=/run/mydsh-deploy.lock
 readonly NODESOURCE_FINGERPRINT=6F71F525282841EEDAF851B42F59B5F99B1BE0B4
 readonly CADDY_FINGERPRINT=65760C51EDEA2017CEA2CA15155B6D79CA56EA34
 SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
