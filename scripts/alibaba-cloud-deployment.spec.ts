@@ -541,19 +541,55 @@ trap 'rm -rf -- "$root"' EXIT
 mkdir -m 0700 "$root/.upload.abc123" "$root/.upload.def456"
 cleanup_abandoned_operation_directories "$root" .upload.
 [[ -z $(find "$root" -mindepth 1 -print -quit) ]]
+mkdir -m 0755 "$root/.verify.abc123" "$root/.verify.def456"
+cleanup_abandoned_operation_directories "$root" .verify.
+[[ -z $(find "$root" -mindepth 1 -print -quit) ]]
+mkdir "$root/.verify.invalid-name"
+if cleanup_abandoned_operation_directories "$root" .verify.; then exit 89; fi
+[[ -d "$root/.verify.invalid-name" ]]
+rm -rf "$root/.verify.invalid-name"
+if cleanup_abandoned_operation_directories "$root" .unknown.; then exit 90; fi
 mkdir "$root/outside"
 ln -s "$root/outside" "$root/.upload.bad123"
-if cleanup_abandoned_operation_directories "$root" .upload.; then exit 90; fi
+if cleanup_abandoned_operation_directories "$root" .upload.; then exit 91; fi
 [[ -L "$root/.upload.bad123" && -d "$root/outside" ]]
 rm "$root/.upload.bad123"
 printf file >"$root/.upload.file12"
-if cleanup_abandoned_operation_directories "$root" .upload.; then exit 91; fi
+if cleanup_abandoned_operation_directories "$root" .upload.; then exit 92; fi
 [[ -f "$root/.upload.file12" ]]
 rm "$root/.upload.file12"
 mkdir "$root/.extract.own123"
 stat() { if [[ "\${*: -1}" == "$root/.extract.own123" ]]; then printf 'nobody:nogroup\n'; else command stat "$@"; fi; }
-if cleanup_abandoned_operation_directories "$root" .extract.; then exit 92; fi
+if cleanup_abandoned_operation_directories "$root" .extract.; then exit 93; fi
 [[ -d "$root/.extract.own123" ]]
+`)
+    })
+
+    it('removes only exact safe active verify roots and routes EXIT cleanup', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+mkdir "$root/.verify.abc123"
+stat() { if [[ "$1" == -c && "$2" == %U:%G ]]; then printf 'root:root\n'; else command stat "$@"; fi; }
+VERIFY_ROOT="$root/.verify.abc123"
+remove_verify_root "$VERIFY_ROOT" "$root"
+[[ -z $VERIFY_ROOT && ! -e "$root/.verify.abc123" && ! -L "$root/.verify.abc123" ]]
+mkdir "$root/outside"
+ln -s "$root/outside" "$root/.verify.def456"
+VERIFY_ROOT="$root/.verify.def456"
+if remove_verify_root "$VERIFY_ROOT" "$root"; then exit 90; fi
+[[ -L "$root/.verify.def456" && -d "$root/outside" ]]
+rm "$root/.verify.def456"
+VERIFY_ROOT="$RELEASES_DIR/.verify.exit12"
+cleanup_calls=0
+remove_verify_root() {
+  [[ $1 == "$RELEASES_DIR/.verify.exit12" && $2 == "$RELEASES_DIR" ]] || return 91
+  cleanup_calls=$((cleanup_calls + 1))
+  VERIFY_ROOT=''
+}
+cleanup_operation
+[[ $cleanup_calls == 1 && -z $VERIFY_ROOT ]]
 `)
     })
 
@@ -882,24 +918,50 @@ wait "$holder"
 `)
     })
 
-    it('makes the synthetic systemd root traversable and removes it after every verification result', () => {
+    it('verifies synthetic systemd roots on the executable release filesystem', () => {
       expectBashSuccess(`
 set -euo pipefail
-fixture_parent=$(command mktemp -d)
-trap 'rm -rf -- "$fixture_parent"' EXIT
+command -v findmnt >/dev/null
+command -v systemd-analyze >/dev/null
+fixture_parent=$(command mktemp -d "$PWD/.mydsh-systemd-test.XXXXXX")
+noexec_root=$(command mktemp -d /dev/shm/mydsh-systemd-test.XXXXXX)
+trap 'rm -rf -- "$fixture_parent" "$noexec_root"' EXIT
 asset_root="$fixture_parent/assets"
-synthetic_root="$fixture_parent/mydsh-systemd-verify.test"
-mkdir "$asset_root"
-for name in Caddyfile mydsh.service caddy-mydsh.conf; do printf '%s\n' "$MANAGED_MARKER" >"$asset_root/$name"; done
-printf '[Service]\nEnvironmentFile=/etc/mydsh/public.env\n' >>"$asset_root/caddy-mydsh.conf"
+releases_root="$fixture_parent/releases"
+mkdir -m 0755 "$asset_root" "$releases_root"
+cp "${resolve(deploymentRoot, 'Caddyfile').replaceAll('\\', '/')}" "$asset_root/Caddyfile"
+cp "${resolve(deploymentRoot, 'mydsh.service').replaceAll('\\', '/')}" "$asset_root/mydsh.service"
+cp "${resolve(deploymentRoot, 'caddy-mydsh.conf').replaceAll('\\', '/')}" "$asset_root/caddy-mydsh.conf"
+populate_systemd_root() {
+  local root_path=$1
+  mkdir -p "$root_path/etc/systemd/system/caddy.service.d" "$root_path/usr/bin" "$root_path/srv/mydsh/workspace" "$root_path/var/lib/mydsh" "$root_path/etc/mydsh" "$root_path/opt/mydsh/current/apps/cli/lib"
+  chmod 0755 \
+    "$root_path" "$root_path/etc" "$root_path/etc/systemd" "$root_path/etc/systemd/system" \
+    "$root_path/etc/systemd/system/caddy.service.d" "$root_path/etc/mydsh" "$root_path/usr" "$root_path/usr/bin" \
+    "$root_path/srv" "$root_path/srv/mydsh" "$root_path/srv/mydsh/workspace" "$root_path/var" "$root_path/var/lib" \
+    "$root_path/var/lib/mydsh" "$root_path/opt" "$root_path/opt/mydsh" "$root_path/opt/mydsh/current" \
+    "$root_path/opt/mydsh/current/apps" "$root_path/opt/mydsh/current/apps/cli" "$root_path/opt/mydsh/current/apps/cli/lib"
+  cp "$asset_root/mydsh.service" "$root_path/etc/systemd/system/mydsh.service"
+  cp "$asset_root/caddy-mydsh.conf" "$root_path/etc/systemd/system/caddy.service.d/mydsh.conf"
+  printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$root_path/etc/systemd/system/caddy.service"
+  printf 'mydsh:x:999:999::/var/lib/mydsh:/usr/sbin/nologin\n' >"$root_path/etc/passwd"
+  printf 'mydsh:x:999:\n' >"$root_path/etc/group"
+  touch "$root_path/usr/bin/node" "$root_path/usr/bin/caddy" "$root_path/opt/mydsh/current/apps/cli/lib/bin.js" "$root_path/etc/mydsh/public.env" "$root_path/etc/mydsh/mydsh.env"
+  chmod 0644 "$root_path/etc/systemd/system/mydsh.service" "$root_path/etc/systemd/system/caddy.service.d/mydsh.conf" "$root_path/etc/systemd/system/caddy.service" "$root_path/etc/passwd" "$root_path/etc/group" "$root_path/etc/mydsh/public.env"
+  chmod 0600 "$root_path/etc/mydsh/mydsh.env"
+  chmod 0755 "$root_path/usr/bin/node" "$root_path/usr/bin/caddy" "$root_path/opt/mydsh/current/apps/cli/lib/bin.js"
+}
+populate_systemd_root "$noexec_root"
+noexec_options=$(findmnt -no OPTIONS -T "$noexec_root")
+[[ ,$noexec_options, == *,noexec,* ]]
+if command systemd-analyze --root="$noexec_root" verify --recursive-errors=no mydsh.service caddy.service >"$fixture_parent/noexec.log" 2>&1; then exit 90; fi
+grep -F 'Permission denied' "$fixture_parent/noexec.log"
 validate_control_plane_match() { return 0; }
 validate_candidate_unit_contract() { return 0; }
-validate_temp_directory() { return 0; }
 caddy() { return 0; }
 mktemp() {
-  [[ $1 == -d && $2 == /run/mydsh-systemd-verify.XXXXXX ]] || return 91
-  command mkdir -m 0700 "$synthetic_root"
-  printf '%s\n' "$synthetic_root"
+  [[ $1 == -d && $2 == "$releases_root/.verify.XXXXXX" ]] || return 91
+  command mktemp "$@"
 }
 install() {
   [[ $# -eq 4 && $1 == -m && $2 == 0644 ]] || return 92
@@ -910,13 +972,31 @@ install() {
   esac
   command chmod 0644 "$4"
 }
+stat() {
+  if [[ "$1" == -c && "$2" == %U:%G && ( "\${*: -1}" == "$releases_root" || "\${*: -1}" == "$releases_root"/.verify.* ) ]]; then
+    printf 'root:root\n'
+  else
+    command stat "$@"
+  fi
+}
+id() {
+  case "$1 \${2:-}" in
+    '-u mydsh'|'-g mydsh') printf '999\n' ;;
+    *) command id "$@" ;;
+  esac
+}
 systemd_should_fail=false
 systemd_calls=0
 systemd-analyze() {
   [[ $# -eq 5 && $1 == --root=* && $2 == verify && $3 == --recursive-errors=no && $4 == mydsh.service && $5 == caddy.service ]] || return 94
   local root_path=\${1#--root=}
+  local mount_options
   local path
   local mode
+  local files
+  [[ \${root_path%/*} == "$releases_root" && \${root_path##*/} =~ ^\.verify\.[A-Za-z0-9]{6}$ ]]
+  mount_options=$(findmnt -no OPTIONS -T "$root_path")
+  [[ ,$mount_options, != *,noexec,* ]]
   local directories=(
     '' /etc /etc/systemd /etc/systemd/system /etc/systemd/system/caddy.service.d /etc/mydsh
     /usr /usr/bin /srv /srv/mydsh /srv/mydsh/workspace /var /var/lib /var/lib/mydsh
@@ -936,22 +1016,28 @@ systemd-analyze() {
     /usr/bin/node:755 \
     /usr/bin/caddy:755 \
     /opt/mydsh/current/apps/cli/lib/bin.js:755 \
+    /etc/passwd:644 \
+    /etc/group:644 \
     /etc/mydsh/public.env:644 \
     /etc/mydsh/mydsh.env:600; do
     path=\${spec%:*}
     mode=$(command stat -c %a -- "$root_path$path")
     [[ $mode == "\${spec##*:}" ]] || return 95
   done
+  files=$(find "$root_path" -type f -printf '%P\n' | sort)
+  [[ $files == $'etc/group\netc/mydsh/mydsh.env\netc/mydsh/public.env\netc/passwd\netc/systemd/system/caddy.service\netc/systemd/system/caddy.service.d/mydsh.conf\netc/systemd/system/mydsh.service\nopt/mydsh/current/apps/cli/lib/bin.js\nusr/bin/caddy\nusr/bin/node' ]] || return 96
   [[ ! -s "$root_path/etc/mydsh/public.env" && ! -s "$root_path/etc/mydsh/mydsh.env" ]] || return 96
+  if grep -R -E 'DSH_INVITE_(CODE|SESSION)_SECRET=' "$root_path" >/dev/null 2>&1; then return 97; fi
+  command systemd-analyze "$@" || return 98
   systemd_calls=$((systemd_calls + 1))
   [[ $systemd_should_fail == false ]]
 }
 umask 077
-validate_candidate_configs "$asset_root"
-[[ $systemd_calls == 1 && ! -e "$synthetic_root" && ! -L "$synthetic_root" ]]
+validate_candidate_configs "$asset_root" "$releases_root"
+[[ $systemd_calls == 1 && -z $(find "$releases_root" -mindepth 1 -print -quit) ]]
 systemd_should_fail=true
-if validate_candidate_configs "$asset_root"; then exit 97; fi
-[[ $systemd_calls == 2 && ! -e "$synthetic_root" && ! -L "$synthetic_root" ]]
+if validate_candidate_configs "$asset_root" "$releases_root"; then exit 99; fi
+[[ $systemd_calls == 2 && -z $(find "$releases_root" -mindepth 1 -print -quit) ]]
 `)
     })
 

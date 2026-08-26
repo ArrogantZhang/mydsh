@@ -32,6 +32,7 @@ TRUST_ROOT=''
 CREATED_TEMP_FILE=''
 REGISTERED_TEMP_FILES=()
 OPERATION_ROOT=''
+VERIFY_ROOT=''
 MANIFEST_COMMIT=''
 MANIFEST_REF=''
 
@@ -91,6 +92,9 @@ cleanup_operation() {
     esac
   fi
   if [[ -n "$OPERATION_ROOT" && "$OPERATION_ROOT" == "$RELEASES_DIR/.extract."* ]]; then rm -rf -- "$OPERATION_ROOT" || true; fi
+  if [[ -n "$VERIFY_ROOT" ]] && ! remove_verify_root "$VERIFY_ROOT" "$RELEASES_DIR"; then
+    printf 'mydsh-deploy-release: refusing unsafe verify-root cleanup: %s\n' "$VERIFY_ROOT" >&2
+  fi
 }
 
 registered_temp_path_is_safe() {
@@ -307,10 +311,13 @@ validate_host() {
 
 validate_candidate_configs() {
   local asset_root=$1
+  local releases_root=${2:-$RELEASES_DIR}
   local caddy_candidate="$asset_root/Caddyfile"
   local unit_candidate="$asset_root/mydsh.service"
   local dropin_candidate="$asset_root/caddy-mydsh.conf"
   local candidate
+  local mydsh_gid
+  local mydsh_uid
   local resolved
   local verify_directories=()
   local verify_root
@@ -329,9 +336,10 @@ validate_candidate_configs() {
   grep -Fqx '[Service]' "$dropin_candidate" || return 1
   grep -Fqx 'EnvironmentFile=/etc/mydsh/public.env' "$dropin_candidate" || return 1
   caddy validate --config "$CADDY_CONFIG" --adapter caddyfile || return 1
-  verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX) || return 1
-  validate_temp_directory "$verify_root" /run mydsh-systemd-verify. || return 1
-  mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib" || { rm -rf -- "$verify_root" || true; return 1; }
+  verify_root=$(mktemp -d "$releases_root/.verify.XXXXXX") || return 1
+  verify_root_is_safe "$verify_root" "$releases_root" || return 1
+  VERIFY_ROOT=$verify_root
+  mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
   verify_directories=(
     "$verify_root"
     "$verify_root/etc"
@@ -354,19 +362,23 @@ validate_candidate_configs() {
     "$verify_root/opt/mydsh/current/apps/cli"
     "$verify_root/opt/mydsh/current/apps/cli/lib"
   )
-  chmod 0755 "${verify_directories[@]}" || { rm -rf -- "$verify_root" || true; return 1; }
-  install -m 0644 "$DSH_UNIT" "$verify_root/etc/systemd/system/mydsh.service" || { rm -rf -- "$verify_root" || true; return 1; }
-  install -m 0644 "$CADDY_DROPIN" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { rm -rf -- "$verify_root" || true; return 1; }
-  printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service" || { rm -rf -- "$verify_root" || true; return 1; }
-  touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
-  chmod 0644 "$verify_root/etc/systemd/system/caddy.service" "$verify_root/etc/mydsh/public.env" || { rm -rf -- "$verify_root" || true; return 1; }
-  chmod 0600 "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
-  chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" || { rm -rf -- "$verify_root" || true; return 1; }
+  chmod 0755 "${verify_directories[@]}" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  install -m 0644 "$DSH_UNIT" "$verify_root/etc/systemd/system/mydsh.service" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  install -m 0644 "$CADDY_DROPIN" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  mydsh_uid=$(id -u mydsh) || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  mydsh_gid=$(id -g mydsh) || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  printf 'mydsh:x:%s:%s::/var/lib/mydsh:/usr/sbin/nologin\n' "$mydsh_uid" "$mydsh_gid" >"$verify_root/etc/passwd" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  printf 'mydsh:x:%s:\n' "$mydsh_gid" >"$verify_root/etc/group" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  chmod 0644 "$verify_root/etc/systemd/system/caddy.service" "$verify_root/etc/passwd" "$verify_root/etc/group" "$verify_root/etc/mydsh/public.env" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  chmod 0600 "$verify_root/etc/mydsh/mydsh.env" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
+  chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" || { remove_verify_root "$verify_root" "$releases_root" || true; return 1; }
   if ! systemd-analyze --root="$verify_root" verify --recursive-errors=no mydsh.service caddy.service; then
-    rm -rf -- "$verify_root" || true
+    remove_verify_root "$verify_root" "$releases_root" || true
     return 1
   fi
-  rm -rf -- "$verify_root" || return 1
+  remove_verify_root "$verify_root" "$releases_root" || return 1
 }
 
 validate_control_plane_match() {
@@ -427,6 +439,35 @@ validate_temp_directory() {
   local prefix=$3
   [[ -n "$path" && "$path" == "$parent/$prefix"* && -d "$path" && ! -L "$path" ]] || return 1
   [[ $(realpath -e -- "$path") == "$path" ]] || return 1
+}
+
+verify_root_is_safe() {
+  local path=$1
+  local releases_root=${2:-$RELEASES_DIR}
+  local name=${path##*/}
+  local owner
+  local releases_owner
+  local resolved
+  local resolved_releases
+
+  [[ $name =~ ^\.verify\.[A-Za-z0-9]{6}$ && $path == "$releases_root/$name" ]] || return 1
+  [[ -d "$releases_root" && ! -L "$releases_root" ]] || return 1
+  resolved_releases=$(realpath -e -- "$releases_root") || return 1
+  releases_owner=$(stat -c '%U:%G' -- "$releases_root") || return 1
+  [[ $resolved_releases == "$releases_root" && $releases_owner == root:root ]] || return 1
+  [[ -d "$path" && ! -L "$path" ]] || return 1
+  resolved=$(realpath -e -- "$path") || return 1
+  owner=$(stat -c '%U:%G' -- "$path") || return 1
+  [[ $resolved == "$path" && ${resolved%/*} == "$releases_root" && $owner == root:root ]]
+}
+
+remove_verify_root() {
+  local path=$1
+  local releases_root=${2:-$RELEASES_DIR}
+
+  verify_root_is_safe "$path" "$releases_root" || return 1
+  rm -rf -- "$path" || return 1
+  if [[ $VERIFY_ROOT == "$path" ]]; then VERIFY_ROOT=''; fi
 }
 
 remove_new_publication() {
@@ -735,7 +776,7 @@ cleanup_abandoned_operation_directories() (
   local root_owner
   local resolved
   local candidates=()
-  [[ $prefix == .upload. || $prefix == .extract. ]] || return 1
+  [[ $prefix == .upload. || $prefix == .extract. || $prefix == .verify. ]] || return 1
   [[ -d "$root" && ! -L "$root" && $(realpath -e -- "$root") == "$root" ]] || return 1
   root_owner=$(stat -c '%U:%G' -- "$root") || return 1
   [[ $root_owner == root:root ]] || return 1
@@ -743,11 +784,11 @@ cleanup_abandoned_operation_directories() (
   candidates=("$root"/"$prefix"*)
   for candidate in "${candidates[@]}"; do
     name=${candidate##*/}
-    if [[ $prefix == .upload. ]]; then
-      [[ $name =~ ^\.upload\.[A-Za-z0-9]{6}$ ]] || return 1
-    else
-      [[ $name =~ ^\.extract\.[A-Za-z0-9]{6}$ ]] || return 1
-    fi
+    case $prefix in
+      .upload.) [[ $name =~ ^\.upload\.[A-Za-z0-9]{6}$ ]] || return 1 ;;
+      .extract.) [[ $name =~ ^\.extract\.[A-Za-z0-9]{6}$ ]] || return 1 ;;
+      .verify.) [[ $name =~ ^\.verify\.[A-Za-z0-9]{6}$ ]] || return 1 ;;
+    esac
     [[ -d "$candidate" && ! -L "$candidate" ]] || return 1
     resolved=$(realpath -e -- "$candidate") || return 1
     owner=$(stat -c '%U:%G' -- "$candidate") || return 1
@@ -1262,6 +1303,7 @@ main() {
   validate_host
   cleanup_abandoned_operation_directories "$UPLOADS_DIR" .upload. || fail 'unsafe abandoned upload staging entry requires operator inspection'
   cleanup_abandoned_operation_directories "$RELEASES_DIR" .extract. || fail 'unsafe abandoned extraction staging entry requires operator inspection'
+  cleanup_abandoned_operation_directories "$RELEASES_DIR" .verify. || fail 'unsafe abandoned systemd verification entry requires operator inspection'
   if [[ $1 == --rollback ]]; then
     rollback_to_commit "$2"
   elif [[ $1 == --prune ]]; then
