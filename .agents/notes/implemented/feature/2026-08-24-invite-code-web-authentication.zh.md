@@ -26,7 +26,7 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 候选 release 绝不会在生产宿主上构建。选定的具名 Git ref 提供 `package-release.sh`；脚本会对照该 ref 检查自身字节并创建可信解压目录，再在 digest 固定、使用全新本地状态且没有生产环境的临时官方 Node 24 Linux 容器中，执行固定 pnpm 安装、冻结依赖、invite-auth 测试、完整构建和配置转储。CPU、内存、进程数和运行时间受限；网络与磁盘使用量不受限。容器只能写入精确源码 tree 的副本，不能接触调用者输出目录。容器退出后，宿主把每个静态安全输入与可信解压目录逐字节比较，生成 manifest 和 checksum，再通过一次目录重命名发布完整 artifact-set 目录。服务器仅支持 Linux amd64，没有 builder 身份、pnpm、源码 checkout、生命周期执行、测试运行器或候选构建缓存。
 
-通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。本地 packager 和宿主 helper 执行相同的压缩大小、member 数量、单个 member 和展开大小 artifact 限制。helper 还会为每个 member 预算文件系统 metadata 和备用 inode，要求以 commit 命名的 artifact-set 目录中恰好只有 archive 和 checksum，把两者复制到持久的 root-private 新 inode，拒绝不安全 archive member 和越界链接，并验证 manifest 格式、commit、具名 ref、Linux amd64 平台、固定镜像 digest、运行时输出和 helper journal 兼容版本。与已安装控制平面的逐字节比较关闭了候选配置语法；helper 绝不会执行 release 内的控制流。
+通过 SSH 交付的 SHA-256 sidecar 能发现 artifact 损坏，但不是真实性证明。部署信任精确的已评审本地 ref，以及打包前另行验证的签名 tag 或 commit。本地 packager 和宿主 helper 执行相同的压缩大小、member 数量、单个 member 和展开大小 artifact 限制。helper 还会为每个 member 预算文件系统 metadata 和备用 inode，要求以 commit 命名的 artifact-set 目录中恰好只有 archive 和 checksum，把两者复制到持久的 root-private 新 inode，拒绝不安全 archive member 和越界链接，并验证 manifest 格式、commit、具名 ref、Linux amd64 平台、固定镜像 digest、运行时输出和 helper journal 兼容版本。与已安装控制平面的逐字节比较关闭了候选配置语法；helper 绝不会执行 release 内的控制流。候选 systemd 验证使用短生命周期的合成根目录，其完整目录链均可遍历且 mode 为 `0755`，占位文件为空且 mode 与真实语义一致。秘密值绝不进入该根目录，经过验证的创建路径会在验证成功或失败后将其删除。
 
 ## 会话和滥用控制
 

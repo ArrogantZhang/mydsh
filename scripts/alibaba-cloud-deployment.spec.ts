@@ -882,6 +882,79 @@ wait "$holder"
 `)
     })
 
+    it('makes the synthetic systemd root traversable and removes it after every verification result', () => {
+      expectBashSuccess(`
+set -euo pipefail
+fixture_parent=$(command mktemp -d)
+trap 'rm -rf -- "$fixture_parent"' EXIT
+asset_root="$fixture_parent/assets"
+synthetic_root="$fixture_parent/mydsh-systemd-verify.test"
+mkdir "$asset_root"
+for name in Caddyfile mydsh.service caddy-mydsh.conf; do printf '%s\n' "$MANAGED_MARKER" >"$asset_root/$name"; done
+printf '[Service]\nEnvironmentFile=/etc/mydsh/public.env\n' >>"$asset_root/caddy-mydsh.conf"
+validate_control_plane_match() { return 0; }
+validate_candidate_unit_contract() { return 0; }
+validate_temp_directory() { return 0; }
+caddy() { return 0; }
+mktemp() {
+  [[ $1 == -d && $2 == /run/mydsh-systemd-verify.XXXXXX ]] || return 91
+  command mkdir -m 0700 "$synthetic_root"
+  printf '%s\n' "$synthetic_root"
+}
+install() {
+  [[ $# -eq 4 && $1 == -m && $2 == 0644 ]] || return 92
+  case $4 in
+    */mydsh.service) command cp "$asset_root/mydsh.service" "$4" ;;
+    */mydsh.conf) command cp "$asset_root/caddy-mydsh.conf" "$4" ;;
+    *) return 93 ;;
+  esac
+  command chmod 0644 "$4"
+}
+systemd_should_fail=false
+systemd_calls=0
+systemd-analyze() {
+  [[ $# -eq 5 && $1 == --root=* && $2 == verify && $3 == --recursive-errors=no && $4 == mydsh.service && $5 == caddy.service ]] || return 94
+  local root_path=\${1#--root=}
+  local path
+  local mode
+  local directories=(
+    '' /etc /etc/systemd /etc/systemd/system /etc/systemd/system/caddy.service.d /etc/mydsh
+    /usr /usr/bin /srv /srv/mydsh /srv/mydsh/workspace /var /var/lib /var/lib/mydsh
+    /opt /opt/mydsh /opt/mydsh/current /opt/mydsh/current/apps /opt/mydsh/current/apps/cli /opt/mydsh/current/apps/cli/lib
+  )
+  for path in "\${directories[@]}"; do
+    mode=$(command stat -c %a -- "$root_path$path")
+    if [[ $mode != 755 ]]; then
+      printf '%s: Permission denied (directory %s mode %s)\n' "$root_path/usr/bin/node" "$root_path$path" "$mode" >&2
+      return 1
+    fi
+  done
+  for spec in \
+    /etc/systemd/system/mydsh.service:644 \
+    /etc/systemd/system/caddy.service.d/mydsh.conf:644 \
+    /etc/systemd/system/caddy.service:644 \
+    /usr/bin/node:755 \
+    /usr/bin/caddy:755 \
+    /opt/mydsh/current/apps/cli/lib/bin.js:755 \
+    /etc/mydsh/public.env:644 \
+    /etc/mydsh/mydsh.env:600; do
+    path=\${spec%:*}
+    mode=$(command stat -c %a -- "$root_path$path")
+    [[ $mode == "\${spec##*:}" ]] || return 95
+  done
+  [[ ! -s "$root_path/etc/mydsh/public.env" && ! -s "$root_path/etc/mydsh/mydsh.env" ]] || return 96
+  systemd_calls=$((systemd_calls + 1))
+  [[ $systemd_should_fail == false ]]
+}
+umask 077
+validate_candidate_configs "$asset_root"
+[[ $systemd_calls == 1 && ! -e "$synthetic_root" && ! -L "$synthetic_root" ]]
+systemd_should_fail=true
+if validate_candidate_configs "$asset_root"; then exit 97; fi
+[[ $systemd_calls == 2 && ! -e "$synthetic_root" && ! -L "$synthetic_root" ]]
+`)
+    })
+
     it('validates checksum, manifest, required outputs, listeners, and sync paths', () => {
       expectBashSuccess(`
 set -euo pipefail

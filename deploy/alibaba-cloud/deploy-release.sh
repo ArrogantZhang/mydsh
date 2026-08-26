@@ -312,6 +312,7 @@ validate_candidate_configs() {
   local dropin_candidate="$asset_root/caddy-mydsh.conf"
   local candidate
   local resolved
+  local verify_directories=()
   local verify_root
 
   for candidate in "$caddy_candidate" "$unit_candidate" "$dropin_candidate"; do
@@ -331,10 +332,35 @@ validate_candidate_configs() {
   verify_root=$(mktemp -d /run/mydsh-systemd-verify.XXXXXX) || return 1
   validate_temp_directory "$verify_root" /run mydsh-systemd-verify. || return 1
   mkdir -p "$verify_root/etc/systemd/system/caddy.service.d" "$verify_root/usr/bin" "$verify_root/srv/mydsh/workspace" "$verify_root/var/lib/mydsh" "$verify_root/etc/mydsh" "$verify_root/opt/mydsh/current/apps/cli/lib" || { rm -rf -- "$verify_root" || true; return 1; }
+  verify_directories=(
+    "$verify_root"
+    "$verify_root/etc"
+    "$verify_root/etc/systemd"
+    "$verify_root/etc/systemd/system"
+    "$verify_root/etc/systemd/system/caddy.service.d"
+    "$verify_root/etc/mydsh"
+    "$verify_root/usr"
+    "$verify_root/usr/bin"
+    "$verify_root/srv"
+    "$verify_root/srv/mydsh"
+    "$verify_root/srv/mydsh/workspace"
+    "$verify_root/var"
+    "$verify_root/var/lib"
+    "$verify_root/var/lib/mydsh"
+    "$verify_root/opt"
+    "$verify_root/opt/mydsh"
+    "$verify_root/opt/mydsh/current"
+    "$verify_root/opt/mydsh/current/apps"
+    "$verify_root/opt/mydsh/current/apps/cli"
+    "$verify_root/opt/mydsh/current/apps/cli/lib"
+  )
+  chmod 0755 "${verify_directories[@]}" || { rm -rf -- "$verify_root" || true; return 1; }
   install -m 0644 "$DSH_UNIT" "$verify_root/etc/systemd/system/mydsh.service" || { rm -rf -- "$verify_root" || true; return 1; }
   install -m 0644 "$CADDY_DROPIN" "$verify_root/etc/systemd/system/caddy.service.d/mydsh.conf" || { rm -rf -- "$verify_root" || true; return 1; }
   printf '[Service]\nExecStart=/usr/bin/caddy\n' >"$verify_root/etc/systemd/system/caddy.service" || { rm -rf -- "$verify_root" || true; return 1; }
   touch "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" "$verify_root/etc/mydsh/public.env" "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
+  chmod 0644 "$verify_root/etc/systemd/system/caddy.service" "$verify_root/etc/mydsh/public.env" || { rm -rf -- "$verify_root" || true; return 1; }
+  chmod 0600 "$verify_root/etc/mydsh/mydsh.env" || { rm -rf -- "$verify_root" || true; return 1; }
   chmod 0755 "$verify_root/usr/bin/node" "$verify_root/usr/bin/caddy" "$verify_root/opt/mydsh/current/apps/cli/lib/bin.js" || { rm -rf -- "$verify_root" || true; return 1; }
   if ! systemd-analyze --root="$verify_root" verify --recursive-errors=no mydsh.service caddy.service; then
     rm -rf -- "$verify_root" || true
