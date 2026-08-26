@@ -35,8 +35,8 @@
 ### 组装与浏览器覆盖
 
 - `deploy/alibaba-cloud/invite-auth.cordis.yml`：在发布的 Web 组合包后应用的可选插件配置项。
-- `apps/web/tests/invite-auth.e2e.ts`：真实 Web 组装的登录页流程。
-- `apps/web/tests/snapshots/invite-auth/login.expected.md`：面向产品用户的 ARIA golden。
+- `apps/web/tests/invite-auth.e2e.ts`：真实 Web 组装的登录页和无效表单流程。
+- `apps/web/tests/snapshots/invite-auth/login.expected.md`、`invalid.expected.md`：面向产品用户的 ARIA golden。
 - `apps/cli/package.json`：让覆盖层插件可从发布的 CLI 安装中解析。
 - `apps/cli/tsconfig.json`：把 CLI 编译器图连接到可选 Host 包。
 - `scripts/verify-cordis-config.ts`：把部署覆盖层归类为由 app 解析的配置。
@@ -410,7 +410,7 @@ export function securityHeaders(): Record<string, string> {
   return {
     'cache-control': 'no-store',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-    'referrer-policy': 'no-referrer',
+    'referrer-policy': 'same-origin',
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
   }
@@ -793,6 +793,7 @@ git commit -m "docs(invite-auth): define authentication contract"
 
 - 新建：`apps/web/tests/invite-auth.e2e.ts`
 - 新建：`apps/web/tests/snapshots/invite-auth/login.expected.md`
+- 新建：`apps/web/tests/snapshots/invite-auth/invalid.expected.md`
 
 - [ ] **步骤 1：编写失败的 Web 场景**
 
@@ -808,7 +809,7 @@ expect((await page.content()).includes(INVITE_CODE)).toBe(false)
 expect((await page.content()).includes(SESSION_SECRET)).toBe(false)
 ```
 
-添加 inventory 断言，只允许 `login.expected.md`。该场景不提交表单，因为 TLS 与 `forward_auth` 属于 Caddy；包的真实 Loader HTTP 测试已经负责成功 POST 和 Cookie 行为。
+添加 inventory 断言，只允许 `login.expected.md` 和 `invalid.expected.md`。Playwright 请求桥接层提供 Caddy 转发 header，并把回环 HTTP 测试传输映射为外部 HTTPS origin，但不会替 Chromium 编造 `Origin`。通过表单提交一个非秘密的错误邀请码，并要求浏览器 origin 具体可验证、状态为 `401`、出现中文 `role="alert"` 消息、安全 `next` 字段得以保留，而且 HTML、ARIA 和控制台输出都不含启动秘密。成功 POST 与 Cookie 行为仍由包的真实 Loader HTTP 测试负责。
 
 - [ ] **步骤 2：构建并运行 replay，以观察缺失 golden**
 
@@ -822,7 +823,7 @@ corepack pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/invit
 Remove-Item Env:DSH_SNAPSHOT
 ```
 
-预期：因为缺少 `login.expected.md` 而失败。
+预期：因为缺少预期的 ARIA golden 而失败。
 
 - [ ] **步骤 3：刷新、审阅并 replay golden**
 
@@ -834,12 +835,12 @@ corepack pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/invit
 Remove-Item Env:DSH_SNAPSHOT
 ```
 
-预期：refresh 写入一个 ARIA 快照；replay 通过。审阅 golden，确认其包含标题、密码输入框、说明文字和进入按钮，但不含秘密。
+预期：refresh 写入两个 ARIA 快照且 replay 通过。审阅 golden，确认它们包含标题、密码输入框、说明文字和进入按钮，仅在提交后的状态包含无效邀请码 alert，且都不含秘密。
 
 - [ ] **步骤 4：提交浏览器证据**
 
 ```bash
-git add apps/web/tests/invite-auth.e2e.ts apps/web/tests/snapshots/invite-auth/login.expected.md
+git add apps/web/tests/invite-auth.e2e.ts apps/web/tests/snapshots/invite-auth/login.expected.md apps/web/tests/snapshots/invite-auth/invalid.expected.md
 git commit -m "test(invite-auth): snapshot the login page"
 ```
 

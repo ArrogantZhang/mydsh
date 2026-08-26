@@ -67,7 +67,7 @@ Caddy 对 `/__invite/*` 直接反向代理，以便未登录浏览器加载登�
 - `GET /__invite/check` 供 Caddy `forward_auth` 调用；有效 Cookie 返回 `204`，未登录的页面导航返回登录跳转，其他请求返回 `401`。
 - `POST /__invite/logout` 清除 Cookie，并返回登录页跳转。
 
-`next` 只接受以单个 `/` 开头的站内绝对路径；协议相对地址、完整 URL、反斜杠和无法解析的值都回退到 `/`。登录提交只接受 `application/x-www-form-urlencoded`，并要求转发协议为 HTTPS，且 `Origin` 与公网 Host 一致。
+`next` 只接受以单个 `/` 开头的站内绝对路径；协议相对地址、完整 URL、反斜杠和无法解析的值都回退到 `/`。登录提交只接受 `application/x-www-form-urlencoded`，并要求转发协议为 HTTPS，且 `Origin` 与公网 Host 一致。登录响应使用 `Referrer-Policy: same-origin`，既抑制跨源 `Referer`，又让同源导航表单 POST 携带具体的 `Origin`；`Origin: null` 仍视为未授权。
 
 Caddy 为登录与鉴权请求设置一个专用的客户端地址 header。插件仅在 TCP peer 为回环地址时信任该 header，否则使用 socket peer 地址，避免公网客户端伪造限流身份。
 
@@ -77,7 +77,7 @@ Caddy 为登录与鉴权请求设置一个专用的客户端地址 header。插�
 
 修改共享邀请码只影响后续登录；轮换会话密钥会立即撤销所有已签发 Cookie。退出只清除当前浏览器的 Cookie。
 
-登录页面和所有鉴权响应发送 `Cache-Control: no-store`，并设置限制脚本和资源来源的 CSP、`X-Content-Type-Options: nosniff`、禁止 framing 的策略和严格的 referrer policy。插件不记录邀请码、会话 token、Cookie header 或环境变量值。
+登录页面和所有鉴权响应发送 `Cache-Control: no-store`，并设置限制脚本和资源来源的 CSP、`X-Content-Type-Options: nosniff`、禁止 framing 的策略和 `Referrer-Policy: same-origin`。插件不记录邀请码、会话 token、Cookie header 或环境变量值。
 
 ## 失败行为
 
@@ -117,7 +117,7 @@ root 安装的 helper 会在 root-only 的同级 `activation.new.*` 目录中构
 
 使用 `dsh-host-webserver` 的临时回环端口运行插件集成测试，覆盖登录页面、错误和正确邀请码、Cookie 属性、鉴权端点、退出、来源拒绝、大小拒绝、限流和安全响应 header。Web profile 组合测试应用部署覆盖层，证明插件在 `webserver` 后挂载，并证明发布的 Web 组合包在没有鉴权秘密时仍可正常使用。
 
-实现按仓库规则增加对应包 README、中文配对文档与 Agent Note，并运行相关单元/集成测试、类型检查、构建、配置检查、文档同步检查和 `git diff --check`。登录页面属于产品可见行为，因此增加一个无需模型密钥的真实 Web 组合快照。
+实现按仓库规则增加对应包 README、中文配对文档与 Agent Note，并运行相关单元/集成测试、类型检查、构建、配置检查、文档同步检查和 `git diff --check`。登录页面属于产品可见行为，因此无模型密钥的真实 Web 组合浏览器测试会为初始状态和 Chromium 以可验证同源 `Origin` 提交表单后的无效邀请码 alert 分别生成快照。
 
 服务器验收必须证明候选和已安装 Caddy 配置有效、候选 systemd unit 和 drop-in 通过验证、活动 MainPID 属于 `mydsh`、`current` 指向候选 release，并且恰好只有一个 `127.0.0.1:3080` listener，不存在通配、公网、IPv6 或重复 listener。有界的公开 HTTPS 检查要求未认证 HTML 重定向且 API 流量返回 `401`；root helper 还会执行认证登录，且不打印邀请码、Cookie 或响应头。手动验收还会证明公网证书、SSE 和 WebSocket 拒绝、退出登录、30 天浏览器复用、篡改拒绝、串行化回滚以及 `DSH_HOME` 数据保留。
 

@@ -67,7 +67,7 @@ The plugin provides these routes:
 - `GET /__invite/check` serves Caddy `forward_auth`; a valid cookie returns `204`, an unauthorized page navigation returns a login redirect, and other requests return `401`.
 - `POST /__invite/logout` clears the cookie and redirects to the login page.
 
-`next` accepts only same-site absolute paths that start with one `/`; scheme-relative addresses, full URLs, backslashes, and unparseable values fall back to `/`. Login submission accepts only `application/x-www-form-urlencoded`, requires the forwarded protocol to be HTTPS, and requires `Origin` to match the public Host.
+`next` accepts only same-site absolute paths that start with one `/`; scheme-relative addresses, full URLs, backslashes, and unparseable values fall back to `/`. Login submission accepts only `application/x-www-form-urlencoded`, requires the forwarded protocol to be HTTPS, and requires `Origin` to match the public Host. The login response uses `Referrer-Policy: same-origin`, which suppresses cross-origin `Referer` while letting a same-origin navigation form POST carry a concrete `Origin`; `Origin: null` remains unauthorized.
 
 Caddy sets a dedicated client-address header on login and authorization requests. The plugin trusts that header only when the TCP peer is a loopback address; otherwise it uses the socket peer address, preventing a public client from forging its rate-limit identity.
 
@@ -77,7 +77,7 @@ Successful login issues a stateless token containing a version, expiration time,
 
 Changing the shared invite code affects only later logins; rotating the session secret immediately revokes every issued cookie. Logout clears only the current browser's cookie.
 
-The login page and all authentication responses send `Cache-Control: no-store`, a CSP that restricts script and resource sources, `X-Content-Type-Options: nosniff`, a policy that forbids framing, and a strict referrer policy. The plugin never logs the invite code, session token, Cookie header, or environment-variable values.
+The login page and all authentication responses send `Cache-Control: no-store`, a CSP that restricts script and resource sources, `X-Content-Type-Options: nosniff`, a policy that forbids framing, and `Referrer-Policy: same-origin`. The plugin never logs the invite code, session token, Cookie header, or environment-variable values.
 
 ## Failure behavior
 
@@ -117,7 +117,7 @@ Plugin unit tests cover invite-code comparison, token issuance, lifetime, tamper
 
 Plugin integration tests use a temporary loopback port from `dsh-host-webserver` and cover the login page, incorrect and correct invite codes, cookie attributes, the authorization endpoint, logout, origin rejection, size rejection, rate limiting, and security response headers. A Web profile composition test applies the deployment overlay, proves that the plugin mounts after `webserver`, and proves that the shipped Web bundle remains usable without authentication secrets.
 
-Implementation adds the package README, its Chinese counterpart, and an Agent Note as required by the repository. It runs the focused unit and integration tests, typecheck, build, configuration checks, doc-sync, and `git diff --check`. Because the login page is product-visible behavior, implementation also adds a real Web composition snapshot that requires no model credentials.
+Implementation adds the package README, its Chinese counterpart, and an Agent Note as required by the repository. It runs the focused unit and integration tests, typecheck, build, configuration checks, doc-sync, and `git diff --check`. Because the login page is product-visible behavior, a keyless real Web composition browser test snapshots both its initial state and the invalid-invite alert after Chromium submits the form with a verifiable same-origin `Origin`.
 
 Server acceptance must prove that the candidate and installed Caddy configurations are valid, the candidate systemd unit and drop-in verify, the active MainPID belongs to `mydsh`, `current` names the candidate, and exactly one listener exists at `127.0.0.1:3080` with no wildcard, public, IPv6, or duplicate listener. Bounded public HTTPS checks require unauthenticated HTML to redirect and API traffic to return `401`; the root helper also performs an authenticated login without printing the invite code, cookie, or response headers. Manual acceptance additionally proves the public certificate, SSE and WebSocket denial, logout, 30-day browser reuse, tamper rejection, serialized rollback, and preserved `DSH_HOME` data.
 

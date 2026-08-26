@@ -1,6 +1,7 @@
 // Browser coverage for the deployment overlay's unauthenticated login page.
-// The scenario reaches the real Host route but deliberately does not submit:
-// Caddy owns the TLS, origin, and forward-auth integration around that POST.
+// The request bridge supplies Caddy's trusted forwarding headers and maps the
+// loopback test transport to its external HTTPS origin; Chromium still owns
+// form navigation and the Origin header supplied to that bridge.
 import { fileURLToPath } from 'node:url'
 import { join } from 'node:path'
 import type { Browser, Page } from 'playwright'
@@ -15,6 +16,7 @@ import { ZH_BROWSER_LOCALE, saveFailureShot } from './support.ts'
 const DEPLOYMENT_OVERLAY = fileURLToPath(new URL('../../../deploy/alibaba-cloud/invite-auth.cordis.yml', import.meta.url))
 const SNAPSHOT_DIR = fileURLToPath(new URL('./snapshots/invite-auth', import.meta.url))
 const LOGIN_EXPECTED = join(SNAPSHOT_DIR, 'login.expected.md')
+const INVALID_EXPECTED = join(SNAPSHOT_DIR, 'invalid.expected.md')
 const MODE = webSnapshotMode()
 const INVITE_SENTINEL = 'web-e2e-invite-sentinel-8f41d2a6'
 const SESSION_SENTINEL = 'web-e2e-session-sentinel-3d7c91af-9e0b5d28-6a4f1c73'
@@ -68,6 +70,7 @@ describe('web e2e: invite authentication login', () => {
   let browser: Browser | undefined
   let page: Page | undefined
   let tripwire: ReturnType<typeof watchConsole> | undefined
+  let loginPostOrigin: string | undefined
   const consoleMessages: string[] = []
 
   beforeAll(async () => {
@@ -86,6 +89,24 @@ describe('web e2e: invite authentication login', () => {
 
     browser = await chromium.launch()
     page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: ZH_BROWSER_LOCALE })
+    const browserBaseUrl = scaffold.baseUrl
+    const publicAuthority = new URL(browserBaseUrl).host
+    await page.route(`${browserBaseUrl}/**`, async (route) => {
+      const request = route.request()
+      const headers = await request.allHeaders()
+      if (request.method() === 'POST' && new URL(request.url()).pathname === '/__invite/login') {
+        loginPostOrigin = headers.origin
+      }
+      if (headers.origin === browserBaseUrl) headers.origin = `https://${publicAuthority}`
+      const response = await route.fetch({
+        headers: {
+          ...headers,
+          'x-forwarded-host': publicAuthority,
+          'x-forwarded-proto': 'https',
+        },
+      })
+      await route.fulfill({ response })
+    })
     tripwire = watchConsole(page)
     page.on('console', message => consoleMessages.push(message.text()))
   }, 120_000)
@@ -108,7 +129,7 @@ describe('web e2e: invite authentication login', () => {
     expect(response.headers()['content-security-policy']).toBe(CONTENT_SECURITY_POLICY)
     expect(response.headers()['x-content-type-options']).toBe('nosniff')
     expect(response.headers()['x-frame-options']).toBe('DENY')
-    expect(response.headers()['referrer-policy']).toBe('no-referrer')
+    expect(response.headers()['referrer-policy']).toBe('same-origin')
 
     const heading = page.getByRole('heading', { name: '访问 DSH', exact: true })
     expect(await heading.count()).toBe(1)
@@ -148,7 +169,39 @@ describe('web e2e: invite authentication login', () => {
     await compareOrRefreshGolden(LOGIN_EXPECTED, aria, MODE)
   }, 60_000)
 
+  it('submits an incorrect invite code with a verifiable origin and renders the accessible error state', async () => {
+    if (scaffold === undefined || page === undefined || tripwire === undefined) throw new Error('invite-auth browser setup did not finish')
+    const screenshotPage = page
+    onTestFailed(() => saveFailureShot(screenshotPage, 'web-e2e-invite-auth-invalid'))
+
+    loginPostOrigin = undefined
+    await page.goto(`${scaffold.baseUrl}/__invite/login?next=%2Fsessions`, { waitUntil: 'load' })
+    await page.getByLabel('邀请码', { exact: true }).fill('incorrect-browser-code')
+    const responsePromise = page.waitForResponse(response => (
+      response.request().method() === 'POST' && new URL(response.url()).pathname === '/__invite/login'
+    ))
+    await page.getByRole('button', { name: '进入', exact: true }).click()
+    const response = await responsePromise
+
+    expect(loginPostOrigin).toBe(scaffold.baseUrl)
+    expect(response.status()).toBe(401)
+    expect(response.headers()['referrer-policy']).toBe('same-origin')
+    expect(await page.getByRole('alert').textContent()).toBe('邀请码无效，请重试。')
+    expect(await page.locator('input[type="hidden"][name="next"]').inputValue()).toBe('/sessions')
+
+    const html = await page.content()
+    const aria = await captureStableAria(page, 'body', scaffold.workspaceCwd)
+    for (const sentinel of [INVITE_SENTINEL, SESSION_SENTINEL, 'incorrect-browser-code']) {
+      expect(html).not.toContain(sentinel)
+      expect(aria).not.toContain(sentinel)
+      expect(consoleMessages.join('\n')).not.toContain(sentinel)
+    }
+    expect(tripwire.warnings).toEqual([])
+    expect(tripwire.pageErrors).toEqual([])
+    await compareOrRefreshGolden(INVALID_EXPECTED, aria, MODE)
+  }, 60_000)
+
   it('keeps its snapshot inventory closed', async () => {
-    await assertFixtureInventory(SNAPSHOT_DIR, ['login.expected.md'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['invalid.expected.md', 'login.expected.md'])
   })
 })

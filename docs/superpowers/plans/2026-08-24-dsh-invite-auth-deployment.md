@@ -35,8 +35,8 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 ### Composition and browser coverage
 
 - `deploy/alibaba-cloud/invite-auth.cordis.yml` — opt-in plugin row applied after the shipped Web bundles.
-- `apps/web/tests/invite-auth.e2e.ts` — real Web composition login-page journey.
-- `apps/web/tests/snapshots/invite-auth/login.expected.md` — product-visible ARIA golden.
+- `apps/web/tests/invite-auth.e2e.ts` — real Web composition login-page and invalid-form journeys.
+- `apps/web/tests/snapshots/invite-auth/login.expected.md`, `invalid.expected.md` — product-visible ARIA goldens.
 - `apps/cli/package.json` — makes the overlay plugin resolvable from the shipped CLI installation.
 - `apps/cli/tsconfig.json` — links the CLI compiler graph to the opt-in Host package.
 - `scripts/verify-cordis-config.ts` — classifies the deployment overlay as app-resolved configuration.
@@ -410,7 +410,7 @@ export function securityHeaders(): Record<string, string> {
   return {
     'cache-control': 'no-store',
     'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-    'referrer-policy': 'no-referrer',
+    'referrer-policy': 'same-origin',
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
   }
@@ -793,6 +793,7 @@ git commit -m "docs(invite-auth): define authentication contract"
 
 - Create: `apps/web/tests/invite-auth.e2e.ts`
 - Create: `apps/web/tests/snapshots/invite-auth/login.expected.md`
+- Create: `apps/web/tests/snapshots/invite-auth/invalid.expected.md`
 
 - [ ] **Step 1: Write the failing Web scenario**
 
@@ -808,7 +809,7 @@ expect((await page.content()).includes(INVITE_CODE)).toBe(false)
 expect((await page.content()).includes(SESSION_SECRET)).toBe(false)
 ```
 
-Add an inventory assertion allowing only `login.expected.md`. The scenario must not submit the form because TLS and `forward_auth` belong to Caddy; the package's real-Loader HTTP test already owns successful POST and Cookie behavior.
+Add an inventory assertion allowing only `login.expected.md` and `invalid.expected.md`. A Playwright request bridge supplies Caddy's forwarding headers and maps the loopback HTTP test transport to its external HTTPS origin without inventing Chromium's `Origin`. Submit a non-secret incorrect code through the form and require a concrete browser origin, status `401`, the Chinese `role="alert"` message, retention of the safe `next` field, and no boot secret in HTML, ARIA, or console output. Successful POST and Cookie behavior remains in the package's real-Loader HTTP test.
 
 - [ ] **Step 2: Build and run replay to observe the missing golden**
 
@@ -822,7 +823,7 @@ corepack pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/invit
 Remove-Item Env:DSH_SNAPSHOT
 ```
 
-Expected: FAIL because `login.expected.md` is absent.
+Expected: FAIL because the expected ARIA goldens are absent.
 
 - [ ] **Step 3: Refresh, review, and replay the golden**
 
@@ -834,12 +835,12 @@ corepack pnpm exec vitest run --config vitest.web.config.ts apps/web/tests/invit
 Remove-Item Env:DSH_SNAPSHOT
 ```
 
-Expected: refresh writes one ARIA snapshot; replay passes. Review the golden and confirm it contains the heading, password textbox, explanatory text, and Enter button but no secret.
+Expected: refresh writes both ARIA snapshots and replay passes. Review the goldens and confirm they contain the heading, password textbox, explanatory text, Enter button, and invalid-code alert only in the submitted state, but no secret.
 
 - [ ] **Step 4: Commit browser evidence**
 
 ```bash
-git add apps/web/tests/invite-auth.e2e.ts apps/web/tests/snapshots/invite-auth/login.expected.md
+git add apps/web/tests/invite-auth.e2e.ts apps/web/tests/snapshots/invite-auth/login.expected.md apps/web/tests/snapshots/invite-auth/invalid.expected.md
 git commit -m "test(invite-auth): snapshot the login page"
 ```
 

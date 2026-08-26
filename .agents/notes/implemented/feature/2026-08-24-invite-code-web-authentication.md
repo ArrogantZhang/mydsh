@@ -14,6 +14,8 @@ The DSH Web server intentionally provides neither TLS nor authentication. Its ca
 
 Caddy terminates TLS, proxies `/__invite/*` directly, and calls `/__invite/check` before proxying every other page, API, SSE, or WebSocket request. The published Web bundle remains unauthenticated by default. The Alibaba Cloud deployment opts in through an explicit overlay that inserts invite auth and adds `inviteAuthReadiness` to the existing `web-runtime` row's dependencies.
 
+Authentication responses use `Referrer-Policy: same-origin`. The login document does not disclose `Referer` across origins, while its same-origin navigation form POST carries a concrete `Origin` for exact public-host validation. The plugin continues to reject `Origin: null` rather than weakening that proof.
+
 The auth plugin registers its prefix route before publishing readiness. Cordis dependency disposal withdraws readiness and tears down the dependent `web-runtime` fiber, including its frontend fallback, before the auth route is removed. A failed auth activation never releases the fallback, and HMR or unload follows the same fail-closed order.
 
 Plugin config holds only uppercase `DSH_*` environment references and non-secret policy. systemd reads root-only server secret files into the process environment; the launch-environment snapshot lets the plugin resolve only that inherited `process` layer. The default variable names contain `SECRET`, so the standard child-process environment scrubber removes them. Secret values never enter Cordis config, config dumps, or plugin diagnostics.
@@ -41,6 +43,8 @@ The [package README](../../../../packages/host/invite-auth/README.md) owns curre
 **Run a standalone authentication process.** A separate service adds another runtime, health model, deployment artifact, and secret handoff while the authenticated routes still need coordinated startup with the DSH page. The native plugin reuses WebServer route ownership and Cordis lifecycle ordering without adding a second application process.
 
 **Use Caddy Basic Authentication.** Basic Authentication sends the long-lived shared credential on every request, gives the deployment little control over logout and session rotation, and exposes browser-native prompts rather than the product's same-origin login flow. A separately signed session keeps the invite code at the login endpoint and permits signing-secret rotation to revoke all browsers.
+
+**Accept `Origin: null` on login.** A null origin does not prove agreement with the public HTTPS host and can arise from opaque or sandboxed documents. The login page instead preserves a concrete same-origin form origin through its response policy, so the route keeps exact origin validation.
 
 **Convert `dsh-host-webserver` into authentication middleware.** Global middleware would make a generic HTTP carrier own deployment policy and would affect every composition, including the shipped local Web bundle. A prefix-owning plugin plus proxy enforcement keeps authentication opt-in and preserves WebServer's route-registration role.
 

@@ -14,6 +14,8 @@ DSH Web server 有意不提供 TLS 或认证。载体级 trusted-host 栅栏可�
 
 Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面、API、SSE（Server-Sent Events）或 WebSocket 请求前调用 `/__invite/check`。发布的 Web 组合包默认保持无认证状态。阿里云部署通过显式覆盖层选择启用：该覆盖层插入邀请码认证，并将 `inviteAuthReadiness` 加入既有 `web-runtime` 配置项的依赖。
 
+鉴权响应使用 `Referrer-Policy: same-origin`。登录文档不会跨源泄露 `Referer`，而其同源导航表单 POST 会携带具体的 `Origin`，用于精确校验公网 host。插件仍会拒绝 `Origin: null`，不会削弱该证明。
+
 认证插件先注册前缀 route，再发布就绪状态。Cordis 依赖资源释放会撤回就绪状态，并在移除认证 route 前拆除依赖它的 `web-runtime` fiber，包括其前端 fallback。认证激活失败时永远不会释放 fallback，HMR（热模块替换）或卸载遵循相同的失败关闭顺序。
 
 插件配置只保存大写 `DSH_*` 环境变量引用和非秘密策略。systemd 将仅 root 可读的服务器秘密文件读入进程环境；启动环境快照让插件只解析继承的 `process` 层。默认变量名包含 `SECRET`，因此标准子进程环境清理器会移除它们。秘密值绝不进入 Cordis 配置、配置转储或插件诊断。
@@ -41,6 +43,8 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 **运行独立认证进程。** 独立服务会增加另一个运行时、健康模型、部署产物和秘密交接，而认证 route 仍需与 DSH 页面协调启动。原生插件复用 WebServer route 所有权和 Cordis 生命周期顺序，无需添加第二个应用进程。
 
 **使用 Caddy Basic Authentication。** Basic Authentication 会在每次请求中发送长期共享凭据，使部署难以控制退出登录和会话轮换，而且呈现浏览器原生提示框，而非产品的同源登录流程。独立签名的会话把邀请码限制在登录 endpoint，并允许通过轮换签名秘密撤销所有浏览器会话。
+
+**登录时接受 `Origin: null`。** null origin 无法证明请求来源与公网 HTTPS host 一致，而且可能来自不透明或沙箱化文档。登录页通过响应策略保留具体的同源表单 origin，因此 route 继续执行精确来源校验。
 
 **将 `dsh-host-webserver` 改造成认证 middleware。** 全局 middleware 会让通用 HTTP 载体拥有部署策略，并影响包括发布的本地 Web 组合包在内的所有组合。拥有前缀的插件加代理强制执行让认证保持可选，同时保留 WebServer 的 route 注册职责。
 

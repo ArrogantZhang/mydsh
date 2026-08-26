@@ -39,7 +39,7 @@ const PROCESS_SECRETS: LaunchEnvironmentLayerInput = {
 const SECURITY_HEADERS = {
   'cache-control': 'no-store',
   'content-security-policy': "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; base-uri 'none'; frame-ancestors 'none'",
-  'referrer-policy': 'no-referrer',
+  'referrer-policy': 'same-origin',
   'x-content-type-options': 'nosniff',
   'x-frame-options': 'DENY',
 }

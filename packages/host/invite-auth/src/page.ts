@@ -14,13 +14,14 @@ const ATTRIBUTE_ENTITIES = {
 
 /**
  * Return security headers shared by every invite-authentication response.
- * @returns Fresh header values that prevent caching, embedding, MIME sniffing, referrer disclosure, and non-self form actions.
+ * @returns Fresh header values that prevent caching, embedding, MIME sniffing, cross-origin referrer disclosure, and
+ * non-self form actions. Same-origin navigation forms retain an Origin value that the login route can validate.
  */
 export function securityHeaders(): Record<string, string> {
   return {
     'cache-control': 'no-store',
     'content-security-policy': CONTENT_SECURITY_POLICY,
-    'referrer-policy': 'no-referrer',
+    'referrer-policy': 'same-origin',
     'x-content-type-options': 'nosniff',
     'x-frame-options': 'DENY',
   }
