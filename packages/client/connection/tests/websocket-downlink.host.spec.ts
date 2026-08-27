@@ -157,6 +157,75 @@ async function acceptedSocket(downlinks: WebSocketDownlinks): Promise<WebSocket>
   return accepted as WebSocket
 }
 
+async function stalledSendHarness(options: {
+  frame: RpcRequest<MuxFrame>
+  downlink?: Partial<WebSocketDownlinkOptions>
+  stallSend?: boolean
+}) {
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => { release = resolve })
+  let finish!: () => void
+  const sourceFinished = new Promise<void>((resolve) => { finish = resolve })
+  const downlinks = configuredDownlinks(api(
+    async function * (signal) {
+      try {
+        await gate
+        yield options.frame
+        await untilAbort(signal)
+      } finally {
+        finish()
+      }
+    },
+    idle,
+  ), options.downlink)
+  const host = await serve(downlinks)
+  const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+  await once(socket, 'open')
+  const accepted = await acceptedSocket(downlinks)
+  let callback: ((error?: Error) => void) | undefined
+  let sent!: () => void
+  const sendCalled = new Promise<void>((resolve) => { sent = resolve })
+  const originalSend = accepted.send.bind(accepted)
+  const send = vi.spyOn(accepted, 'send').mockImplementation(((
+    data: WebSocket.Data,
+    optionsOrCallback?: unknown,
+    done?: (error?: Error) => void,
+  ) => {
+    callback = typeof optionsOrCallback === 'function'
+      ? optionsOrCallback as (error?: Error) => void
+      : done
+    sent()
+    if (options.stallSend !== false) return
+    originalSend(data, callback)
+  }) as WebSocket['send'])
+  const terminate = vi.spyOn(accepted, 'terminate')
+  const cleanups: (() => void)[] = [
+    () => { terminate.mockRestore() },
+    () => { send.mockRestore() },
+  ]
+  const closed = once(socket, 'close')
+  running.push(async () => {
+    for (const cleanup of cleanups.reverse()) cleanup()
+    if (socket.readyState !== WebSocket.CLOSED) socket.terminate()
+    await host.close()
+  })
+  return {
+    socket,
+    send,
+    terminate,
+    closed,
+    sendCalled,
+    sourceFinished,
+    release,
+    completeSend: (error?: Error) => { callback?.(error) },
+    mockBufferedAmount: (values: number[], fallback = values.at(-1) ?? 0) => {
+      const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get').mockReturnValue(fallback)
+      for (const value of values) bufferedAmount.mockReturnValueOnce(value)
+      cleanups.push(() => { bufferedAmount.mockRestore() })
+    },
+  }
+}
+
 describe('WebSocket downlinks', () => {
   it('disables compression negotiation by default', async () => {
     const downlinks = configuredDownlinks(api(idle, idle))
@@ -307,203 +376,75 @@ describe('WebSocket downlinks', () => {
   })
 
   it('adds the serialized frame bytes to bytes already buffered before sending', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
     const frame = muxFrame('buffered-plus-frame', 'buffered-plus-frame')
-    let finished!: () => void
-    const sourceFinished = new Promise<void>((resolve) => { finished = resolve })
-    const downlinks = configuredDownlinks(api(
-      async function * (signal) {
-        try {
-          await gate
-          yield frame
-          await untilAbort(signal)
-        } finally {
-          finished()
-        }
-      },
-      idle,
-    ), { maxBufferedBytes: serializedFrameBytes(frame) + 8 })
-    const host = await serve(downlinks)
-    running.push(host.close)
-    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
-    await once(socket, 'open')
-    const accepted = await acceptedSocket(downlinks)
-    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get').mockReturnValue(9)
-    const send = vi.spyOn(accepted, 'send')
-    const terminate = vi.spyOn(accepted, 'terminate')
-    const closed = once(socket, 'close')
-    const messages = readUpTo(socket, 1)
-    release()
+    const harness = await stalledSendHarness({
+      frame,
+      downlink: { maxBufferedBytes: serializedFrameBytes(frame) + 8 },
+      stallSend: false,
+    })
+    harness.mockBufferedAmount([9])
+    const messages = readUpTo(harness.socket, 1)
+    harness.release()
     expect(await messages).toEqual([])
-    await closed
-    expect(terminate).toHaveBeenCalledOnce()
-    expect(send).not.toHaveBeenCalled()
-    await sourceFinished
-    bufferedAmount.mockRestore()
-    send.mockRestore()
-    terminate.mockRestore()
+    await harness.closed
+    expect(harness.terminate).toHaveBeenCalledOnce()
+    expect(harness.send).not.toHaveBeenCalled()
+    await harness.sourceFinished
   })
 
   it('checks buffered bytes immediately after send returns', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    let finished!: () => void
-    const sourceFinished = new Promise<void>((resolve) => { finished = resolve })
-    const downlinks = configuredDownlinks(api(
-      async function * (signal) {
-        try {
-          await gate
-          yield muxFrame('immediate-buffer-check', 'immediate-buffer-check')
-          await untilAbort(signal)
-        } finally {
-          finished()
-        }
-      },
-      idle,
-    ), { maxBufferedBytes: 1_000_000 })
-    const host = await serve(downlinks)
-    running.push(host.close)
-    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
-    await once(socket, 'open')
-    const accepted = await acceptedSocket(downlinks)
-    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get')
-      .mockReturnValueOnce(0)
-      .mockReturnValue(1_000_001)
-    let callback: ((error?: Error) => void) | undefined
-    let sent!: () => void
-    const sendCalled = new Promise<void>((resolve) => { sent = resolve })
-    const send = vi.spyOn(accepted, 'send').mockImplementation(((
-      _data: unknown,
-      optionsOrCallback?: unknown,
-      done?: (error?: Error) => void,
-    ) => {
-      callback = typeof optionsOrCallback === 'function'
-        ? optionsOrCallback as (error?: Error) => void
-        : done
-      sent()
-    }) as WebSocket['send'])
-    const terminate = vi.spyOn(accepted, 'terminate')
-    const closed = once(socket, 'close')
-    release()
-    await sendCalled
-    const fusedImmediately = terminate.mock.calls.length === 1
-    if (!fusedImmediately) callback?.()
-    await closed
-    await sourceFinished
+    const harness = await stalledSendHarness({
+      frame: muxFrame('immediate-buffer-check', 'immediate-buffer-check'),
+      downlink: { maxBufferedBytes: 1_000_000 },
+    })
+    harness.mockBufferedAmount([0], 1_000_001)
+    harness.release()
+    await harness.sendCalled
+    const fusedImmediately = harness.terminate.mock.calls.length === 1
+    if (!fusedImmediately) harness.completeSend()
+    await harness.closed
+    await harness.sourceFinished
     expect(fusedImmediately).toBe(true)
-    expect(terminate).toHaveBeenCalledOnce()
-    bufferedAmount.mockRestore()
-    send.mockRestore()
-    terminate.mockRestore()
+    expect(harness.terminate).toHaveBeenCalledOnce()
   })
 
   it('checks buffered bytes again after the send callback', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    let finished!: () => void
-    const sourceFinished = new Promise<void>((resolve) => { finished = resolve })
-    const downlinks = configuredDownlinks(api(
-      async function * (signal) {
-        try {
-          await gate
-          yield muxFrame('callback-buffer-check', 'callback-buffer-check')
-          await untilAbort(signal)
-        } finally {
-          finished()
-        }
-      },
-      idle,
-    ), { maxBufferedBytes: 1_000_000 })
-    const host = await serve(downlinks)
-    running.push(host.close)
-    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
-    await once(socket, 'open')
-    const accepted = await acceptedSocket(downlinks)
-    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get')
-      .mockReturnValueOnce(0)
-      .mockReturnValueOnce(0)
-      .mockReturnValue(1_000_001)
-    let callback: ((error?: Error) => void) | undefined
-    let sent!: () => void
-    const sendCalled = new Promise<void>((resolve) => { sent = resolve })
-    const send = vi.spyOn(accepted, 'send').mockImplementation(((
-      _data: unknown,
-      optionsOrCallback?: unknown,
-      done?: (error?: Error) => void,
-    ) => {
-      callback = typeof optionsOrCallback === 'function'
-        ? optionsOrCallback as (error?: Error) => void
-        : done
-      sent()
-    }) as WebSocket['send'])
-    const terminate = vi.spyOn(accepted, 'terminate')
-    const closed = once(socket, 'close')
-    release()
-    await sendCalled
-    callback?.()
-    const fusedAfterCallback = terminate.mock.calls.length === 1
-    if (!fusedAfterCallback) socket.terminate()
-    await closed
-    await sourceFinished
+    const harness = await stalledSendHarness({
+      frame: muxFrame('callback-buffer-check', 'callback-buffer-check'),
+      downlink: { maxBufferedBytes: 1_000_000 },
+    })
+    harness.mockBufferedAmount([0, 0], 1_000_001)
+    harness.release()
+    await harness.sendCalled
+    harness.completeSend()
+    const fusedAfterCallback = harness.terminate.mock.calls.length === 1
+    if (!fusedAfterCallback) harness.socket.terminate()
+    await harness.closed
+    await harness.sourceFinished
     expect(fusedAfterCallback).toBe(true)
-    expect(terminate).toHaveBeenCalledOnce()
-    bufferedAmount.mockRestore()
-    send.mockRestore()
-    terminate.mockRestore()
+    expect(harness.terminate).toHaveBeenCalledOnce()
   })
 
   it('terminates a send whose callback never fires and ignores its late callback', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    let finished!: () => void
-    const sourceFinished = new Promise<void>((resolve) => { finished = resolve })
-    const downlinks = configuredDownlinks(api(
-      async function * (signal) {
-        try {
-          await gate
-          yield muxFrame('timeout-frame', 'timeout-session')
-          await untilAbort(signal)
-        } finally {
-          finished()
-        }
-      },
-      idle,
-    ), { sendTimeoutMs: 20 })
-    const host = await serve(downlinks)
-    running.push(host.close)
-    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
-    await once(socket, 'open')
-    const accepted = await acceptedSocket(downlinks)
+    const harness = await stalledSendHarness({
+      frame: muxFrame('timeout-frame', 'timeout-session'),
+      downlink: { sendTimeoutMs: 20 },
+    })
     vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
-    let callback: ((error?: Error) => void) | undefined
-    const send = vi.spyOn(accepted, 'send').mockImplementation(((
-      _data: WebSocket.Data,
-      optionsOrCallback?: unknown,
-      done?: (error?: Error) => void,
-    ) => {
-      callback = typeof optionsOrCallback === 'function'
-        ? optionsOrCallback as (error?: Error) => void
-        : done
-    }) as WebSocket['send'])
-    const terminate = vi.spyOn(accepted, 'terminate')
-    const closed = once(socket, 'close')
     try {
-      release()
+      harness.release()
       await vi.advanceTimersByTimeAsync(20)
-      const terminatedOnTimeout = terminate.mock.calls.length === 1
-      if (!terminatedOnTimeout) socket.terminate()
-      await closed
-      await sourceFinished
-      callback?.()
+      const terminatedOnTimeout = harness.terminate.mock.calls.length === 1
+      if (!terminatedOnTimeout) harness.socket.terminate()
+      await harness.closed
+      await harness.sourceFinished
+      harness.completeSend()
       await vi.advanceTimersByTimeAsync(20)
       expect(terminatedOnTimeout).toBe(true)
-      expect(terminate).toHaveBeenCalledOnce()
-      expect(send).toHaveBeenCalledOnce()
+      expect(harness.terminate).toHaveBeenCalledOnce()
+      expect(harness.send).toHaveBeenCalledOnce()
     } finally {
       vi.useRealTimers()
-      send.mockRestore()
-      terminate.mockRestore()
     }
   })
 

@@ -417,10 +417,23 @@ export interface ConnectionConfig {
   trustedHosts?: string[]
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
   maxRequestBodyBytes?: number
+  /** Whether WebSocket downlinks negotiate per-message deflate. Default: false. */
+  downlinkCompression?: boolean
+  /** Compression threshold in bytes, from 0 through 1,048,576. Default: 0. */
+  downlinkCompressionThresholdBytes?: number
+  /**
+   * Process-wide compression concurrency, from 1 through 16. The first
+   * compression-enabled instance fixes it until process restart. Default: 4.
+   */
+  downlinkCompressionConcurrency?: number
+  /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
+  downlinkMaxBufferedBytes?: number
+  /** Per-frame send timeout in milliseconds, from 1 through 60,000. Default: 5,000. */
+  downlinkSendTimeoutMs?: number
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:50`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:59`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 
@@ -822,10 +835,16 @@ export interface Config {
    * @default 1024
    */
   coldBlankProbeMaxBytes?: number
+  /**
+   * Maximum frames retained by each mux or host event stream before that
+   * stream fails and releases its queue. Accepts 1 through 16384.
+   * @default 4096
+   */
+  maxEventStreamQueueFrames?: number
 }
 ```
 
-来源：[`packages/host/apiproxy/src/index.ts:41`](../packages/host/apiproxy/src/index.ts)
+来源：[`packages/host/apiproxy/src/index.ts:46`](../packages/host/apiproxy/src/index.ts)
 
 <a id="deepseek-aidsh-host-directory-picker-browse"></a>
 
