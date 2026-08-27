@@ -1290,13 +1290,19 @@ describe('machine pending lock', () => {
     // jsdom neither applies CSS Modules rules, resolves theme custom properties,
     // nor emulates reduced motion, so source inspection pins the marker's contrast
     // and the accessibility branches that have no runtime signal in this suite.
+    // No repository token-color parser is available; Task 5 owns computed
+    // light/dark contrast after the browser resolves the custom properties.
     const source = readFileSync('packages/client/ui-conversation/src/client/skeleton/InputBar.module.css', 'utf8')
     expect(source).toContain(`.pending {
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--dsw-alias-label-primary-foreground);
   animation: input-pending 1s ease-in-out infinite alternate;
+}`)
+    expect(source).toContain(`@keyframes input-pending {
+  from { transform: scale(0.72); }
+  to { transform: scale(1); }
 }`)
     expect(source).toContain(`.visuallyHidden {
   position: absolute;
@@ -1311,6 +1317,7 @@ describe('machine pending lock', () => {
     expect(source).toContain(`@media (prefers-reduced-motion: reduce) {
   .pending {
     animation: none;
+    transform: scale(1);
   }
 }`)
     expect(source).toContain(`.primary[aria-busy='true'] {
