@@ -426,6 +426,14 @@ export interface ConnectionConfig {
    * compression-enabled instance fixes it until process restart. Default: 4.
    */
   downlinkCompressionConcurrency?: number
+  /** Whether logical downlink requests share bounded physical messages. Default: false. */
+  downlinkBatch?: boolean
+  /** Maximum requests per physical batch, from 1 through 256. Default: 64. */
+  downlinkBatchMaxFrames?: number
+  /** Maximum complete batch size, from 1 through 1,048,576 UTF-8 bytes. Default: 262,144. */
+  downlinkBatchMaxBytes?: number
+  /** Batch deadline from its first request, from 1 through 100 milliseconds. Default: 16. */
+  downlinkBatchFlushMs?: number
   /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
   downlinkMaxBufferedBytes?: number
   /** Per-frame send timeout in milliseconds, from 1 through 60,000. Default: 5,000. */
@@ -433,7 +441,7 @@ export interface ConnectionConfig {
 }
 ```
 
-来源：[`packages/client/connection/src/index.ts:59`](../packages/client/connection/src/index.ts)
+来源：[`packages/client/connection/src/index.ts:62`](../packages/client/connection/src/index.ts)
 
 <a id="deepseek-aidsh-client-hmr"></a>
 

@@ -107,6 +107,10 @@ describe('connection node half', () => {
       downlinkCompression: false,
       downlinkCompressionThresholdBytes: 0,
       downlinkCompressionConcurrency: 4,
+      downlinkBatch: false,
+      downlinkBatchMaxFrames: 64,
+      downlinkBatchMaxBytes: 262_144,
+      downlinkBatchFlushMs: 16,
       downlinkMaxBufferedBytes: 1_048_576,
       downlinkSendTimeoutMs: 5_000,
     })
@@ -115,6 +119,9 @@ describe('connection node half', () => {
   it.each([
     ['downlinkCompressionThresholdBytes', 0, 1_048_576, [-1, 0.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 1_048_577]],
     ['downlinkCompressionConcurrency', 1, 16, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 17]],
+    ['downlinkBatchMaxFrames', 1, 256, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 257]],
+    ['downlinkBatchMaxBytes', 1, 1_048_576, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 1_048_577]],
+    ['downlinkBatchFlushMs', 1, 100, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 101]],
     ['downlinkMaxBufferedBytes', 1, 67_108_864, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 67_108_865]],
     ['downlinkSendTimeoutMs', 1, 60_000, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 60_001]],
   ] as const)('validates %s at its exact operational range', (field, minimum, maximum, invalid) => {
@@ -141,6 +148,24 @@ describe('connection node half', () => {
     expect(() => { apply(ctx, { maxRequestBodyBytes: 1024 }) })
       .toThrow(/must be at least .* aggregate image limit/)
     expect(routes).toHaveLength(0)
+  })
+
+  it('fails before route registration when an enabled batch exceeds the socket byte limit', () => {
+    const ctx = new Context()
+    const routes: WebRoute[] = []
+    const upgrades: WebUpgradeRoute[] = []
+    ctx.provide('webServer', fakeHttpServer(routes, upgrades) as WebServer)
+    ctx.provide('apiProxy', {} as ApiProxy)
+
+    expect(() => { apply(ctx, {
+      downlinkBatch: true,
+      downlinkBatchMaxBytes: 2,
+      downlinkMaxBufferedBytes: 1,
+    }) }).toThrow(
+      'client-connection downlinkBatchMaxBytes (2) must not exceed downlinkMaxBufferedBytes (1)',
+    )
+    expect(routes).toHaveLength(0)
+    expect(upgrades).toHaveLength(0)
   })
 
   it('fails the load on a trustedHosts entry that is not a bare authority', async () => {

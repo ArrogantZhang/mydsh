@@ -35,6 +35,9 @@ export const name = 'client-connection'
 const REQUEST_ENVELOPE_HEADROOM_BYTES = 1024 * 1024
 const MAX_DOWNLINK_COMPRESSION_THRESHOLD_BYTES = 1_048_576
 const MAX_DOWNLINK_COMPRESSION_CONCURRENCY = 16
+const MAX_DOWNLINK_BATCH_FRAMES = 256
+const MAX_DOWNLINK_BATCH_BYTES = 1_048_576
+const MAX_DOWNLINK_BATCH_FLUSH_MS = 100
 const MAX_DOWNLINK_BUFFERED_BYTES = 67_108_864
 const MAX_DOWNLINK_SEND_TIMEOUT_MS = 60_000
 
@@ -77,6 +80,14 @@ export interface ConnectionConfig {
    * compression-enabled instance fixes it until process restart. Default: 4.
    */
   downlinkCompressionConcurrency?: number
+  /** Whether logical downlink requests share bounded physical messages. Default: false. */
+  downlinkBatch?: boolean
+  /** Maximum requests per physical batch, from 1 through 256. Default: 64. */
+  downlinkBatchMaxFrames?: number
+  /** Maximum complete batch size, from 1 through 1,048,576 UTF-8 bytes. Default: 262,144. */
+  downlinkBatchMaxBytes?: number
+  /** Batch deadline from its first request, from 1 through 100 milliseconds. Default: 16. */
+  downlinkBatchFlushMs?: number
   /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
   downlinkMaxBufferedBytes?: number
   /** Per-frame send timeout in milliseconds, from 1 through 60,000. Default: 5,000. */
@@ -94,6 +105,19 @@ export const Config: z<ConnectionConfig> = z.object({
     .min(1)
     .max(MAX_DOWNLINK_COMPRESSION_CONCURRENCY)
     .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency),
+  downlinkBatch: z.boolean().default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled),
+  downlinkBatchMaxFrames: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_BATCH_FRAMES)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxFrames),
+  downlinkBatchMaxBytes: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_BATCH_BYTES)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxBytes),
+  downlinkBatchFlushMs: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_BATCH_FLUSH_MS)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.flushMs),
   downlinkMaxBufferedBytes: z.natural()
     .min(1)
     .max(MAX_DOWNLINK_BUFFERED_BYTES)
@@ -175,10 +199,23 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
       ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionThresholdBytes,
     compressionConcurrency: config?.downlinkCompressionConcurrency
       ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency,
+    batch: {
+      enabled: config?.downlinkBatch ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled,
+      maxFrames: config?.downlinkBatchMaxFrames ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxFrames,
+      maxBytes: config?.downlinkBatchMaxBytes ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxBytes,
+      flushMs: config?.downlinkBatchFlushMs ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.flushMs,
+    },
     maxBufferedBytes: config?.downlinkMaxBufferedBytes
       ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.maxBufferedBytes,
     sendTimeoutMs: config?.downlinkSendTimeoutMs
       ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.sendTimeoutMs,
+  }
+  if (downlinkOptions.batch.enabled
+    && downlinkOptions.batch.maxBytes > downlinkOptions.maxBufferedBytes) {
+    throw new Error(
+      `client-connection downlinkBatchMaxBytes (${String(downlinkOptions.batch.maxBytes)}) `
+      + `must not exceed downlinkMaxBufferedBytes (${String(downlinkOptions.maxBufferedBytes)})`,
+    )
   }
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.

@@ -5,9 +5,16 @@ import type { IncomingMessage } from 'node:http'
 import type { Duplex } from 'node:stream'
 import WebSocket, { WebSocketServer } from 'ws'
 import type {
-  ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest,
+  ApiProxy, HostFrame, MuxFrame, RpcRequest,
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
+import {
+  DEFAULT_DOWNLINK_BATCH_OPTIONS,
+  encodeDownlink,
+  encodeDownlinkRequest,
+  type DownlinkBatchOptions,
+  type EncodedDownlinkMessage,
+} from './downlink-batch.ts'
 
 type Frame = MuxFrame | HostFrame
 /** Protocol ceiling for forbidden client application messages, including decompressed payloads. */
@@ -23,6 +30,8 @@ export interface WebSocketDownlinkOptions {
   compressionThresholdBytes: number
   /** Process-wide compression concurrency, fixed by the first enabled instance until restart. */
   compressionConcurrency: number
+  /** Bounded physical-message batching policy. */
+  batch: DownlinkBatchOptions
   /** Maximum bytes queued by one socket before it is terminated. */
   maxBufferedBytes: number
   /** Maximum time to wait for one send callback, in milliseconds. */
@@ -34,17 +43,9 @@ export const DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS: Readonly<WebSocketDownlinkOptio
   compression: false,
   compressionThresholdBytes: 0,
   compressionConcurrency: 4,
+  batch: DEFAULT_DOWNLINK_BATCH_OPTIONS,
   maxBufferedBytes: 1_048_576,
   sendTimeoutMs: 5_000,
-}
-
-function serverRequest(frame: RpcRequest<Frame>): ServerRequest {
-  return {
-    type: 'server-request',
-    rpcId: frame.rpcId,
-    method: frame.payload.type,
-    payload: frame.payload,
-  }
 }
 
 function bufferLimitError(maxBufferedBytes: number): Error {
@@ -57,18 +58,17 @@ function sendTimeoutError(sendTimeoutMs: number): Error {
 
 function send(
   socket: WebSocket,
-  request: ServerRequest,
+  message: EncodedDownlinkMessage,
   options: WebSocketDownlinkOptions,
   abort: AbortController,
 ): Promise<void> {
-  const data = JSON.stringify(request)
-  const serializedBytes = Buffer.byteLength(data, 'utf8')
+  const { text, utf8Bytes } = message
   return new Promise((resolve, reject) => {
     if (socket.readyState !== WebSocket.OPEN) {
       reject(new Error('websocket downlink closed before frame delivery'))
       return
     }
-    if (socket.bufferedAmount + serializedBytes > options.maxBufferedBytes) {
+    if (socket.bufferedAmount + utf8Bytes > options.maxBufferedBytes) {
       socket.terminate()
       abort.abort()
       reject(bufferLimitError(options.maxBufferedBytes))
@@ -112,7 +112,7 @@ function send(
       fuse(sendTimeoutError(options.sendTimeoutMs))
     }, options.sendTimeoutMs)
     try {
-      socket.send(data, (error) => {
+      socket.send(text, (error) => {
         if (settled) return
         if (error) {
           fail(error)
@@ -254,13 +254,13 @@ export class WebSocketDownlinks {
     abort: AbortController,
   ): Promise<void> {
     try {
-      for await (const frame of frames) {
-        await send(socket, serverRequest(frame), this.options, abort)
+      for await (const message of encodeDownlink(frames, this.options.batch, abort.signal)) {
+        await send(socket, message, this.options, abort)
       }
     } catch (error) {
       if (!abort.signal.aborted) {
         try {
-          await send(socket, serverRequest(failureFrame(error)), this.options, abort)
+          await send(socket, encodeDownlinkRequest(failureFrame(error)), this.options, abort)
         } catch {
           // Socket loss won the race; no downstream remains to receive the failure frame.
         }

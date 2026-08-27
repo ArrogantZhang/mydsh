@@ -130,21 +130,26 @@ function isServerRequestWithRpcId(value: unknown, rpcId: string): boolean {
   return candidate.type === 'server-request' && candidate.rpcId === rpcId
 }
 
-function readUpTo(socket: WebSocket, count: number): Promise<ServerRequest[]> {
+function readUpTo<T = ServerRequest>(socket: WebSocket, count: number): Promise<T[]> {
   return new Promise((resolve) => {
-    const messages: ServerRequest[] = []
+    const messages: T[] = []
     const finish = (): void => {
       socket.off('message', onMessage)
       socket.off('close', finish)
       resolve(messages)
     }
     const onMessage = (data: WebSocket.RawData): void => {
-      messages.push(JSON.parse(rawDataText(data)) as ServerRequest)
+      messages.push(JSON.parse(rawDataText(data)) as T)
       if (messages.length === count) finish()
     }
     socket.on('message', onMessage)
     socket.once('close', finish)
   })
+}
+
+function physicalRequests(message: unknown): ServerRequest[] {
+  const parsed = message as ServerRequest | { type: 'server-batch'; requests: ServerRequest[] }
+  return parsed.type === 'server-batch' ? parsed.requests : [parsed]
 }
 
 async function acceptedSocket(downlinks: WebSocketDownlinks): Promise<WebSocket> {
@@ -478,6 +483,46 @@ describe('WebSocket downlinks', () => {
     await closed
   })
 
+  it('sends 65 frames as a 64-request batch followed by one single message', async () => {
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        for (let index = 0; index < 65; index++) yield muxFrame(`batch-${String(index)}`, `batch-${String(index)}`)
+      },
+      idle,
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true },
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const messages = await readUpTo<unknown>(socket, 2)
+
+    expect(messages).toHaveLength(2)
+    expect(messages[0]).toMatchObject({ type: 'server-batch' })
+    expect(physicalRequests(messages[0]).map(request => request.rpcId))
+      .toEqual(Array.from({ length: 64 }, (_, index) => `batch-${String(index)}`))
+    expect(physicalRequests(messages[1]).map(request => request.rpcId)).toEqual(['batch-64'])
+  })
+
+  it('sends 65 frames as 65 physical messages when batching is disabled', async () => {
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        for (let index = 0; index < 65; index++) yield muxFrame(`single-${String(index)}`, `single-${String(index)}`)
+      },
+      idle,
+    ))
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const messages = await readUpTo<unknown>(socket, 65)
+
+    expect(messages).toHaveLength(65)
+    expect(messages.flatMap(physicalRequests).map(request => request.rpcId))
+      .toEqual(Array.from({ length: 65 }, (_, index) => `single-${String(index)}`))
+  })
+
   it('keeps a healthy peer pumping after a slow peer crosses its byte fuse', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
@@ -651,23 +696,26 @@ describe('WebSocket downlinks', () => {
     await healthyClosed
   })
 
-  it('sends stream/error before closing when a source fails', async () => {
-    const downlinks = new WebSocketDownlinks(api(
+  it('abandons a pending batch and sends one single stream/error when its source fails', async () => {
+    const downlinks = configuredDownlinks(api(
       async function * () {
+        yield muxFrame('discarded-before-error', 'discarded-before-error')
         throw new Error('mux source failed')
       },
       idle,
-    ))
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true },
+    })
     const host = await serve(downlinks)
     running.push(host.close)
     const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
-    const failure = read(socket)
-    const closed = once(socket, 'close')
-    expect((await failure).payload).toEqual({
+    const messages = await readUpTo<unknown>(socket, 2)
+    expect(messages).toHaveLength(1)
+    const [failure] = physicalRequests(messages[0])
+    expect(failure?.payload).toEqual({
       type: 'stream/error',
       error: { code: 'internal', message: 'Error: mux source failed', details: {} },
     })
-    await closed
   })
 
   it('aborts the source when an accepted socket reports a transport error', async () => {
