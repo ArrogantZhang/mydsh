@@ -170,6 +170,25 @@ function chatSeqs(snapshot: ConversationSnapshot): number[] {
   return chatEvents(snapshot).map(item => item.event.seq)
 }
 
+function visibleMessages(snapshot: ConversationSnapshot): { role: 'user' | 'assistant'; text: string }[] {
+  const messages: { role: 'user' | 'assistant'; text: string }[] = []
+  for (const { event } of chatEvents(snapshot)) {
+    if (event.type === 'user/message') {
+      messages.push({
+        role: 'user',
+        text: event.data.content.filter(block => block.type === 'text').map(block => block.text).join(''),
+      })
+    }
+    if (event.type === 'assistant/message') {
+      messages.push({
+        role: 'assistant',
+        text: event.data.message.content.filter(block => block.type === 'text').map(block => block.text).join(''),
+      })
+    }
+  }
+  return messages
+}
+
 function histResponse(events: SessionEvent[], hasMore = false) {
   // history returns HistoryEntry[] ({event, view?}); these tests are view-less.
   return Promise.resolve(ok({ events: entries(events) as never[], hasMore }))
@@ -917,6 +936,39 @@ describe('remaining branches', () => {
 })
 
 describe('resync', () => {
+  it('replaces a partial live turn with complete history exactly once', async () => {
+    const first = plainTurn(0, 0, 'first user', 'first assistant')
+    const second = plainTurn(6, 1, 'second user', 'second assistant')
+    const { api, session } = makeSession()
+    api.onHistory = () => histResponse(first)
+    await session.open()
+
+    const liveUser = second.find((event): event is SessionEvent<'user/message'> => event.type === 'user/message')
+    expect(liveUser).toBeDefined()
+    session.handleMuxEnvelope('r-second-user' as never, {
+      type: 'session/event',
+      sessionId: SID,
+      event: liveUser!,
+    })
+    await vi.waitFor(() => {
+      expect(visibleMessages(session.getSnapshot())).toEqual([
+        { role: 'user', text: 'first user' },
+        { role: 'assistant', text: 'first assistant' },
+        { role: 'user', text: 'second user' },
+      ])
+    })
+
+    api.onHistory = () => histResponse([...first, ...second])
+    await session.resync()
+
+    expect(visibleMessages(session.getSnapshot())).toEqual([
+      { role: 'user', text: 'first user' },
+      { role: 'assistant', text: 'first assistant' },
+      { role: 'user', text: 'second user' },
+      { role: 'assistant', text: 'second assistant' },
+    ])
+  })
+
   it('rebuilds the window and clears pending; cold instances no-op', async () => {
     const { api, session } = makeSession()
     api.onHistory = () => histResponse(plainTurn(0, 0, 'a', 'b'))

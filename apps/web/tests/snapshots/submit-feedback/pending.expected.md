@@ -1,0 +1,20 @@
+- banner:
+  - navigation "Session hierarchy":
+    - button "workspace" [disabled]
+  - img
+  - text: Standard mode
+  - button "Session log":
+    - text: Session log
+    - img
+  - tablist:
+    - tab "Chat" [selected]
+    - tab "Trajectory"
+- textbox "Message the agent": Reply with a one-sentence description of event sourcing, then stop.
+- button "Commands":
+  - img
+- 'button "Access mode, current: Workspace Write"': Workspace Write
+- button "Select model, current DeepSeek-V4-Flash":
+  - text: DeepSeek-V4-Flash
+  - img
+- status: Sending…
+- button "Send message" [disabled]
