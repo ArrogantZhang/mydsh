@@ -42,8 +42,9 @@ export const serverBatchSchema: z.ZodType<ServerBatch> = z.object({
   requests: z.array(serverRequestSchema).min(1).max(MAX_SERVER_BATCH_REQUESTS),
 })
 
-function batchFailureCategory(error: z.ZodError): DownlinkDecodeCategory {
-  return error.issues.some(issue => typeof issue.path[1] === 'number') ? 'envelope' : 'wrapper'
+function hasBoundedBatchRequests(value: unknown): value is { type: 'server-batch'; requests: unknown[] } {
+  if (!isRecord(value) || value.type !== 'server-batch' || !Array.isArray(value.requests)) return false
+  return value.requests.length >= 1 && value.requests.length <= MAX_SERVER_BATCH_REQUESTS
 }
 
 /**
@@ -65,9 +66,12 @@ export function decodeDownlinkMessage<F>(
 
   let envelopes: ServerRequest[]
   if (isRecord(raw) && raw.type === 'server-batch') {
+    if (!hasBoundedBatchRequests(raw)) {
+      return { ok: false, category: 'wrapper', requests: [] }
+    }
     const parsed = serverBatchSchema.safeParse(raw)
     if (!parsed.success) {
-      return { ok: false, category: batchFailureCategory(parsed.error), requests: [] }
+      return { ok: false, category: 'envelope', requests: [] }
     }
     envelopes = parsed.data.requests
   } else if (isRecord(raw) && raw.type === 'server-request') {

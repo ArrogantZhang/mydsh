@@ -152,6 +152,18 @@ describe('downlink message decoder', () => {
     expect(decoded).toEqual({ ok: false, category: 'wrapper', requests: [] })
   })
 
+  it('classifies an oversized batch before parsing its malformed member', () => {
+    const decoded = decodeMux({
+      type: 'server-batch',
+      requests: Array.from(
+        { length: MAX_SERVER_BATCH_REQUESTS + 1 },
+        (_, index) => index === 0 ? { type: 'server-request' } : subscribed(`rpc-${index}`, index),
+      ),
+    })
+
+    expect(decoded).toEqual({ ok: false, category: 'wrapper', requests: [] })
+  })
+
   it('rejects an empty batch', () => {
     expect(decodeMux({ type: 'server-batch', requests: [] }))
       .toEqual({ ok: false, category: 'wrapper', requests: [] })
@@ -281,6 +293,34 @@ describe('WebApiClient downlink messages', () => {
       '[client-connection] invalid WebSocket message on /api/events.mux (payload)',
     )
     expect(JSON.stringify(error.mock.calls)).not.toContain('INJECTED-PAYLOAD-MARKER')
+  })
+
+  it('closes an oversized batch as a wrapper failure without publishing members', async () => {
+    const client = new WebApiClient()
+    const envelopes: RpcMessage[] = []
+    client.subscribeEnvelopes((batch) => { envelopes.push(...batch) })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const abort = new AbortController()
+    const iterator = client.events.mux({}, abort.signal)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1) })
+
+    sockets[0]!.receive(JSON.stringify({
+      type: 'server-batch',
+      requests: Array.from(
+        { length: MAX_SERVER_BATCH_REQUESTS + 1 },
+        (_, index) => index === 0 ? { type: 'server-request' } : subscribed(`rpc-${index}`, index),
+      ),
+    }))
+
+    await expect(pending).resolves.toMatchObject({ done: true })
+    expect(envelopes).toEqual([])
+    expect(sockets[0]!.closeCalls).toEqual([
+      { code: 1002, reason: 'invalid downlink message' },
+    ])
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      '[client-connection] invalid WebSocket message on /api/events.mux (wrapper)',
+    )
   })
 
   it('closes a binary downlink message as a protocol error', async () => {
