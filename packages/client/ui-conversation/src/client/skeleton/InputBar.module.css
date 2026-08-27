@@ -176,9 +176,26 @@
   animation: input-pending 1s ease-in-out infinite alternate;
 }
 
+.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 @keyframes input-pending {
   from { opacity: 0.35; }
   to { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .pending {
+    animation: none;
+  }
 }
 
 .input {

@@ -6,6 +6,7 @@
 
 import { afterEach, describe, expect, it, onTestFinished, vi } from 'vitest'
 import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
 import { bindSnapshotSelector } from '@deepseek-ai/dsh-client-test-runtime'
 import {
   createSnapshotStore, EMPTY_CHAT_SNAPSHOT, EMPTY_CONVERSATION_VIEWS,
@@ -39,6 +40,13 @@ const NATIVE_SET_START = Object.getOwnPropertyDescriptor(Range.prototype, 'setSt
 
 const SCTX = {} as ClientContext
 const SID = 's1' as SessionId
+
+type SubmitSink = (
+  text: string,
+  imageIds: readonly DraftAttachmentId[],
+  mode: 'queue' | 'steer',
+  signal: AbortSignal,
+) => Promise<SubmitOutcome>
 
 function snapshotOf(overrides: Partial<ConversationSnapshot> = {}): ConversationSnapshot {
   return {
@@ -93,6 +101,7 @@ interface BenchOptions {
   commandMenuOpen?: boolean
   busyEnter?: 'queue' | 'steer'
   toggleCommandMenu?: (selection: { start: number; end: number }) => void
+  submit?: SubmitSink
 }
 
 /** One pending queue row (the runtime snapshot shape, as the dock tests build it). */
@@ -105,12 +114,7 @@ function row(id: string): ConversationSnapshot['queue'][number] {
 
 /** Real machine behind the bar entry: sink spy, no slash pipeline (plain text goes straight to the sink). */
 function bench(over?: BenchOptions) {
-  const sink = vi.fn<(
-    text: string,
-    imageIds: readonly DraftAttachmentId[],
-    mode: 'queue' | 'steer',
-    signal: AbortSignal,
-  ) => Promise<SubmitOutcome>>(() => Promise.resolve({ kind: 'success' }))
+  const sink = vi.fn<SubmitSink>(over?.submit ?? (() => Promise.resolve({ kind: 'success' })))
   const lex = over?.lexicon
   const session = createSnapshotStore<ConversationSnapshot>(snapshotOf({
     running: over?.running ?? false,
@@ -1119,7 +1123,138 @@ describe('running and lock semantics', () => {
 })
 
 describe('machine pending lock', () => {
-  it('submitting renders read-only textarea, pending dot, and a disabled primary', () => {
+  it.each(['Enter', 'button'] as const)('%s exposes the synchronous submission receipt', async (gesture) => {
+    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const { view, textarea, shell } = bench({
+      draft: 'keep this draft visible',
+      submit: () => deferred.promise,
+    })
+
+    if (gesture === 'Enter') fireEvent.keyDown(textarea, { key: 'Enter' })
+    else fireEvent.click(view.getByRole('button', { name: '发送消息' }))
+
+    expect(shell.snapshot.phase).toBe('submitting')
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    const primary = view.getByRole('button', { name: '发送中…' }) as HTMLButtonElement
+    expect(primary.disabled).toBe(true)
+    expect(primary.getAttribute('aria-busy')).toBe('true')
+    expect(primary.querySelector('[data-submit-pending]')).not.toBeNull()
+    expect(textarea.readOnly).toBe(true)
+    expect(textarea.value).toBe('keep this draft visible')
+    expect(view.container.querySelector('[data-chat-anchor-key], [data-pending-steering]')).toBeNull()
+
+    await act(async () => {
+      deferred.resolve({ kind: 'success' })
+      await deferred.promise
+      await Promise.resolve()
+    })
+  })
+
+  it('clears the receipt and draft after successful admission', async () => {
+    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const { view, textarea, shell } = bench({ draft: 'send once', submit: () => deferred.promise })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    await act(async () => {
+      deferred.resolve({ kind: 'success' })
+      await deferred.promise
+      await Promise.resolve()
+    })
+
+    expect(shell.snapshot.phase).toBe('plain')
+    expect(view.queryByRole('status')).toBeNull()
+    const primary = view.getByRole('button', { name: '发送消息' })
+    expect(primary.getAttribute('aria-busy')).toBeNull()
+    expect(textarea.readOnly).toBe(false)
+    expect(textarea.value).toBe('')
+  })
+
+  it('clears the receipt but preserves a retryable draft after rejected admission', async () => {
+    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const { view, textarea, shell } = bench({ draft: 'retry this', submit: () => deferred.promise })
+    fireEvent.click(view.getByRole('button', { name: '发送消息' }))
+
+    await act(async () => {
+      deferred.resolve({ kind: 'error' })
+      await deferred.promise
+      await Promise.resolve()
+    })
+
+    expect(shell.snapshot.phase).toBe('plain')
+    expect(view.queryByRole('status')).toBeNull()
+    const primary = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
+    expect(primary.getAttribute('aria-busy')).toBeNull()
+    expect(primary.disabled).toBe(false)
+    expect(textarea.readOnly).toBe(false)
+    expect(textarea.value).toBe('retry this')
+  })
+
+  it('keeps an ordinary running session primary as Stop while a queue submit is pending', async () => {
+    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const { view, textarea, shell, stop } = bench({
+      running: true,
+      draft: 'queue during run',
+      submit: () => deferred.promise,
+    })
+    const primary = view.getByRole('button', { name: '停止生成' }) as HTMLButtonElement
+
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(shell.snapshot.phase).toBe('submitting')
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    expect(view.getByRole('button', { name: '停止生成' })).toBe(primary)
+    expect(view.queryByRole('button', { name: '发送中…' })).toBeNull()
+    expect(primary.disabled).toBe(false)
+    expect(primary.getAttribute('aria-busy')).toBeNull()
+    expect(primary.querySelector('rect')).not.toBeNull()
+    expect(primary.querySelector('[data-submit-pending]')).toBeNull()
+    fireEvent.click(primary)
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    await act(async () => {
+      deferred.resolve({ kind: 'success' })
+      await deferred.promise
+      await Promise.resolve()
+    })
+  })
+
+  it('shows the receipt without producing an optimistic chat node', async () => {
+    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const { view, textarea } = bench({ draft: 'durable only', submit: () => deferred.promise })
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    expect(view.container.querySelector('[data-chat-flow], [data-chat-anchor-key], [data-pending-steering]')).toBeNull()
+
+    await act(async () => {
+      deferred.resolve({ kind: 'success' })
+      await deferred.promise
+      await Promise.resolve()
+    })
+  })
+
+  it('defines non-visual status and reduced-motion pending styles', () => {
+    // jsdom neither applies CSS Modules rules nor emulates reduced-motion media
+    // queries, so source inspection is the only structural signal available here.
+    const source = readFileSync('packages/client/ui-conversation/src/client/skeleton/InputBar.module.css', 'utf8')
+    expect(source).toContain(`.visuallyHidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}`)
+    expect(source).toContain(`@media (prefers-reduced-motion: reduce) {
+  .pending {
+    animation: none;
+  }
+}`)
+  })
+
+  it('command submission uses the same receipt state', () => {
     const { view, shell } = bench()
     // Drive the machine into submitting through a claim + enter.
     act(() => {
@@ -1136,7 +1271,11 @@ describe('machine pending lock', () => {
     expect(shell.snapshot.phase).toBe('submitting')
     const textarea = view.container.querySelector('textarea')!
     expect(textarea.readOnly).toBe(true)
-    expect(view.container.querySelector<HTMLButtonElement>('button[aria-label="发送消息"]')!.disabled).toBe(true)
+    expect(view.getByRole('status').textContent).toBe('发送中…')
+    const primary = view.getByRole('button', { name: '发送中…' }) as HTMLButtonElement
+    expect(primary.disabled).toBe(true)
+    expect(primary.getAttribute('aria-busy')).toBe('true')
+    expect(primary.querySelector('[data-submit-pending]')).not.toBeNull()
   })
 })
 
