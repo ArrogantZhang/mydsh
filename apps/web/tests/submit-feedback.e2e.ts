@@ -33,11 +33,11 @@ interface SubmitProbe {
   readonly status: HTMLElement
   observer: MutationObserver
   gestureAt: number | null
-  paintedAt: number | null
-  statusAtPaint: string | null
+  afterPaintAt: number | null
+  statusAfterPaint: string | null
   sameButton: boolean | null
   sameStatus: boolean | null
-  frameScheduled: boolean
+  paintCheckpointScheduled: boolean
 }
 
 interface PendingContrast {
@@ -81,11 +81,11 @@ async function installSubmitProbe(page: Page, gesture: Gesture): Promise<void> {
       status,
       observer: undefined as unknown as MutationObserver,
       gestureAt: null,
-      paintedAt: null,
-      statusAtPaint: null,
+      afterPaintAt: null,
+      statusAfterPaint: null,
       sameButton: null,
       sameStatus: null,
-      frameScheduled: false,
+      paintCheckpointScheduled: false,
     }
     const markGesture = (event: Event): void => {
       if (probe.gestureAt !== null) return
@@ -99,13 +99,15 @@ async function installSubmitProbe(page: Page, gesture: Gesture): Promise<void> {
     }
     document.addEventListener(gestureName === 'Enter' ? 'keydown' : 'pointerdown', markGesture, true)
     probe.observer = new MutationObserver(() => {
-      if (probe.frameScheduled || status.textContent !== 'Sending…') return
-      probe.frameScheduled = true
+      if (probe.paintCheckpointScheduled || status.textContent !== 'Sending…') return
+      probe.paintCheckpointScheduled = true
       requestAnimationFrame(() => {
-        probe.paintedAt = performance.now()
-        probe.statusAtPaint = status.textContent
-        probe.sameButton = stableCard.querySelector('button[aria-label="Send message"]') === button
-        probe.sameStatus = stableCard.querySelector('span[role="status"]') === status
+        requestAnimationFrame(() => {
+          probe.afterPaintAt = performance.now()
+          probe.statusAfterPaint = status.textContent
+          probe.sameButton = stableCard.querySelector('button[aria-label="Send message"]') === button
+          probe.sameStatus = stableCard.querySelector('span[role="status"]') === status
+        })
       })
     })
     probe.observer.observe(status, { childList: true, characterData: true, subtree: true })
@@ -115,8 +117,8 @@ async function installSubmitProbe(page: Page, gesture: Gesture): Promise<void> {
 
 async function readSubmitTiming(page: Page): Promise<{
   gestureAt: number | null
-  paintedAt: number | null
-  statusAtPaint: string | null
+  afterPaintAt: number | null
+  statusAfterPaint: string | null
   sameButton: boolean | null
   sameStatus: boolean | null
 }> {
@@ -125,8 +127,8 @@ async function readSubmitTiming(page: Page): Promise<{
     if (probe === undefined) throw new Error('submit timing probe is not installed')
     return {
       gestureAt: probe.gestureAt,
-      paintedAt: probe.paintedAt,
-      statusAtPaint: probe.statusAtPaint,
+      afterPaintAt: probe.afterPaintAt,
+      statusAfterPaint: probe.statusAfterPaint,
       sameButton: probe.sameButton,
       sameStatus: probe.sameStatus,
     }
@@ -215,16 +217,23 @@ async function pendingAnimation(page: Page): Promise<{
 describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admission', () => {
   let scaffold: WebScaffold | undefined
   let browser: Browser | undefined
-  let heldRoute: Route | undefined
-  let heldRoutePending = false
+  let activePage: Page | undefined
+  const promptRoutes: Route[] = []
+  const unresolvedPromptRoutes = new Set<Route>()
 
   afterEach(async () => {
     const failures: unknown[] = []
-    if (heldRoutePending && heldRoute !== undefined) {
-      heldRoutePending = false
-      await heldRoute.abort('failed').catch((error: unknown) => failures.push(error))
+    const closingPage = activePage
+    activePage = undefined
+    await closingPage?.unroute('**/api/session.prompt').catch((error: unknown) => failures.push(error))
+    while (unresolvedPromptRoutes.size > 0) {
+      const unresolved = [...unresolvedPromptRoutes]
+      unresolvedPromptRoutes.clear()
+      for (const route of unresolved) {
+        await route.abort('failed').catch((error: unknown) => failures.push(error))
+      }
     }
-    heldRoute = undefined
+    promptRoutes.length = 0
     await browser?.close().catch((error: unknown) => failures.push(error))
     browser = undefined
     const closing = scaffold
@@ -256,6 +265,7 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
       browser = await chromium.launch()
       const page = await newEnglishPage(browser)
+      activePage = page
       const tripwire = watchConsole(page)
       page.on('console', (message) => {
         if (message.type() === 'error') consoleErrors.push(message.text())
@@ -276,9 +286,12 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
 
       let resolveHeldRoute!: (route: Route) => void
       const requestHeld = new Promise<Route>((resolve) => { resolveHeldRoute = resolve })
+      let firstRouteResolved = false
       await page.route('**/api/session.prompt', (route) => {
-        heldRoute = route
-        heldRoutePending = true
+        promptRoutes.push(route)
+        unresolvedPromptRoutes.add(route)
+        if (firstRouteResolved) return
+        firstRouteResolved = true
         resolveHeldRoute(route)
       })
       await installSubmitProbe(page, gesture)
@@ -286,17 +299,29 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       const sessionEventCountBeforeSubmit = sessionEvents.length
       if (gesture === 'Enter') await textarea.press('Enter')
       else await sendButton.click()
-      const route = await requestHeld
+      const route = await (async (): Promise<Route> => {
+        let timer: ReturnType<typeof setTimeout> | undefined
+        try {
+          return await Promise.race([
+            requestHeld,
+            new Promise<never>((_resolve, reject) => {
+              timer = setTimeout(() => { reject(new Error('session.prompt request was not issued within 8 seconds')) }, 8_000)
+            }),
+          ])
+        } finally {
+          if (timer !== undefined) clearTimeout(timer)
+        }
+      })()
 
-      await expect.poll(async () => (await readSubmitTiming(page)).paintedAt, {
+      await expect.poll(async () => (await readSubmitTiming(page)).afterPaintAt, {
         timeout: 5_000,
-        message: 'pending receipt did not reach its first animation frame',
+        message: 'pending receipt did not reach its post-paint checkpoint',
       }).not.toBeNull()
       const timing = await readSubmitTiming(page)
       expect(timing.gestureAt).not.toBeNull()
-      expect(timing.paintedAt).not.toBeNull()
-      expect(timing.paintedAt! - timing.gestureAt!).toBeLessThan(100)
-      expect(timing.statusAtPaint).toBe('Sending…')
+      expect(timing.afterPaintAt).not.toBeNull()
+      expect(timing.afterPaintAt! - timing.gestureAt!).toBeLessThan(100)
+      expect(timing.statusAfterPaint).toBe('Sending…')
       expect(timing.sameButton).toBe(true)
       expect(timing.sameStatus).toBe(true)
       expect(await status.textContent()).toBe('Sending…')
@@ -348,8 +373,15 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
 
       const settled = scaffold.whenTurnSettled(60_000)
       await route.continue()
-      heldRoutePending = false
+      unresolvedPromptRoutes.delete(route)
       await settled
+      await page.evaluate(async () => {
+        await new Promise<void>((resolve) => {
+          requestAnimationFrame(() => { requestAnimationFrame(() => { resolve() }) })
+        })
+      })
+      expect(promptRoutes).toHaveLength(1)
+      expect(unresolvedPromptRoutes.size).toBe(0)
 
       const userRows = page.locator('[data-chat-flow-kind="user"]').filter({ hasText: PROMPT })
       await expect.poll(() => userRows.count(), { timeout: 15_000 }).toBe(1)
