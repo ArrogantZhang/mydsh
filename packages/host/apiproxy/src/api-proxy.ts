@@ -110,6 +110,7 @@ import {
   inspectApiRemoteSession,
 } from '@deepseek-ai/dsh-api-remotes'
 import { canOpenNativePath, openNativePath, openNativeTextFile } from './native-path-opener.ts'
+import { FrameQueue } from './frame-queue.ts'
 
 /** Page size when history is called without maxMessages. */
 const DEFAULT_MAX_MESSAGES = 50
@@ -121,6 +122,8 @@ const SESSION_SEARCH_PROVIDER_CALL_LIMIT = 100
 const COLD_SUMMARY_BATCH_SIZE = 16
 /** Default maximum artifact size eligible for one cold blankness read. */
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
+/** Default maximum frames retained by one event stream. */
+export const DEFAULT_MAX_EVENT_STREAM_QUEUE_FRAMES = 4096
 
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -351,40 +354,6 @@ function presetFailure(request: RpcRequest<unknown>, error: unknown): RpcRespons
   return undefined
 }
 
-/** Simple async queue: core callbacks push, the AsyncIterable pulls; abort/return cleans up. */
-class FrameQueue<F> {
-  private buffer: F[] = []
-  private waiter: (() => void) | undefined
-  private done = false
-
-  push(item: F): void {
-    if (this.done) return
-    this.buffer.push(item)
-    this.waiter?.()
-  }
-
-  end(): void {
-    this.done = true
-    this.waiter?.()
-  }
-
-  async *iterate(signal: AbortSignal, cleanup: () => void): AsyncGenerator<F> {
-    const onAbort = (): void => { this.end() }
-    signal.addEventListener('abort', onAbort, { once: true })
-    try {
-      while (true) {
-        while (this.buffer.length > 0) yield this.buffer.shift() as F
-        if (this.done || signal.aborted) return
-        await new Promise<void>((resolve) => { this.waiter = resolve })
-        this.waiter = undefined
-      }
-    } finally {
-      signal.removeEventListener('abort', onAbort)
-      cleanup()
-    }
-  }
-}
-
 /**
  * Server-side frame mint: pure pushes get a fresh rpcId per frame (answerable
  * frames — approval/question requested — mint their stable id in their
@@ -600,6 +569,8 @@ export interface ApiProxyDefaults {
   sessionExportCompressionLevel?: SessionLogCompressionLevel
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
+  /** Maximum frames retained by each mux or host event stream. */
+  maxEventStreamQueueFrames?: number
   /**
    * Whether handing a path to the native opener can work at all — the
    * `hasDocument` capability the preset roster reports, and the switch
@@ -1049,6 +1020,8 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
     ?? DEFAULT_SESSION_LOG_COMPRESSION_LEVEL
   const coldBlankProbeMaxBytes = defaults.coldBlankProbeMaxBytes
     ?? DEFAULT_COLD_BLANK_PROBE_MAX_BYTES
+  const maxEventStreamQueueFrames = defaults.maxEventStreamQueueFrames
+    ?? DEFAULT_MAX_EVENT_STREAM_QUEUE_FRAMES
   /** The seed model each create/resume declares; re-read so it never goes stale. */
   const agentOptions = (): AgentOptions => {
     const { provider, model } = defaults.defaultModelSelection()
@@ -3326,7 +3299,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
 
     events: {
       mux(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<MuxFrame>>()
+        const queue = new FrameQueue<RpcRequest<MuxFrame>>(maxEventStreamQueueFrames)
         muxQueues.add(queue)
         for (const session of ctx.sessions.list()) {
           subscribeSession(queue, session)
@@ -3430,7 +3403,7 @@ export function createApiProxy(ctx: Context, defaults: ApiProxyDefaults): ApiPro
       },
 
       host(_request, signal) {
-        const queue = new FrameQueue<RpcRequest<HostFrame>>()
+        const queue = new FrameQueue<RpcRequest<HostFrame>>(maxEventStreamQueueFrames)
         const committedWorkspaces = ctx.workspaceRegistry.list()
         const committedWorkspaceIds = new Set(
           committedWorkspaces.map(workspace => String(workspace.id)),

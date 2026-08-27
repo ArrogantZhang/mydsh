@@ -130,11 +130,20 @@ describe('session export compression config', () => {
     expect(ApiProxyService.Config({})).toEqual({
       sessionExportCompressionLevel: 6,
       coldBlankProbeMaxBytes: 1024,
+      maxEventStreamQueueFrames: 4096,
     })
     expect(ApiProxyService.Config({ sessionExportCompressionLevel: 0 }))
-      .toEqual({ sessionExportCompressionLevel: 0, coldBlankProbeMaxBytes: 1024 })
+      .toEqual({
+        sessionExportCompressionLevel: 0,
+        coldBlankProbeMaxBytes: 1024,
+        maxEventStreamQueueFrames: 4096,
+      })
     expect(ApiProxyService.Config({ sessionExportCompressionLevel: 9 }))
-      .toEqual({ sessionExportCompressionLevel: 9, coldBlankProbeMaxBytes: 1024 })
+      .toEqual({
+        sessionExportCompressionLevel: 9,
+        coldBlankProbeMaxBytes: 1024,
+        maxEventStreamQueueFrames: 4096,
+      })
     for (const value of [-1, 10, 1.5]) {
       expect(() => ApiProxyService.Config({ sessionExportCompressionLevel: value } as never)).toThrow()
     }
@@ -144,11 +153,40 @@ describe('session export compression config', () => {
 describe('cold blank probe config', () => {
   it('accepts a per-Session byte bound including zero and rejects invalid bounds', () => {
     expect(ApiProxyService.Config({ coldBlankProbeMaxBytes: 0 }))
-      .toEqual({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 0 })
+      .toEqual({
+        sessionExportCompressionLevel: 6,
+        coldBlankProbeMaxBytes: 0,
+        maxEventStreamQueueFrames: 4096,
+      })
     expect(ApiProxyService.Config({ coldBlankProbeMaxBytes: 2048 }))
-      .toEqual({ sessionExportCompressionLevel: 6, coldBlankProbeMaxBytes: 2048 })
+      .toEqual({
+        sessionExportCompressionLevel: 6,
+        coldBlankProbeMaxBytes: 2048,
+        maxEventStreamQueueFrames: 4096,
+      })
     for (const value of [-1, 1.5]) {
       expect(() => ApiProxyService.Config({ coldBlankProbeMaxBytes: value })).toThrow()
+    }
+  })
+})
+
+describe('event stream queue config', () => {
+  it('defaults to 4096 frames and accepts positive integer bounds', () => {
+    expect(ApiProxyService.Config({ maxEventStreamQueueFrames: 1 })).toEqual({
+      sessionExportCompressionLevel: 6,
+      coldBlankProbeMaxBytes: 1024,
+      maxEventStreamQueueFrames: 1,
+    })
+    expect(ApiProxyService.Config({ maxEventStreamQueueFrames: 8192 })).toEqual({
+      sessionExportCompressionLevel: 6,
+      coldBlankProbeMaxBytes: 1024,
+      maxEventStreamQueueFrames: 8192,
+    })
+  })
+
+  it('rejects non-positive, fractional, and non-finite bounds', () => {
+    for (const value of [0, -1, 1.5, Infinity]) {
+      expect(() => ApiProxyService.Config({ maxEventStreamQueueFrames: value })).toThrow()
     }
   })
 })
