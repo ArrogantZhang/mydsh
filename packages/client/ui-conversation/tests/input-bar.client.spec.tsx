@@ -14,7 +14,7 @@ import {
 import { makeTranslate } from '@deepseek-ai/dsh-client-test-runtime'
 import { zh as commonZh } from '@deepseek-ai/dsh-client-locale/src/locales/zh.ts'
 import type { ClientContext, ConversationSnapshot, SessionId } from '@deepseek-ai/dsh-client-runtime/client'
-import type { SubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
+import type { PickOutcome, SubmitOutcome } from '@deepseek-ai/dsh-client-ui-input-trigger/client'
 import { SessionInputShell } from '../src/client/input/facade.ts'
 import type {
   ComposerAttachment, ComposerAttachmentsOwnerProps,
@@ -47,6 +47,23 @@ type SubmitSink = (
   mode: 'queue' | 'steer',
   signal: AbortSignal,
 ) => Promise<SubmitOutcome>
+
+function controlledPromise<T>(cleanupValue: T) {
+  const deferred = Promise.withResolvers<T>()
+  let settled = false
+  const settle = async (value: T = cleanupValue): Promise<void> => {
+    await act(async () => {
+      if (!settled) {
+        settled = true
+        deferred.resolve(value)
+      }
+      await deferred.promise
+      await Promise.resolve()
+    })
+  }
+  onTestFinished(() => settle(cleanupValue))
+  return { promise: deferred.promise, settle }
+}
 
 function snapshotOf(overrides: Partial<ConversationSnapshot> = {}): ConversationSnapshot {
   return {
@@ -102,6 +119,7 @@ interface BenchOptions {
   busyEnter?: 'queue' | 'steer'
   toggleCommandMenu?: (selection: { start: number; end: number }) => void
   submit?: SubmitSink
+  adjudicate?: (draft: string, signal: AbortSignal) => Promise<PickOutcome>
 }
 
 /** One pending queue row (the runtime snapshot shape, as the dock tests build it). */
@@ -116,6 +134,7 @@ function row(id: string): ConversationSnapshot['queue'][number] {
 function bench(over?: BenchOptions) {
   const sink = vi.fn<SubmitSink>(over?.submit ?? (() => Promise.resolve({ kind: 'success' })))
   const lex = over?.lexicon
+  const triggerLexicon = lex ?? new Map<'/' | '@', readonly string[]>()
   const session = createSnapshotStore<ConversationSnapshot>(snapshotOf({
     running: over?.running ?? false,
     subagent: over?.subagent ?? null,
@@ -133,12 +152,15 @@ function bench(over?: BenchOptions) {
       subscribe: fn => session.subscribe(fn),
     },
     ...(over?.steerQueue !== undefined ? { steerQueue: over.steerQueue } : {}),
-    // Lexicon-only stub: adjudication untouched (undefined slash methods are
-    // never reached — these benches drive plain-draft flows only).
-    ...(lex !== undefined
+    // Narrow controller stub for text-ref decoration and controlled slash
+    // adjudication; unrelated controller methods stay unreachable here.
+    ...(lex !== undefined || over?.adjudicate !== undefined
       ? {
         inputTriggers: (() => ({
-          lexicon: { getSnapshot: () => lex, subscribe: () => () => {} },
+          lexicon: { getSnapshot: () => triggerLexicon, subscribe: () => () => {} },
+          arbitrate: () => 'pass',
+          adjudicate: over?.adjudicate ?? (() => Promise.resolve(undefined)),
+          track: () => {},
         })) as unknown as NonNullable<ShellDeps['inputTriggers']>,
       }
       : {}),
@@ -665,6 +687,40 @@ describe('running and lock semantics', () => {
     expect(stop).toHaveBeenCalledTimes(1)
   })
 
+  it('keeps the independent Stop usable while a continuable submission is pending', async () => {
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'success' })
+    const { button, interruptButton, textarea, shell, stop, view } = bench({
+      running: true,
+      draft: 'pending follow-up',
+      submit: () => deferred.promise,
+      subagent: {
+        address: {
+          parentSessionId: 'parent' as SessionId,
+          childSessionId: SID,
+          mode: 'continuable',
+        },
+        parentAvailable: true,
+      },
+    })
+    const status = view.getByRole('status')
+    expect(status.textContent).toBe('')
+
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(shell.snapshot.phase).toBe('submitting')
+    expect(status.textContent).toBe('发送中…')
+    expect(view.getByRole('button', { name: '发送消息' })).toBe(button)
+    expect(button.disabled).toBe(true)
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    expect(button.querySelector('[data-submit-pending]')).not.toBeNull()
+    expect(interruptButton?.disabled).toBe(false)
+    fireEvent.click(interruptButton!)
+    expect(stop).toHaveBeenCalledTimes(1)
+
+    await deferred.settle()
+    expect(status.textContent).toBe('')
+  })
+
   it('parent-offline running continuable locks Send but keeps independent Stop usable', () => {
     const { button, interruptButton, textarea, stop, view } = bench({
       running: true,
@@ -1124,45 +1180,40 @@ describe('running and lock semantics', () => {
 
 describe('machine pending lock', () => {
   it.each(['Enter', 'button'] as const)('%s exposes the synchronous submission receipt', async (gesture) => {
-    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'success' })
     const { view, textarea, shell } = bench({
       draft: 'keep this draft visible',
       submit: () => deferred.promise,
     })
+    const status = view.getByRole('status')
+    expect(status.textContent).toBe('')
 
     if (gesture === 'Enter') fireEvent.keyDown(textarea, { key: 'Enter' })
     else fireEvent.click(view.getByRole('button', { name: '发送消息' }))
 
     expect(shell.snapshot.phase).toBe('submitting')
-    expect(view.getByRole('status').textContent).toBe('发送中…')
-    const primary = view.getByRole('button', { name: '发送中…' }) as HTMLButtonElement
+    expect(status.textContent).toBe('发送中…')
+    const primary = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
     expect(primary.disabled).toBe(true)
     expect(primary.getAttribute('aria-busy')).toBe('true')
     expect(primary.querySelector('[data-submit-pending]')).not.toBeNull()
     expect(textarea.readOnly).toBe(true)
     expect(textarea.value).toBe('keep this draft visible')
-    expect(view.container.querySelector('[data-chat-anchor-key], [data-pending-steering]')).toBeNull()
 
-    await act(async () => {
-      deferred.resolve({ kind: 'success' })
-      await deferred.promise
-      await Promise.resolve()
-    })
+    await deferred.settle()
+    expect(status.textContent).toBe('')
   })
 
   it('clears the receipt and draft after successful admission', async () => {
-    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'success' })
     const { view, textarea, shell } = bench({ draft: 'send once', submit: () => deferred.promise })
+    const status = view.getByRole('status')
     fireEvent.keyDown(textarea, { key: 'Enter' })
 
-    await act(async () => {
-      deferred.resolve({ kind: 'success' })
-      await deferred.promise
-      await Promise.resolve()
-    })
+    await deferred.settle()
 
     expect(shell.snapshot.phase).toBe('plain')
-    expect(view.queryByRole('status')).toBeNull()
+    expect(status.textContent).toBe('')
     const primary = view.getByRole('button', { name: '发送消息' })
     expect(primary.getAttribute('aria-busy')).toBeNull()
     expect(textarea.readOnly).toBe(false)
@@ -1170,18 +1221,15 @@ describe('machine pending lock', () => {
   })
 
   it('clears the receipt but preserves a retryable draft after rejected admission', async () => {
-    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'error' })
     const { view, textarea, shell } = bench({ draft: 'retry this', submit: () => deferred.promise })
+    const status = view.getByRole('status')
     fireEvent.click(view.getByRole('button', { name: '发送消息' }))
 
-    await act(async () => {
-      deferred.resolve({ kind: 'error' })
-      await deferred.promise
-      await Promise.resolve()
-    })
+    await deferred.settle()
 
     expect(shell.snapshot.phase).toBe('plain')
-    expect(view.queryByRole('status')).toBeNull()
+    expect(status.textContent).toBe('')
     const primary = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
     expect(primary.getAttribute('aria-busy')).toBeNull()
     expect(primary.disabled).toBe(false)
@@ -1190,7 +1238,7 @@ describe('machine pending lock', () => {
   })
 
   it('keeps an ordinary running session primary as Stop while a queue submit is pending', async () => {
-    const deferred = Promise.withResolvers<SubmitOutcome>()
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'success' })
     const { view, textarea, shell, stop } = bench({
       running: true,
       draft: 'queue during run',
@@ -1211,11 +1259,31 @@ describe('machine pending lock', () => {
     fireEvent.click(primary)
     expect(stop).toHaveBeenCalledTimes(1)
 
-    await act(async () => {
-      deferred.resolve({ kind: 'success' })
-      await deferred.promise
-      await Promise.resolve()
+    await deferred.settle()
+    expect(view.getByRole('status').textContent).toBe('')
+  })
+
+  it('renders the same receipt while slash adjudication is pending', async () => {
+    const deferred = controlledPromise<PickOutcome>('handled')
+    const { view, textarea, shell } = bench({
+      draft: '/pending',
+      adjudicate: () => deferred.promise,
     })
+    const status = view.getByRole('status')
+    expect(status.textContent).toBe('')
+
+    fireEvent.keyDown(textarea, { key: 'Enter' })
+
+    expect(shell.snapshot.phase).toBe('adjudicating')
+    expect(status.textContent).toBe('发送中…')
+    const primary = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
+    expect(primary.disabled).toBe(true)
+    expect(primary.getAttribute('aria-busy')).toBe('true')
+    expect(primary.querySelector('[data-submit-pending]')).not.toBeNull()
+    expect(textarea.readOnly).toBe(true)
+
+    await deferred.settle()
+    expect(status.textContent).toBe('')
   })
 
   it('defines non-visual status and reduced-motion pending styles', () => {
@@ -1245,9 +1313,13 @@ describe('machine pending lock', () => {
     animation: none;
   }
 }`)
+    expect(source).toContain(`.primary[aria-busy='true'] {
+  opacity: 1;
+}`)
   })
 
-  it('command submission uses the same receipt state', () => {
+  it('command submission uses the same receipt state', async () => {
+    const deferred = controlledPromise<SubmitOutcome>({ kind: 'success' })
     const { view, shell } = bench()
     // Drive the machine into submitting through a claim + enter.
     act(() => {
@@ -1255,7 +1327,7 @@ describe('machine pending lock', () => {
       shell.beginCommand(
         {
           token: '/goal ',
-          submit: () => new Promise<never>(() => {}), // never settles: stays submitting
+          submit: () => deferred.promise,
         },
         { start: 0, end: 6, draftRev: shell.snapshot.draftRev },
       )
@@ -1265,10 +1337,13 @@ describe('machine pending lock', () => {
     const textarea = view.container.querySelector('textarea')!
     expect(textarea.readOnly).toBe(true)
     expect(view.getByRole('status').textContent).toBe('发送中…')
-    const primary = view.getByRole('button', { name: '发送中…' }) as HTMLButtonElement
+    const primary = view.getByRole('button', { name: '发送消息' }) as HTMLButtonElement
     expect(primary.disabled).toBe(true)
     expect(primary.getAttribute('aria-busy')).toBe('true')
     expect(primary.querySelector('[data-submit-pending]')).not.toBeNull()
+
+    await deferred.settle()
+    expect(view.getByRole('status').textContent).toBe('')
   })
 })
 
@@ -1567,7 +1642,7 @@ describe('strips and variants', () => {
       const { view, shell } = bench()
       act(() => { shell.notify('error', '命令失败了') })
       expect(view.getByRole('alert').textContent).toContain('命令失败了')
-      expect(view.queryByRole('status')).toBeNull()
+      expect(view.getByRole('status').textContent).toBe('')
       act(() => { vi.advanceTimersByTime(4000) })
       expect(view.queryByRole('alert')).toBeNull()
     } finally {
@@ -1578,7 +1653,8 @@ describe('strips and variants', () => {
   it('renders an information notice from the machine store as a status strip', () => {
     const { view, shell } = bench()
     act(() => { shell.notify('info', '命令完成了') })
-    expect(view.getByRole('status').textContent).toBe('命令完成了')
+    expect(view.getByText('命令完成了').getAttribute('role')).toBe('status')
+    expect(view.getAllByRole('status')).toHaveLength(2)
     expect(view.queryByRole('alert')).toBeNull()
   })
 

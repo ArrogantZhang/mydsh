@@ -563,9 +563,7 @@ export function InputBar({
   const primaryStops = running && subagent === null
   const interruptible = running && continuable
   const sendPending = machineBusy && !primaryStops
-  const primaryLabel = primaryStops
-    ? t('input.stop')
-    : sendPending ? t('input.sending') : t('input.send')
+  const primaryLabel = primaryStops ? t('input.stop') : t('input.send')
   const onPrimary = (): void => {
     if (primaryStops) {
       stop?.()
@@ -796,7 +794,7 @@ export function InputBar({
             {rightItems}
             {renderSlot('conversation.input.model', { locked: modelSeatLocked })}
             <ContextMeter useProjection={useProjection} t={t} />
-            {machineBusy && <span className={css.visuallyHidden} role="status">{t('input.sending')}</span>}
+            <span className={css.visuallyHidden} role="status">{machineBusy ? t('input.sending') : ''}</span>
             {interruptible && (
               <Tooltip label={t('input.stop')} side="top" delayMs={500}>
                 <button

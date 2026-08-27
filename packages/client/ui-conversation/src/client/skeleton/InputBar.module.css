@@ -417,6 +417,10 @@
   cursor: default;
 }
 
+.primary[aria-busy='true'] {
+  opacity: 1;
+}
+
 .retry {
   margin-left: 8px;
   padding: 1px 8px;
