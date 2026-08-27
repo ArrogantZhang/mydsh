@@ -41,6 +41,50 @@ describe('FrameQueue', () => {
     expect(cleanups).toBe(1)
   })
 
+  it('reuses released slots across interleaved push and consume without front-removing array storage', async () => {
+    const queue = new FrameQueue<number>(3)
+    let cleanups = 0
+    expect(queue.push(1)).toBe(true)
+    expect(queue.push(2)).toBe(true)
+    const sizes = [queue.size]
+    const iterator = queue.iterate(new AbortController().signal, () => { cleanups++ })
+    // Timing assertions are unstable across hosts. Rejecting Array.shift()
+    // mechanically pins the O(1) storage choice while the interleaving below
+    // exercises slot reuse across the fixed buffer's wrap point.
+    const shift = Array.prototype.shift
+    Array.prototype.shift = function forbiddenShift(): never {
+      throw new Error('FrameQueue must not use Array.shift()')
+    }
+    let first: IteratorResult<number> | undefined
+    let second: IteratorResult<number> | undefined
+    let third: IteratorResult<number> | undefined
+    let fourth: IteratorResult<number> | undefined
+    let finished: IteratorResult<number> | undefined
+    try {
+      first = await iterator.next()
+      sizes.push(queue.size)
+      queue.push(3)
+      queue.push(4)
+      sizes.push(queue.size)
+      second = await iterator.next()
+      sizes.push(queue.size)
+      third = await iterator.next()
+      sizes.push(queue.size)
+      fourth = await iterator.next()
+      sizes.push(queue.size)
+      queue.end()
+      finished = await iterator.next()
+    } finally {
+      Array.prototype.shift = shift
+    }
+
+    expect([first?.value, second?.value, third?.value, fourth?.value]).toEqual([1, 2, 3, 4])
+    expect(sizes).toEqual([2, 1, 3, 2, 1, 0])
+    expect(finished).toEqual({ value: undefined, done: true })
+    expect(queue.size).toBe(0)
+    expect(cleanups).toBe(1)
+  })
+
   it('aborts without delivering retained frames', async () => {
     const queue = new FrameQueue<object>(2)
     const abort = new AbortController()

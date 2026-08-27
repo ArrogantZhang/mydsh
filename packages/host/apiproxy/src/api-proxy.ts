@@ -124,6 +124,8 @@ const COLD_SUMMARY_BATCH_SIZE = 16
 export const DEFAULT_COLD_BLANK_PROBE_MAX_BYTES = 1024
 /** Default maximum frames retained by one event stream. */
 export const DEFAULT_MAX_EVENT_STREAM_QUEUE_FRAMES = 4096
+/** Reviewed maximum frames retained by one event stream. */
+export const MAX_EVENT_STREAM_QUEUE_FRAMES = 16_384
 
 /** Conversation message event types (the pagination counting unit). */
 const MESSAGE_TYPES = new Set(['user/message', 'assistant/message'])
@@ -569,7 +571,10 @@ export interface ApiProxyDefaults {
   sessionExportCompressionLevel?: SessionLogCompressionLevel
   /** Maximum artifact size eligible for one cold blankness read. */
   coldBlankProbeMaxBytes?: number
-  /** Maximum frames retained by each mux or host event stream. */
+  /**
+   * Validated 1-16384 frame retention limit for each mux or host event stream.
+   * @default 4096
+   */
   maxEventStreamQueueFrames?: number
   /**
    * Whether handing a path to the native opener can work at all — the

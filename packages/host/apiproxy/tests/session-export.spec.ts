@@ -15,6 +15,7 @@ import type { SessionHeader, SessionId } from '@deepseek-ai/dsh-session'
 import type { SessionLineageNode } from '@deepseek-ai/dsh-session-query'
 import type { SessionRawArtifact } from '@deepseek-ai/dsh-session-persistence'
 import ApiProxyService, { createApiProxy, toFetchHandler } from '@deepseek-ai/dsh-host-apiproxy'
+import { MAX_EVENT_STREAM_QUEUE_FRAMES } from '../src/api-proxy.ts'
 
 const sid = (id: string): SessionId => id as SessionId
 
@@ -177,15 +178,23 @@ describe('event stream queue config', () => {
       coldBlankProbeMaxBytes: 1024,
       maxEventStreamQueueFrames: 1,
     })
-    expect(ApiProxyService.Config({ maxEventStreamQueueFrames: 8192 })).toEqual({
+    expect(ApiProxyService.Config({ maxEventStreamQueueFrames: MAX_EVENT_STREAM_QUEUE_FRAMES })).toEqual({
       sessionExportCompressionLevel: 6,
       coldBlankProbeMaxBytes: 1024,
-      maxEventStreamQueueFrames: 8192,
+      maxEventStreamQueueFrames: MAX_EVENT_STREAM_QUEUE_FRAMES,
     })
   })
 
-  it('rejects non-positive, fractional, and non-finite bounds', () => {
-    for (const value of [0, -1, 1.5, Infinity]) {
+  it('rejects values outside the reviewed positive-integer range', () => {
+    for (const value of [
+      0,
+      -1,
+      1.5,
+      MAX_EVENT_STREAM_QUEUE_FRAMES + 1,
+      Number.MAX_SAFE_INTEGER + 1,
+      Number.MAX_VALUE,
+      Infinity,
+    ]) {
       expect(() => ApiProxyService.Config({ maxEventStreamQueueFrames: value })).toThrow()
     }
   })

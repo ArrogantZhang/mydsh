@@ -20,6 +20,7 @@ import {
   createApiProxy,
   DEFAULT_COLD_BLANK_PROBE_MAX_BYTES,
   DEFAULT_MAX_EVENT_STREAM_QUEUE_FRAMES,
+  MAX_EVENT_STREAM_QUEUE_FRAMES,
 } from './api-proxy.ts'
 import {
   DEFAULT_SESSION_LOG_COMPRESSION_LEVEL,
@@ -65,7 +66,7 @@ export interface Config {
   coldBlankProbeMaxBytes?: number
   /**
    * Maximum frames retained by each mux or host event stream before that
-   * stream fails and releases its queue.
+   * stream fails and releases its queue. Accepts 1 through 16384.
    * @default 4096
    */
   maxEventStreamQueueFrames?: number
@@ -87,7 +88,7 @@ export class ApiProxyService extends Service implements ApiProxy {
     sessionExportCompressionLevel: z.number().step(1).min(0).max(9)
       .default(DEFAULT_SESSION_LOG_COMPRESSION_LEVEL) as z<SessionLogCompressionLevel>,
     coldBlankProbeMaxBytes: z.natural().default(DEFAULT_COLD_BLANK_PROBE_MAX_BYTES),
-    maxEventStreamQueueFrames: z.number().step(1).min(1)
+    maxEventStreamQueueFrames: z.number().step(1).min(1).max(MAX_EVENT_STREAM_QUEUE_FRAMES)
       .default(DEFAULT_MAX_EVENT_STREAM_QUEUE_FRAMES),
   })
 

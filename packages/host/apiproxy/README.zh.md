@@ -22,7 +22,7 @@ Settings 分节中的 `reasoningEffort` 在 agent-default-model 插件配置中�
 
 分层与协议决策记录在 [GUI 分层与 RPC 协议 RFC](../../../.agents/notes/implemented/architecture/2026-07-19-gui-layering-and-rpc-protocol.zh.md) 中；浏览器侧消费架构记录在 [Web 客户端架构 RFC](../../../.agents/notes/implemented/architecture/2026-07-19-gui-web-client-architecture.zh.md) 中。
 
-每次打开 `events.mux` 或 `events.host` 都各自拥有一个独立的有界帧队列。`maxEventStreamQueueFrames` 是其按流计算的正整数保留上限（默认 4096）。队列达到上限后的下一次 push 会记录溢出、释放所有保留帧的引用、唤醒该流的消费方并使其失败，同时向 Cordis 生产方回调返回 `false`，而不是让异常穿过回调。溢出由其中一条流发起；`ConnectionController` 把任一流的失败视为整个浏览器连接世代失败，中止其配套流，并重新连接两条流，而不会保留失败世代中的任何一条。重新打开后的 mux 基线会重建实时队列、后台任务和待处理交互状态，列表刷新会重建 Host 状态，已打开的 Session 窗口则重新读取持久化 `session.history`，恢复失败前没有送达的 Session 事件。
+每次打开 `events.mux` 或 `events.host` 都各自拥有一个独立的有界帧队列。`maxEventStreamQueueFrames` 接受 1 到 16384 帧的按流保留上限（默认 4096）。队列达到上限后的下一次 push 会记录溢出、释放所有保留帧的引用、唤醒该流的消费方并使其失败，同时向 Cordis 生产方回调返回 `false`，而不是让异常穿过回调。溢出由其中一条流发起；`ConnectionController` 把任一流的失败视为整个浏览器连接代际失败，中止其配套流，并重新连接两条流，而不会保留失败代际中的任何一条。重新打开后的 mux 基线会重建实时队列、后台任务和待处理交互状态，列表刷新会重建 Host 状态，已打开的 Session 窗口则重新读取持久化 `session.history`，恢复失败前没有送达的 Session 事件。
 
 首个回答认领待处理请求之前，系统会对照该请求校验问题响应。多选题的回答项可以同时携带 `selected` 中的请求选项标签与非空 `custom` 文本；单选题的回答项必须二选一。标签重复、标签未知、id 不匹配、批次不完整以及自定义文本为空都会以 `bad-response` 拒绝。
 

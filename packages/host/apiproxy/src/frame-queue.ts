@@ -11,7 +11,9 @@ export class FrameQueueOverflowError extends Error {
 
 /** A bounded, single-consumer async frame queue. */
 export class FrameQueue<F> {
-  private readonly buffer: F[] = []
+  private readonly buffer: Array<F | undefined>
+  private head = 0
+  private length = 0
   private waiter: (() => void) | undefined
   private ended = false
   private overflow: FrameQueueOverflowError | undefined
@@ -19,11 +21,13 @@ export class FrameQueue<F> {
   /**
    * @param capacity - the validated positive maximum retained frame count.
    */
-  constructor(private readonly capacity: number) {}
+  constructor(private readonly capacity: number) {
+    this.buffer = new Array<F | undefined>(capacity)
+  }
 
   /** Current retained frame count. */
   get size(): number {
-    return this.buffer.length
+    return this.length
   }
 
   /**
@@ -33,14 +37,15 @@ export class FrameQueue<F> {
    */
   push(item: F): boolean {
     if (this.ended) return false
-    if (this.buffer.length >= this.capacity) {
+    if (this.length >= this.capacity) {
       this.overflow = new FrameQueueOverflowError(this.capacity)
       this.ended = true
-      this.buffer.length = 0
+      this.clear()
       this.wake()
       return false
     }
-    this.buffer.push(item)
+    this.buffer[(this.head + this.length) % this.capacity] = item
+    this.length++
     this.wake()
     return true
   }
@@ -61,7 +66,7 @@ export class FrameQueue<F> {
   async *iterate(signal: AbortSignal, cleanup: () => void): AsyncGenerator<F> {
     const onAbort = (): void => {
       this.ended = true
-      this.buffer.length = 0
+      this.clear()
       this.wake()
     }
     signal.addEventListener('abort', onAbort, { once: true })
@@ -71,8 +76,12 @@ export class FrameQueue<F> {
         const overflow = this.currentOverflow()
         if (overflow !== undefined) throw overflow
         if (this.isAborted(signal)) return
-        while (this.buffer.length > 0) {
-          yield this.buffer.shift() as F
+        while (this.length > 0) {
+          const item = this.buffer[this.head] as F
+          this.buffer[this.head] = undefined
+          this.head = (this.head + 1) % this.capacity
+          this.length--
+          yield item
           const resumedOverflow = this.currentOverflow()
           if (resumedOverflow !== undefined) throw resumedOverflow
           if (this.isAborted(signal)) return
@@ -82,7 +91,7 @@ export class FrameQueue<F> {
       }
     } finally {
       this.ended = true
-      this.buffer.length = 0
+      this.clear()
       this.wake()
       signal.removeEventListener('abort', onAbort)
       cleanup()
@@ -93,6 +102,12 @@ export class FrameQueue<F> {
     const waiter = this.waiter
     this.waiter = undefined
     waiter?.()
+  }
+
+  private clear(): void {
+    this.buffer.fill(undefined)
+    this.head = 0
+    this.length = 0
   }
 
   private currentOverflow(): FrameQueueOverflowError | undefined {
