@@ -178,6 +178,11 @@ describe('event stream queue config', () => {
       coldBlankProbeMaxBytes: 1024,
       maxEventStreamQueueFrames: 1,
     })
+    expect(ApiProxyService.Config({ maxEventStreamQueueFrames: 8192 })).toEqual({
+      sessionExportCompressionLevel: 6,
+      coldBlankProbeMaxBytes: 1024,
+      maxEventStreamQueueFrames: 8192,
+    })
     expect(ApiProxyService.Config({ maxEventStreamQueueFrames: MAX_EVENT_STREAM_QUEUE_FRAMES })).toEqual({
       sessionExportCompressionLevel: 6,
       coldBlankProbeMaxBytes: 1024,
