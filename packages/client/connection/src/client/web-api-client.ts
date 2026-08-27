@@ -1,10 +1,10 @@
 /** Browser API carrier: HTTP upstream plus one WebSocket per downstream event stream. */
 
-import type { ApiProxy, HostFrame, MuxFrame, RpcRequest, ServerRequest } from './api.ts'
+import type { ApiProxy, HostFrame, MuxFrame, RpcRequest } from './api.ts'
 import { AbstractApiClient } from './api.ts'
 import { hostFrameSchema, muxFrameSchema } from '@deepseek-ai/dsh-host-apiproxy/api/events.schema'
-import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '../api-path.ts'
+import { decodeDownlinkMessage, type DownlinkDecodeCategory } from '../downlink-message.ts'
 
 type SocketItem<F> = { kind: 'frame'; envelope: RpcRequest<F> } | { kind: 'end' }
 type Parser<F> = { parse(value: unknown): F }
@@ -48,19 +48,30 @@ export class WebApiClient extends AbstractApiClient {
       wake = undefined
     }
     const handleOpen = (): void => { onOpen?.() }
+    const rejectMessage = (category: DownlinkDecodeCategory | 'binary'): void => {
+      console.error(`[client-connection] invalid WebSocket message on ${path} (${category})`)
+      queueMicrotask(() => {
+        if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
+          socket.close(1002, 'invalid downlink message')
+        }
+      })
+    }
     const handleMessage = (event: MessageEvent): void => {
-      let full: ServerRequest
-      let frame: F
-      try {
-        if (typeof event.data !== 'string') throw new Error('binary WebSocket frame')
-        full = serverRequestSchema.parse(JSON.parse(event.data))
-        frame = frameSchema.parse(full.payload)
-      } catch (error) {
-        console.error(`[client-connection] dropping malformed WebSocket frame on ${path}:`, error)
+      if (typeof event.data !== 'string') {
+        rejectMessage('binary')
         return
       }
-      this.onEnvelope(full)
-      enqueue({ kind: 'frame', envelope: { rpcId: full.rpcId, payload: frame } })
+      const decoded = decodeDownlinkMessage(event.data, frameSchema)
+      if (!decoded.ok) {
+        rejectMessage(decoded.category)
+        return
+      }
+      for (const [index, request] of decoded.requests.entries()) {
+        const envelope = decoded.envelopes[index]
+        if (envelope === undefined) throw new Error('downlink decoder returned misaligned requests')
+        this.onEnvelope(envelope)
+        enqueue({ kind: 'frame', envelope: request })
+      }
     }
     const handleClose = (): void => { enqueue({ kind: 'end' }) }
     const handleAbort = (): void => {
