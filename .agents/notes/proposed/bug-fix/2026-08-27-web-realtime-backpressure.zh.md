@@ -32,7 +32,7 @@ composer 仅拥有瞬时回执的展示。它不追加回执事件，也不从 H
 
 ## 考虑过的替代方案
 
-**在 WebSocket 写入前批处理帧。** WebSocket 压缩通过确定性字节数／RSS 基准测试时，批处理延后。`scripts/websocket-downlink-benchmark.ts` 在独立的全新 Node 子进程中分别启动关闭压缩与启用压缩两种模式。在每种模式中，`scripts/websocket-downlink-benchmark-worker.ts` 打开五个浏览器对端与十条真实 WebSocket 下行。每个浏览器的 mux 流恰好接收 24,000 个合成会话帧，每条 host 流恰好接收 256 个固定 host 帧。会话帧载荷按确定性顺序循环使用 worker 拥有的固定 `reasoning-delta`、`text-delta` 与 `tool-call-delta` 构造器；父进程断言两种模式报告完全相同的序列化应用字节数。生产方每次推送 64 帧并通过 `setImmediate` 让出执行，每个源使用容量为 4,096 帧的 `FrameQueue`。十条 socket 全部打开后，worker 记录每个客户端的 TCP `bytesRead` 基线。传输字节数是所有预期帧到达后、socket 关闭前各客户端最终值减基线值所得 `bytesRead` 之和。worker 从十条 socket 全部打开后取得的基线开始，每 5 ms 采样一次 `process.memoryUsage().rss`；RSS 增量是峰值减基线。相较关闭压缩模式，压缩必须使 WebSocket 传输字节数至少降低 60%，且启用压缩模式的 RSS 增量不超过 64 MiB。任一指标未达标都会阻止生产环境启用压缩，并要求单独的批处理修订。
+**在 WebSocket 写入前批处理帧。** WebSocket 压缩通过下文的确定性基准测试时，批处理延后。在没有证据证明压缩与有界队列不足的情况下，批处理会徒增延迟与顺序复杂度。任一基准指标未达标都会阻止生产环境启用压缩，并要求单独的批处理修订；不得静默交付压缩。
 
 **有损合并 `assistant/chunk` 帧。** 否决：分片顺序、时序、部分输出、回放与 UI 保真度仍然可观测。传输层不得为权威会话日志另外编造一份有损记录。
 
