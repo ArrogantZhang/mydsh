@@ -217,9 +217,6 @@ describe('connection client apply', () => {
     ])
     await vi.waitFor(() => { expect(opened).toEqual(['mux', 'host']) })
 
-    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
-    sockets[0]!.receive(new Uint8Array([1, 2, 3]))
-    sockets[1]!.receive(JSON.stringify({ type: 'server-request', rpcId: 'bad', method: 'host/session-status', payload: {} }))
     sockets[0]!.receive(JSON.stringify({
       type: 'server-request',
       rpcId: 'mux-browser',
@@ -238,7 +235,6 @@ describe('connection client apply', () => {
     expect(await hostFrame).toMatchObject({
       value: { rpcId: 'host-browser', payload: { type: 'host/remote-event', event: 'commands/change' } },
     })
-    expect(errors).toHaveBeenCalledTimes(2)
     await vi.waitFor(() => { expect(envelopes.flat()).toHaveLength(2) })
     expect(fetch).not.toHaveBeenCalled()
 
@@ -249,7 +245,6 @@ describe('connection client apply', () => {
     await expect(muxEnd).resolves.toMatchObject({ done: true })
     await expect(hostEnd).resolves.toMatchObject({ done: true })
     expect(sockets.every(socket => socket.readyState === FakeWebSocket.CLOSED)).toBe(true)
-    errors.mockRestore()
     fetch.mockRestore()
   })
 

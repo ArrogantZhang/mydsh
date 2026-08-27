@@ -41,6 +41,7 @@ export class WebApiClient extends AbstractApiClient {
     url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:'
     const socket = new WebSocket(url)
     const inbox: SocketItem<F>[] = []
+    let protocolFailed = false
     let wake: (() => void) | undefined
     const enqueue = (item: SocketItem<F>): void => {
       inbox.push(item)
@@ -49,14 +50,17 @@ export class WebApiClient extends AbstractApiClient {
     }
     const handleOpen = (): void => { onOpen?.() }
     const rejectMessage = (category: DownlinkDecodeCategory | 'binary'): void => {
-      console.error(`[client-connection] invalid WebSocket message on ${path} (${category})`)
+      if (protocolFailed) return
+      protocolFailed = true
       queueMicrotask(() => {
         if (socket.readyState === WebSocket.CONNECTING || socket.readyState === WebSocket.OPEN) {
           socket.close(1002, 'invalid downlink message')
         }
       })
+      console.error(`[client-connection] invalid WebSocket message on ${path} (${category})`)
     }
     const handleMessage = (event: MessageEvent): void => {
+      if (protocolFailed) return
       if (typeof event.data !== 'string') {
         rejectMessage('binary')
         return
@@ -66,11 +70,9 @@ export class WebApiClient extends AbstractApiClient {
         rejectMessage(decoded.category)
         return
       }
-      for (const [index, request] of decoded.requests.entries()) {
-        const envelope = decoded.envelopes[index]
-        if (envelope === undefined) throw new Error('downlink decoder returned misaligned requests')
-        this.onEnvelope(envelope)
-        enqueue({ kind: 'frame', envelope: request })
+      for (const request of decoded.requests) {
+        this.onEnvelope(request.full)
+        enqueue({ kind: 'frame', envelope: request.envelope })
       }
     }
     const handleClose = (): void => { enqueue({ kind: 'end' }) }

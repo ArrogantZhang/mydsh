@@ -23,6 +23,7 @@ class FakeWebSocket extends EventTarget {
   static readonly CLOSED = 3
 
   readonly closeCalls: Array<{ code: number | undefined; reason: string | undefined }> = []
+  delayClose = false
   readyState = FakeWebSocket.CONNECTING
 
   constructor(readonly url: string | URL) {
@@ -36,8 +37,18 @@ class FakeWebSocket extends EventTarget {
   }
 
   close(code?: number, reason?: string): void {
+    if (this.readyState === FakeWebSocket.CLOSING || this.readyState === FakeWebSocket.CLOSED) return
     this.closeCalls.push({ code, reason })
-    if (this.readyState === FakeWebSocket.CLOSED) return
+    if (this.delayClose) {
+      this.readyState = FakeWebSocket.CLOSING
+      return
+    }
+    this.readyState = FakeWebSocket.CLOSED
+    this.dispatchEvent(new Event('close'))
+  }
+
+  finishClose(): void {
+    if (this.readyState !== FakeWebSocket.CLOSING) throw new Error('socket is not closing')
     this.readyState = FakeWebSocket.CLOSED
     this.dispatchEvent(new Event('close'))
   }
@@ -85,8 +96,11 @@ describe('downlink message decoder', () => {
     expect(decodeMux(subscribed('single-rpc', 7))).toMatchObject({
       ok: true,
       requests: [{
-        rpcId: 'single-rpc',
-        payload: { type: 'session/subscribed', sessionId: 'session-downlink', lastSeq: 7 },
+        full: { type: 'server-request', rpcId: 'single-rpc', method: 'events/push' },
+        envelope: {
+          rpcId: 'single-rpc',
+          payload: { type: 'session/subscribed', sessionId: 'session-downlink', lastSeq: 7 },
+        },
       }],
     })
   })
@@ -108,8 +122,8 @@ describe('downlink message decoder', () => {
     })
 
     expect(decoded.requests).toMatchObject([
-      { rpcId: 'rpc-2', payload: { lastSeq: 2 } },
-      { rpcId: 'rpc-1', payload: { lastSeq: 1 } },
+      { full: { rpcId: 'rpc-2' }, envelope: { rpcId: 'rpc-2', payload: { lastSeq: 2 } } },
+      { full: { rpcId: 'rpc-1' }, envelope: { rpcId: 'rpc-1', payload: { lastSeq: 1 } } },
     ])
   })
 
@@ -168,6 +182,15 @@ describe('downlink message decoder', () => {
     })).toThrow()
   })
 
+  it('exposes a real Zod schema with bounded safe parsing', () => {
+    expect(serverBatchSchema.safeParse({
+      type: 'server-batch',
+      requests: [subscribed('valid-rpc')],
+    })).toMatchObject({ success: true })
+    expect(serverBatchSchema.safeParse({ type: 'server-batch', requests: [] }))
+      .toMatchObject({ success: false })
+  })
+
   it('publishes no prefix when the second stream payload is invalid', () => {
     const decoded = decodeMux({
       type: 'server-batch',
@@ -187,8 +210,11 @@ describe('downlink message decoder', () => {
     expect(decoded).toMatchObject({
       ok: true,
       requests: [{
-        rpcId: 'host-rpc',
-        payload: { type: 'host/session-status', sessionId: 'session-downlink', running: true },
+        full: { rpcId: 'host-rpc' },
+        envelope: {
+          rpcId: 'host-rpc',
+          payload: { type: 'host/session-status', sessionId: 'session-downlink', running: true },
+        },
       }],
     })
   })
@@ -274,5 +300,66 @@ describe('WebApiClient downlink messages', () => {
     expect(error).toHaveBeenCalledExactlyOnceWith(
       '[client-connection] invalid WebSocket message on /api/events.host (binary)',
     )
+  })
+
+  it('latches the first protocol failure throughout the closing window', async () => {
+    const client = new WebApiClient()
+    const envelopes: RpcMessage[] = []
+    client.subscribeEnvelopes((batch) => { envelopes.push(...batch) })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const abort = new AbortController()
+    const iterator = client.events.mux({}, abort.signal)[Symbol.asyncIterator]()
+    const pending = iterator.next()
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1) })
+    const socket = sockets[0]!
+    socket.delayClose = true
+
+    socket.receive(JSON.stringify({
+      type: 'server-batch',
+      requests: [
+        subscribed('rejected-prefix'),
+        request('invalid-rpc', { marker: 'INJECTED-PAYLOAD-MARKER' }),
+      ],
+    }))
+    await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.CLOSING) })
+    socket.receive(JSON.stringify(subscribed('late-valid')))
+    socket.receive('{')
+    await Promise.resolve()
+
+    expect(socket.closeCalls).toEqual([{ code: 1002, reason: 'invalid downlink message' }])
+    expect(error).toHaveBeenCalledExactlyOnceWith(
+      '[client-connection] invalid WebSocket message on /api/events.mux (payload)',
+    )
+    expect(envelopes).toEqual([])
+    let settled = false
+    void pending.then(() => { settled = true })
+    await Promise.resolve()
+    expect(settled).toBe(false)
+
+    socket.finishClose()
+    await expect(pending).resolves.toMatchObject({ done: true })
+  })
+
+  it('keeps an accepted envelope ahead of the protocol-failure end marker', async () => {
+    const client = new WebApiClient()
+    const envelopes: RpcMessage[] = []
+    client.subscribeEnvelopes((batch) => { envelopes.push(...batch) })
+    const error = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+    const abort = new AbortController()
+    const iterator = client.events.mux({}, abort.signal)[Symbol.asyncIterator]()
+    const accepted = iterator.next()
+    await vi.waitFor(() => { expect(sockets).toHaveLength(1) })
+    const socket = sockets[0]!
+    socket.delayClose = true
+
+    socket.receive(JSON.stringify(subscribed('accepted-rpc')))
+    socket.receive('{')
+    await vi.waitFor(() => { expect(socket.readyState).toBe(FakeWebSocket.CLOSING) })
+    socket.finishClose()
+
+    await expect(accepted).resolves.toMatchObject({ value: { rpcId: 'accepted-rpc' } })
+    await expect(iterator.next()).resolves.toMatchObject({ done: true })
+    await vi.waitFor(() => { expect(envelopes.map(message => message.rpcId)).toEqual(['accepted-rpc']) })
+    expect(error).toHaveBeenCalledTimes(1)
   })
 })

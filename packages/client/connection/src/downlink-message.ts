@@ -2,6 +2,7 @@
 
 import type { RpcRequest, ServerRequest } from './client/api.ts'
 import { serverRequestSchema } from '@deepseek-ai/dsh-host-apiproxy/api/rpc.schema'
+import { z } from 'zod'
 
 /** Maximum number of logical server requests carried by one physical message. */
 export const MAX_SERVER_BATCH_REQUESTS = 256
@@ -18,9 +19,15 @@ export type DownlinkMessage = ServerRequest | ServerBatch
 /** Safe classification for a rejected physical downlink message. */
 export type DownlinkDecodeCategory = 'json' | 'wrapper' | 'envelope' | 'payload'
 
+/** One validated full request aligned with its stream-specific envelope. */
+export interface DecodedDownlinkRequest<F> {
+  full: ServerRequest
+  envelope: RpcRequest<F>
+}
+
 /** Atomic result of decoding one physical downlink message. */
 export type DownlinkDecodeResult<F> =
-  | { ok: true; envelopes: ServerRequest[]; requests: RpcRequest<F>[] }
+  | { ok: true; requests: DecodedDownlinkRequest<F>[] }
   | { ok: false; category: DownlinkDecodeCategory; requests: [] }
 
 type Parser<T> = { parse(value: unknown): T }
@@ -29,24 +36,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
-function batchMembers(value: unknown): unknown[] {
-  if (!isRecord(value) || value.type !== 'server-batch' || !Array.isArray(value.requests)) {
-    throw new TypeError('invalid server batch wrapper')
-  }
-  if (value.requests.length === 0 || value.requests.length > MAX_SERVER_BATCH_REQUESTS) {
-    throw new RangeError('invalid server batch size')
-  }
-  return value.requests
-}
+/** Zod schema for the bounded `server-batch` wrapper and every full request inside it. */
+export const serverBatchSchema: z.ZodType<ServerBatch> = z.object({
+  type: z.literal('server-batch'),
+  requests: z.array(serverRequestSchema).min(1).max(MAX_SERVER_BATCH_REQUESTS),
+})
 
-/** Schema-compatible parser for the bounded `server-batch` wrapper. */
-export const serverBatchSchema: Parser<ServerBatch> = {
-  parse(value: unknown): ServerBatch {
-    return {
-      type: 'server-batch',
-      requests: batchMembers(value).map(member => serverRequestSchema.parse(member)),
-    }
-  },
+function batchFailureCategory(error: z.ZodError): DownlinkDecodeCategory {
+  return error.issues.some(issue => typeof issue.path[1] === 'number') ? 'envelope' : 'wrapper'
 }
 
 /**
@@ -68,34 +65,31 @@ export function decodeDownlinkMessage<F>(
 
   let envelopes: ServerRequest[]
   if (isRecord(raw) && raw.type === 'server-batch') {
-    let members: unknown[]
-    try {
-      members = batchMembers(raw)
-    } catch {
-      return { ok: false, category: 'wrapper', requests: [] }
+    const parsed = serverBatchSchema.safeParse(raw)
+    if (!parsed.success) {
+      return { ok: false, category: batchFailureCategory(parsed.error), requests: [] }
     }
-    try {
-      envelopes = members.map(member => serverRequestSchema.parse(member))
-    } catch {
-      return { ok: false, category: 'envelope', requests: [] }
-    }
+    envelopes = parsed.data.requests
   } else if (isRecord(raw) && raw.type === 'server-request') {
-    try {
-      envelopes = [serverRequestSchema.parse(raw)]
-    } catch {
+    const parsed = serverRequestSchema.safeParse(raw)
+    if (!parsed.success) {
       return { ok: false, category: 'envelope', requests: [] }
     }
+    envelopes = [parsed.data]
   } else {
     return { ok: false, category: 'wrapper', requests: [] }
   }
 
-  const requests: RpcRequest<F>[] = []
+  const requests: DecodedDownlinkRequest<F>[] = []
   try {
-    for (const envelope of envelopes) {
-      requests.push({ rpcId: envelope.rpcId, payload: payloadSchema.parse(envelope.payload) })
+    for (const full of envelopes) {
+      requests.push({
+        full,
+        envelope: { rpcId: full.rpcId, payload: payloadSchema.parse(full.payload) },
+      })
     }
   } catch {
     return { ok: false, category: 'payload', requests: [] }
   }
-  return { ok: true, envelopes, requests }
+  return { ok: true, requests }
 }
