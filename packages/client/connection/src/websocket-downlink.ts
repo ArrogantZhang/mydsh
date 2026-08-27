@@ -11,6 +11,29 @@ import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 
 type Frame = MuxFrame | HostFrame
 
+/** Operational settings for the host-side WebSocket event streams. */
+export interface WebSocketDownlinkOptions {
+  /** Whether the server negotiates per-message deflate. */
+  compression: boolean
+  /** Minimum frame size eligible for compression, in bytes. */
+  compressionThresholdBytes: number
+  /** Maximum concurrent compression operations. */
+  compressionConcurrency: number
+  /** Maximum bytes queued by one socket before it is terminated. */
+  maxBufferedBytes: number
+  /** Maximum time to wait for one send callback, in milliseconds. */
+  sendTimeoutMs: number
+}
+
+/** Package defaults for direct source consumers and hand-built test contexts. */
+export const DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS: Readonly<WebSocketDownlinkOptions> = {
+  compression: false,
+  compressionThresholdBytes: 0,
+  compressionConcurrency: 4,
+  maxBufferedBytes: 1_048_576,
+  sendTimeoutMs: 5_000,
+}
+
 function serverRequest(frame: RpcRequest<Frame>): ServerRequest {
   return {
     type: 'server-request',
@@ -20,16 +43,82 @@ function serverRequest(frame: RpcRequest<Frame>): ServerRequest {
   }
 }
 
-function send(socket: WebSocket, frame: RpcRequest<Frame>): Promise<void> {
+function bufferLimitError(maxBufferedBytes: number): Error {
+  return new Error(`websocket downlink buffer limit exceeded (${String(maxBufferedBytes)} bytes)`)
+}
+
+function sendTimeoutError(sendTimeoutMs: number): Error {
+  return new Error(`websocket downlink send timeout (${String(sendTimeoutMs)} ms)`)
+}
+
+function send(
+  socket: WebSocket,
+  request: ServerRequest,
+  options: WebSocketDownlinkOptions,
+): Promise<void> {
+  const data = JSON.stringify(request)
   return new Promise((resolve, reject) => {
     if (socket.readyState !== WebSocket.OPEN) {
       reject(new Error('websocket downlink closed before frame delivery'))
       return
     }
-    socket.send(JSON.stringify(serverRequest(frame)), (error) => {
-      if (error) reject(error)
-      else resolve()
-    })
+    if (socket.bufferedAmount > options.maxBufferedBytes) {
+      socket.terminate()
+      reject(bufferLimitError(options.maxBufferedBytes))
+      return
+    }
+
+    let settled = false
+    const cleanup = (): void => {
+      clearTimeout(timer)
+      socket.off('close', onClose)
+      socket.off('error', onError)
+    }
+    const fail = (error: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      reject(error)
+    }
+    const succeed = (): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      resolve()
+    }
+    const fuse = (error: Error): void => {
+      if (settled) return
+      settled = true
+      cleanup()
+      socket.terminate()
+      reject(error)
+    }
+    const onClose = (): void => {
+      fail(new Error('websocket downlink closed before frame delivery'))
+    }
+    const onError = (error: Error): void => { fail(error) }
+
+    socket.once('close', onClose)
+    socket.once('error', onError)
+    const timer = setTimeout(() => {
+      fuse(sendTimeoutError(options.sendTimeoutMs))
+    }, options.sendTimeoutMs)
+    try {
+      socket.send(data, (error) => {
+        if (settled) return
+        if (error) {
+          fail(error)
+          return
+        }
+        if (socket.bufferedAmount > options.maxBufferedBytes) {
+          fuse(bufferLimitError(options.maxBufferedBytes))
+          return
+        }
+        succeed()
+      })
+    } catch (error) {
+      fail(error instanceof Error ? error : new Error(String(error)))
+    }
   })
 }
 
@@ -49,11 +138,27 @@ function failureFrame(error: unknown): RpcRequest<Frame> {
  * remains on HTTP.
  */
 export class WebSocketDownlinks {
-  private readonly server = new WebSocketServer({ noServer: true })
+  private readonly server: WebSocketServer
   private readonly pumps = new Set<Promise<void>>()
 
-  /** @param api - host API supplying the typed event streams. */
-  constructor(private readonly api: ApiProxy) {}
+  /**
+   * @param api - Host API supplying the typed event streams.
+   * @param options - Compression and per-socket delivery limits.
+   */
+  constructor(
+    private readonly api: ApiProxy,
+    private readonly options: WebSocketDownlinkOptions = DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS,
+  ) {
+    this.server = new WebSocketServer({
+      noServer: true,
+      perMessageDeflate: options.compression
+        ? {
+          threshold: options.compressionThresholdBytes,
+          concurrencyLimit: options.compressionConcurrency,
+        }
+        : false,
+    })
+  }
 
   /**
    * Upgrade one socket and pump the mux stream until either side closes.
@@ -121,11 +226,13 @@ export class WebSocketDownlinks {
     abort: AbortController,
   ): Promise<void> {
     try {
-      for await (const frame of frames) await send(socket, frame)
+      for await (const frame of frames) {
+        await send(socket, serverRequest(frame), this.options)
+      }
     } catch (error) {
       if (!abort.signal.aborted) {
         try {
-          await send(socket, failureFrame(error))
+          await send(socket, serverRequest(failureFrame(error)), this.options)
         } catch {
           // Socket loss won the race; no downstream remains to receive the failure frame.
         }

@@ -10,7 +10,16 @@ import type { ApiProxy } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { AttachmentStore } from '@deepseek-ai/dsh-attachment'
 import { RpcId, type ClientRequest } from '@deepseek-ai/dsh-host-apiproxy/api'
 import type { WebServer, WebRoute, WebUpgradeRoute } from '@deepseek-ai/dsh-host-webserver'
-import { API_PATH, apply, HOST_EVENTS_PATH, inject, MUX_EVENTS_PATH, type HostConnectionHandle } from '../src/index.ts'
+import {
+  API_PATH,
+  apply,
+  Config,
+  HOST_EVENTS_PATH,
+  inject,
+  MUX_EVENTS_PATH,
+  type ConnectionConfig,
+  type HostConnectionHandle,
+} from '../src/index.ts'
 import { DEFAULT_MAX_REQUEST_BODY_BYTES } from '../src/http-bridge.ts'
 
 /** Structural webServer fake recording both route registries. */
@@ -75,7 +84,7 @@ function fakeResponse(): { response: ServerResponse; state: { status?: number; b
   return { response, state }
 }
 
-async function mounted(config?: { trustedHosts?: string[] }): Promise<{
+async function mounted(config?: ConnectionConfig): Promise<{
   routes: WebRoute[]
   upgrades: WebUpgradeRoute[]
   dispose: () => Promise<void>
@@ -91,6 +100,31 @@ async function mounted(config?: { trustedHosts?: string[] }): Promise<{
 }
 
 describe('connection node half', () => {
+  it('resolves the complete connection config defaults', () => {
+    expect(Config({})).toEqual({
+      trustedHosts: [],
+      maxRequestBodyBytes: DEFAULT_MAX_REQUEST_BODY_BYTES,
+      downlinkCompression: false,
+      downlinkCompressionThresholdBytes: 0,
+      downlinkCompressionConcurrency: 4,
+      downlinkMaxBufferedBytes: 1_048_576,
+      downlinkSendTimeoutMs: 5_000,
+    })
+  })
+
+  it.each([
+    ['downlinkCompressionThresholdBytes', 0, 1_048_576, [-1, 0.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 1_048_577]],
+    ['downlinkCompressionConcurrency', 1, 64, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 65]],
+    ['downlinkMaxBufferedBytes', 1, 67_108_864, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 67_108_865]],
+    ['downlinkSendTimeoutMs', 1, 60_000, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 60_001]],
+  ] as const)('validates %s at its exact operational range', (field, minimum, maximum, invalid) => {
+    expect(Config({ [field]: minimum })[field]).toBe(minimum)
+    expect(Config({ [field]: maximum })[field]).toBe(maximum)
+    for (const value of invalid) {
+      expect(() => Config({ [field]: value })).toThrow()
+    }
+  })
+
   it('reserves enough default carrier capacity for the 200 MiB image batch', () => {
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBe(300 * 1024 * 1024)
     expect(DEFAULT_MAX_REQUEST_BODY_BYTES).toBeGreaterThan(Math.ceil(200 * 1024 * 1024 * 4 / 3) + 1024 * 1024)

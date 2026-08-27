@@ -8,7 +8,11 @@ import type {
 } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 import { HOST_EVENTS_PATH, MUX_EVENTS_PATH } from '../src/api-path.ts'
-import { WebSocketDownlinks } from '../src/websocket-downlink.ts'
+import {
+  DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS,
+  WebSocketDownlinks,
+  type WebSocketDownlinkOptions,
+} from '../src/websocket-downlink.ts'
 
 type MuxSource = (signal: AbortSignal) => AsyncIterable<RpcRequest<MuxFrame>>
 type HostSource = (signal: AbortSignal) => AsyncIterable<RpcRequest<HostFrame>>
@@ -39,6 +43,21 @@ function api(mux: MuxSource, host: HostSource): ApiProxy {
   } as ApiProxy
 }
 
+function configuredDownlinks(
+  proxy: ApiProxy,
+  overrides: Partial<WebSocketDownlinkOptions> = {},
+): WebSocketDownlinks {
+  return new WebSocketDownlinks(proxy, { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS, ...overrides })
+}
+
+function serverOptions(downlinks: WebSocketDownlinks): {
+  perMessageDeflate?: boolean | { threshold?: number; concurrencyLimit?: number }
+} {
+  return (downlinks as unknown as {
+    server: { options: { perMessageDeflate?: boolean | { threshold?: number; concurrencyLimit?: number } } }
+  }).server.options
+}
+
 async function serve(downlinks: WebSocketDownlinks): Promise<{
   origin: string
   close: () => Promise<void>
@@ -65,6 +84,35 @@ function read(socket: WebSocket): Promise<ServerRequest> {
   return once(socket, 'message').then(([data]) => JSON.parse(String(data)) as ServerRequest)
 }
 
+function rawDataText(data: WebSocket.RawData): string {
+  if (Array.isArray(data)) return Buffer.concat(data).toString()
+  if (data instanceof ArrayBuffer) return Buffer.from(data).toString()
+  return data.toString()
+}
+
+function isServerRequestWithRpcId(value: unknown, rpcId: string): boolean {
+  if (typeof value !== 'object' || value === null) return false
+  const candidate = value as Record<string, unknown>
+  return candidate.type === 'server-request' && candidate.rpcId === rpcId
+}
+
+function readUpTo(socket: WebSocket, count: number): Promise<ServerRequest[]> {
+  return new Promise((resolve) => {
+    const messages: ServerRequest[] = []
+    const finish = (): void => {
+      socket.off('message', onMessage)
+      socket.off('close', finish)
+      resolve(messages)
+    }
+    const onMessage = (data: WebSocket.RawData): void => {
+      messages.push(JSON.parse(rawDataText(data)) as ServerRequest)
+      if (messages.length === count) finish()
+    }
+    socket.on('message', onMessage)
+    socket.once('close', finish)
+  })
+}
+
 async function acceptedSocket(downlinks: WebSocketDownlinks): Promise<WebSocket> {
   const server = (downlinks as unknown as { server: { clients: Set<WebSocket> } }).server
   let accepted: WebSocket | undefined
@@ -76,6 +124,279 @@ async function acceptedSocket(downlinks: WebSocketDownlinks): Promise<WebSocket>
 }
 
 describe('WebSocket downlinks', () => {
+  it('disables compression negotiation by default', async () => {
+    const downlinks = configuredDownlinks(api(idle, idle))
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    expect(socket.extensions).toBe('')
+    expect(serverOptions(downlinks).perMessageDeflate).toBe(false)
+    socket.close()
+    await once(socket, 'close')
+  })
+
+  it('negotiates configured per-message compression', async () => {
+    const downlinks = configuredDownlinks(api(idle, idle), {
+      compression: true,
+      compressionThresholdBytes: 4096,
+      compressionConcurrency: 7,
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    expect(socket.extensions).toContain('permessage-deflate')
+    expect(serverOptions(downlinks).perMessageDeflate).toEqual(expect.objectContaining({
+      threshold: 4096,
+      concurrencyLimit: 7,
+    }))
+    socket.close()
+    await once(socket, 'close')
+  })
+
+  it('terminates a peer above the byte limit before sending and aborts its source', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let aborted = false
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        try {
+          await gate
+          yield {
+            rpcId: RpcId('private-frame-before'),
+            payload: { type: 'session/subscribed', sessionId: 'private-session-before' as never, lastSeq: 0 },
+          }
+        } finally {
+          aborted = true
+        }
+      },
+      idle,
+    ), { maxBufferedBytes: 8 })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get').mockReturnValue(9)
+    const terminate = vi.spyOn(accepted, 'terminate')
+    const closed = once(socket, 'close')
+    release()
+    await closed
+    expect(terminate).toHaveBeenCalledOnce()
+    await vi.waitFor(() => { expect(aborted).toBe(true) })
+    bufferedAmount.mockRestore()
+    terminate.mockRestore()
+  })
+
+  it('checks the byte limit after the send callback without exposing frame data', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let aborted = false
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        try {
+          await gate
+          yield {
+            rpcId: RpcId('private-frame-after'),
+            payload: { type: 'session/subscribed', sessionId: 'private-session-after' as never, lastSeq: 0 },
+          }
+        } finally {
+          aborted = true
+        }
+      },
+      idle,
+    ), { maxBufferedBytes: 8 })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get')
+      .mockReturnValueOnce(0)
+      .mockReturnValueOnce(9)
+      .mockReturnValue(0)
+    const terminate = vi.spyOn(accepted, 'terminate').mockImplementation(() => {})
+    const messages = readUpTo(socket, 2)
+    const closed = once(socket, 'close')
+    release()
+    const [delivered, failure] = await messages
+    await closed
+    expect(delivered?.rpcId).toBe('private-frame-after')
+    expect(failure?.payload).toEqual({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'Error: websocket downlink buffer limit exceeded (8 bytes)',
+        details: {},
+      },
+    })
+    expect(JSON.stringify(failure ?? null)).not.toContain('private-frame-after')
+    expect(JSON.stringify(failure ?? null)).not.toContain('private-session-after')
+    expect(terminate).toHaveBeenCalledOnce()
+    expect(aborted).toBe(true)
+    bufferedAmount.mockRestore()
+    terminate.mockRestore()
+  })
+
+  it('terminates a send whose callback never fires and ignores its late callback', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let aborted = false
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        try {
+          await gate
+          yield {
+            rpcId: RpcId('private-timeout-frame'),
+            payload: { type: 'session/subscribed', sessionId: 'private-timeout-session' as never, lastSeq: 0 },
+          }
+        } finally {
+          aborted = true
+        }
+      },
+      idle,
+    ), { sendTimeoutMs: 20 })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    let callback: ((error?: Error) => void) | undefined
+    const originalSend = accepted.send.bind(accepted)
+    let sendCount = 0
+    const send = vi.spyOn(accepted, 'send').mockImplementation(((
+      data: WebSocket.Data,
+      optionsOrCallback?: unknown,
+      done?: (error?: Error) => void,
+    ) => {
+      const currentCallback = typeof optionsOrCallback === 'function'
+        ? optionsOrCallback as (error?: Error) => void
+        : done
+      sendCount++
+      if (sendCount === 1) {
+        callback = currentCallback
+        return
+      }
+      originalSend(data, currentCallback)
+    }) as WebSocket['send'])
+    const terminate = vi.spyOn(accepted, 'terminate').mockImplementation(() => {})
+    const messages = readUpTo(socket, 1)
+    const closed = once(socket, 'close')
+    release()
+    const closedInTime = await Promise.race([
+      closed.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => { resolve(false) }, 80)),
+    ])
+    if (!closedInTime) {
+      callback?.()
+      socket.terminate()
+      await closed
+    }
+    expect(closedInTime).toBe(true)
+    expect(terminate).toHaveBeenCalledOnce()
+    const [failure] = await messages
+    expect(failure?.payload).toEqual({
+      type: 'stream/error',
+      error: {
+        code: 'internal',
+        message: 'Error: websocket downlink send timeout (20 ms)',
+        details: {},
+      },
+    })
+    expect(JSON.stringify(failure ?? null)).not.toContain('private-timeout-frame')
+    expect(JSON.stringify(failure ?? null)).not.toContain('private-timeout-session')
+    await vi.waitFor(() => { expect(aborted).toBe(true) })
+    callback?.()
+    await new Promise(resolve => setTimeout(resolve, 40))
+    expect(terminate).toHaveBeenCalledOnce()
+    expect(send).toHaveBeenCalledTimes(2)
+    send.mockRestore()
+    terminate.mockRestore()
+  })
+
+  it('serializes each server request once', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        await gate
+        yield {
+          rpcId: RpcId('serialize-once'),
+          payload: { type: 'session/subscribed', sessionId: 'session-serialize' as never, lastSeq: 0 },
+        }
+        await untilAbort(signal)
+      },
+      idle,
+    ))
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const stringify = vi.spyOn(JSON, 'stringify')
+    const frame = read(socket)
+    release()
+    expect((await frame).rpcId).toBe('serialize-once')
+    expect(stringify.mock.calls.filter(args => isServerRequestWithRpcId(args[0], 'serialize-once')))
+      .toHaveLength(1)
+    stringify.mockRestore()
+    const closed = once(socket, 'close')
+    socket.close()
+    await closed
+  })
+
+  it('keeps a healthy peer pumping after a slow peer crosses its byte fuse', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    const aborted: boolean[] = []
+    let peer = 0
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        const index = peer++
+        aborted[index] = false
+        try {
+          await gate
+          yield {
+            rpcId: RpcId(`peer-${String(index)}`),
+            payload: { type: 'session/subscribed', sessionId: `session-${String(index)}` as never, lastSeq: index },
+          }
+          await untilAbort(signal)
+        } finally {
+          aborted[index] = true
+        }
+      },
+      idle,
+    ), { maxBufferedBytes: 8 })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const slow = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(slow, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    const bufferedAmount = vi.spyOn(accepted, 'bufferedAmount', 'get').mockReturnValue(9)
+    const healthy = new WebSocket(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(healthy, 'open')
+    const slowClosed = once(slow, 'close')
+    const healthyFrame = read(healthy)
+    release()
+    expect(await healthyFrame).toMatchObject({ rpcId: 'peer-1' })
+    const slowFused = await Promise.race([
+      slowClosed.then(() => true),
+      new Promise<false>(resolve => setTimeout(() => { resolve(false) }, 80)),
+    ])
+    if (!slowFused) {
+      slow.terminate()
+      await slowClosed
+    }
+    expect(slowFused).toBe(true)
+    await vi.waitFor(() => { expect(aborted[0]).toBe(true) })
+    expect(aborted[1]).toBe(false)
+    const healthyClosed = once(healthy, 'close')
+    healthy.close()
+    await healthyClosed
+    await vi.waitFor(() => { expect(aborted[1]).toBe(true) })
+    bufferedAmount.mockRestore()
+  })
+
   it('carries mux and host over independent downstream sockets and cancels each source on close', async () => {
     let muxAborted = false
     let hostAborted = false

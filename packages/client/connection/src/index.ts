@@ -9,7 +9,12 @@ import { API_PATH, HOST_EVENTS_PATH, MUX_EVENTS_PATH } from './api-path.ts'
 import { bridge, DEFAULT_MAX_REQUEST_BODY_BYTES } from './http-bridge.ts'
 import { assertTrustedAuthority, isTrustedApiRequest } from './api-request-trust.ts'
 import { HostConnectionService } from './rpc-host.ts'
-import { rejectWebSocketUpgrade, WebSocketDownlinks } from './websocket-downlink.ts'
+import {
+  DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS,
+  rejectWebSocketUpgrade,
+  WebSocketDownlinks,
+  type WebSocketDownlinkOptions,
+} from './websocket-downlink.ts'
 
 export type {
   ConnectionRpcAuthority,
@@ -28,6 +33,10 @@ export const name = 'client-connection'
 
 /** Headroom for RPC JSON fields around aggregate base64 image payloads. */
 const REQUEST_ENVELOPE_HEADROOM_BYTES = 1024 * 1024
+const MAX_DOWNLINK_COMPRESSION_THRESHOLD_BYTES = 1_048_576
+const MAX_DOWNLINK_COMPRESSION_CONCURRENCY = 64
+const MAX_DOWNLINK_BUFFERED_BYTES = 67_108_864
+const MAX_DOWNLINK_SEND_TIMEOUT_MS = 60_000
 
 function assertImageBodyCapacity(ctx: Context, maxRequestBodyBytes: number): void {
   const attachments = ctx.get('attachments')
@@ -59,11 +68,37 @@ export interface ConnectionConfig {
   trustedHosts?: string[]
   /** Maximum buffered JSON body for every `/api` request. Default: 300 MiB. */
   maxRequestBodyBytes?: number
+  /** Whether WebSocket downlinks negotiate per-message deflate. Default: false. */
+  downlinkCompression?: boolean
+  /** Compression threshold in bytes, from 0 through 1,048,576. Default: 0. */
+  downlinkCompressionThresholdBytes?: number
+  /** Compression concurrency, from 1 through 64. Default: 4. */
+  downlinkCompressionConcurrency?: number
+  /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
+  downlinkMaxBufferedBytes?: number
+  /** Per-frame send timeout in milliseconds, from 1 through 60,000. Default: 5,000. */
+  downlinkSendTimeoutMs?: number
 }
 
 export const Config: z<ConnectionConfig> = z.object({
   trustedHosts: z.array(String).default([]),
   maxRequestBodyBytes: z.natural().min(1).default(DEFAULT_MAX_REQUEST_BODY_BYTES),
+  downlinkCompression: z.boolean().default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compression),
+  downlinkCompressionThresholdBytes: z.natural()
+    .max(MAX_DOWNLINK_COMPRESSION_THRESHOLD_BYTES)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionThresholdBytes),
+  downlinkCompressionConcurrency: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_COMPRESSION_CONCURRENCY)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency),
+  downlinkMaxBufferedBytes: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_BUFFERED_BYTES)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.maxBufferedBytes),
+  downlinkSendTimeoutMs: z.natural()
+    .min(1)
+    .max(MAX_DOWNLINK_SEND_TIMEOUT_MS)
+    .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.sendTimeoutMs),
 })
 
 /**
@@ -131,6 +166,17 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   // The Loader resolves schema defaults; hand-built test contexts may pass none.
   const trustedHosts = config?.trustedHosts ?? []
   const maxRequestBodyBytes = config?.maxRequestBodyBytes ?? DEFAULT_MAX_REQUEST_BODY_BYTES
+  const downlinkOptions: WebSocketDownlinkOptions = {
+    compression: config?.downlinkCompression ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compression,
+    compressionThresholdBytes: config?.downlinkCompressionThresholdBytes
+      ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionThresholdBytes,
+    compressionConcurrency: config?.downlinkCompressionConcurrency
+      ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency,
+    maxBufferedBytes: config?.downlinkMaxBufferedBytes
+      ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.maxBufferedBytes,
+    sendTimeoutMs: config?.downlinkSendTimeoutMs
+      ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.sendTimeoutMs,
+  }
   // Config boundary: a malformed entry fails the load loudly here rather than
   // silently authorizing its hostname prefix at request time.
   for (const entry of trustedHosts) assertTrustedAuthority(entry)
@@ -173,7 +219,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
   ctx.effect(() => ctx.webServer.register(route), 'client-connection: /api route')
   ctx.inject(['apiProxy'], (apiCtx) => {
     assertImageBodyCapacity(apiCtx, maxRequestBodyBytes)
-    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy)
+    const downlinks = new WebSocketDownlinks(apiCtx.apiProxy, downlinkOptions)
     const registerDownlink = (
       path: string,
       handle: WebUpgradeRoute['handler'],
