@@ -12,7 +12,7 @@ A slow or stalled browser downlink can accumulate serialized realtime frames and
 
 The durable session log remains authoritative for conversation content, ordering, completion, and replay. The composer exposes only a local submission receipt after its submit call succeeds; that receipt does not claim that the prompt is durable, that a model run has started or completed, or that any downlink has displayed the result.
 
-Each realtime downlink has bounded delivery resources. `dsh-host-apiproxy` owns per-stream frame capacity. `dsh-client-connection` owns WebSocket compression and the socket byte and time budgets. Overflow or timeout closes only the affected downlink and never aborts the agent or model run, mutates the durable log, or closes another downlink.
+Each realtime downlink has bounded delivery resources. `dsh-host-apiproxy` owns per-stream frame capacity. `dsh-client-connection` owns WebSocket compression and the socket byte and time budgets. Overflow or timeout is initiated by and attributed to one affected downlink. That downlink closes first; `ConnectionController` then fails its browser connection generation, closes the companion mux or host downlink, and reconnects both. The failure never aborts the agent or model run, mutates the durable log, or closes a downlink belonging to another browser or client connection.
 
 This proposal extends the existing [WebSocket downlink carrier](../../implemented/architecture/2026-08-04-websocket-downlink-carrier.md) without changing its two independent logical streams or its HTTP uplink.
 
@@ -20,7 +20,7 @@ This proposal extends the existing [WebSocket downlink carrier](../../implemente
 
 `dsh-host-apiproxy` admits complete application frames to each logical stream and therefore applies that stream's frame-capacity limit before an unbounded frame backlog can form. The capacity belongs to the individual stream instance, so a stalled mux or host consumer cannot consume another downlink's allowance.
 
-`dsh-client-connection` owns the physical WebSocket, so it enables compression and accounts for bytes awaiting socket completion and elapsed write time. Exceeding either socket budget closes that WebSocket and disposes only its delivery path. The session, agent, and model lifecycles do not receive a transport abort from frame overflow or socket timeout.
+`dsh-client-connection` owns the physical WebSocket, so it enables compression and accounts for bytes awaiting socket completion and elapsed write time. Exceeding either socket budget closes the affected WebSocket. Existing generation-failure semantics then close the companion stream and reconnect both streams for that browser connection. The session, agent, and model lifecycles and other browser or client connections do not receive that transport abort.
 
 The composer owns the transient receipt presentation. It does not append a receipt event or infer durable state from HTTP success; durable UI state continues to come from session history and realtime session frames.
 
@@ -28,11 +28,11 @@ The composer owns the transient receipt presentation. It does not append a recei
 
 Reconnect remains rebuild, as defined by the [Web client architecture](../../implemented/architecture/2026-07-19-gui-web-client-architecture.md). A new connection generation discards the closed downlink's in-memory backlog. For each open session, the client uses `session/subscribed.lastSeq` as the live-stream watermark and rebuilds from session history plus subsequent session frames. Events that the failed downlink did not deliver remain recoverable from the authoritative durable log rather than from a transport-owned resume buffer; the local receipt is not replay input.
 
-An overflow or timeout follows the ordinary reconnect policy. It does not create a special agent cancellation, retry the model request, or convert the local submission receipt into a durable acknowledgement.
+An overflow or timeout follows the ordinary reconnect policy: the initiating downlink fails the browser connection generation, the companion stream closes, and mux and host reconnect together. It does not create a special agent cancellation, retry the model request, or convert the local submission receipt into a durable acknowledgement.
 
 ## Alternatives considered
 
-**Batch frames before WebSocket writes.** Batching is deferred unless WebSocket compression misses the measured byte/RSS gate. Adding a batching scheduler before that evidence would increase latency and ordering complexity without proving that compression and bounded queues are insufficient.
+**Batch frames before WebSocket writes.** Batching is deferred while WebSocket compression passes the measured byte/RSS gate. For a representative workload of 24,000 session frames across five browsers and ten downlinks, compression must reduce WebSocket transport bytes by at least 60% relative to the compression-disabled baseline while adding no more than 64 MiB of host RSS. If either threshold fails, batching requires a separate proposal or revision before any transport change ships; compression alone does not ship silently.
 
 **Lossily coalesce `assistant/chunk` frames.** Rejected: chunk sequence, timing, partial output, replay, and UI fidelity remain observable. The transport must not invent a second, lossy account of an authoritative session log.
 
@@ -42,11 +42,11 @@ An overflow or timeout follows the ordinary reconnect policy. It does not create
 
 ## Acceptance criteria
 
-- A stalled mux or host consumer cannot exceed its configured per-stream frame capacity, and overflow closes only that downlink while the agent or model run continues and its events remain durable.
-- WebSocket compression is active, pending socket bytes and write time are bounded, and either socket-budget violation closes only the affected downlink.
+- A stalled mux or host consumer cannot exceed its configured per-stream frame capacity. Overflow is attributed to that stream, fails only its browser connection generation, closes the companion stream, and reconnects both; other browser or client connections and the agent or model run continue, and the run's events remain durable.
+- WebSocket compression is active, pending socket bytes and write time are bounded, and either socket-budget violation starts on the affected downlink before the same browser connection generation closes its companion stream and reconnects both.
 - Reconnect rebuilds every open session from `session/subscribed.lastSeq` and session history, including events not received before the downlink failed, without relying on a transport resume buffer.
 - The composer displays a local submission receipt only after local submit success and does not represent it as persistence, model progress, completion, or remote delivery.
-- Stress measurements record encoded bytes and host RSS. Frame batching remains absent when compression satisfies the measured gate and is reconsidered only when compression misses it.
+- A representative stress workload sends 24,000 session frames across five browsers and ten downlinks. Against the compression-disabled baseline, compression reduces WebSocket transport bytes by at least 60% and adds no more than 64 MiB of host RSS. Both thresholds must pass; if either fails, this proposal does not ship compression and batching requires a separate proposal or revision.
 - Realtime delivery preserves every `assistant/chunk` frame; no lossy coalescing path is introduced.
 
 ## Risks
