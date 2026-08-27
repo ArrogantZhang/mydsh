@@ -114,7 +114,7 @@ describe('connection node half', () => {
 
   it.each([
     ['downlinkCompressionThresholdBytes', 0, 1_048_576, [-1, 0.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 1_048_577]],
-    ['downlinkCompressionConcurrency', 1, 64, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 65]],
+    ['downlinkCompressionConcurrency', 1, 16, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 17]],
     ['downlinkMaxBufferedBytes', 1, 67_108_864, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 67_108_865]],
     ['downlinkSendTimeoutMs', 1, 60_000, [-1, 0, 1.5, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY, Number.NaN, 60_001]],
   ] as const)('validates %s at its exact operational range', (field, minimum, maximum, invalid) => {

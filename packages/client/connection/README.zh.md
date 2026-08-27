@@ -10,9 +10,11 @@ node 半侧在桥接或 upgrade 前守卫 `/api` 下的每个入口（`src/api-r
 
 ## `/api` WebSocket 下行
 
-`/api/events.mux` 与 `/api/events.host` 各接受一条 WebSocket upgrade，并只向浏览器发送对应的 `ServerRequest` 文本消息；客户端不会在这些 socket 上发送业务数据。普通网络 GET 这些路径会返回 426，不保留 SSE（Server-Sent Events）回退；`toFetchHandler` 的 SSE 编解码只服务进程内同构载体。`downlinkCompression` 默认为 `false`，即不协商扩展；启用后会协商 `permessage-deflate` 并保留 context takeover。`downlinkCompressionThresholdBytes` 是 0 至 1,048,576 字节的整数（默认 0），`downlinkCompressionConcurrency` 是 1 至 64 的整数（默认 4）。
+`/api/events.mux` 与 `/api/events.host` 各接受一条 WebSocket upgrade，并只向浏览器发送对应的 `ServerRequest` 文本消息；客户端不会在这些 socket 上发送业务数据。普通网络 GET 这些路径会返回 426，不保留 SSE（Server-Sent Events）回退；`toFetchHandler` 的 SSE 编解码只服务进程内同构载体。`downlinkCompression` 默认为 `false`，即不协商扩展；启用后会协商 `permessage-deflate`，同时禁用服务端与客户端 context takeover，从而限制每条连接的 zlib 状态并使配置的阈值生效。`downlinkCompressionThresholdBytes` 是 0 至 1,048,576 字节的整数（默认 0）。`downlinkCompressionConcurrency` 是 1 至 16 的整数（默认 4）；`ws` 拥有进程级 limiter，因此第一个启用压缩的实例会固定该值，修改时必须重启进程。本包是生产环境中 `ws` 的唯一所有方。
 
-每个 `ServerRequest` 只序列化一次，每条 socket 同时只等待一次发送。Host 会在发送前及发送回调后检查 `bufferedAmount`。`downlinkMaxBufferedBytes` 是 1 至 67,108,864 字节的整数（默认 1,048,576），`downlinkSendTimeoutMs` 是 1 至 60,000 毫秒的整数（默认 5,000）。超过字节上限或达到超时时，只终止对应 socket、中止其 source，并清理该次发送的计时器与监听器；拒绝诊断只标明上限类别及配置值，绝不包含 frame 正文或 header。健康 peer 与模型运行会继续。Host teardown 会终止所有自有 socket，并等待每个 source 与 pump 停止后再返回。
+每个 `ServerRequest` 只序列化一次，每条 socket 同时只等待一次发送。调用 `send()` 前，Host 会把序列化后的 UTF-8 字节数加到 `bufferedAmount`；恰好达到上限时允许发送，过大的序列化 frame 会在发送及压缩前被拒绝。Host 会在 `send()` 返回后立即检查 `bufferedAmount`，并在其回调后再次检查。`downlinkMaxBufferedBytes` 是 1 至 67,108,864 字节的整数（默认 1,048,576），`downlinkSendTimeoutMs` 是 1 至 60,000 毫秒的整数（默认 5,000）。超过字节上限或达到超时时，只终止对应 socket、中止其 source，并清理该次发送的计时器与监听器；内部拒绝诊断只标明上限类别及配置值，绝不包含 frame 正文或 header。健康 peer 与模型运行会继续。Host teardown 会终止所有自有 socket，并等待每个 source 与 pump 停止后再返回。
+
+入站业务消息仍然被禁止。固定的 1 KiB `maxPayload` 限制解压后的消息大小：上限内的消息会到达协议处理器并以状态码 1008 关闭，较大的压缩或未压缩消息则由 `ws` 在交付给业务之前以状态码 1009 拒绝，且解压后的数据不会无界增长。
 
 任一 socket 结束都会让该浏览器当前的 connection generation 失败、关闭配对流并重建两条流；其他浏览器保持连接。连接就绪仍要求两条 socket 均已打开且 `host.describe` HTTP 调用成功。重建后的 mux 会从每个 session 的 `session/subscribed.lastSeq` 开始，已打开的 conversation 会重新加载 history window；序列处理会丢弃重放的重复项，并通过持久 history 修复缺口。
 

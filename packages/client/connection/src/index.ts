@@ -34,7 +34,7 @@ export const name = 'client-connection'
 /** Headroom for RPC JSON fields around aggregate base64 image payloads. */
 const REQUEST_ENVELOPE_HEADROOM_BYTES = 1024 * 1024
 const MAX_DOWNLINK_COMPRESSION_THRESHOLD_BYTES = 1_048_576
-const MAX_DOWNLINK_COMPRESSION_CONCURRENCY = 64
+const MAX_DOWNLINK_COMPRESSION_CONCURRENCY = 16
 const MAX_DOWNLINK_BUFFERED_BYTES = 67_108_864
 const MAX_DOWNLINK_SEND_TIMEOUT_MS = 60_000
 
@@ -72,7 +72,10 @@ export interface ConnectionConfig {
   downlinkCompression?: boolean
   /** Compression threshold in bytes, from 0 through 1,048,576. Default: 0. */
   downlinkCompressionThresholdBytes?: number
-  /** Compression concurrency, from 1 through 64. Default: 4. */
+  /**
+   * Process-wide compression concurrency, from 1 through 16. The first
+   * compression-enabled instance fixes it until process restart. Default: 4.
+   */
   downlinkCompressionConcurrency?: number
   /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
   downlinkMaxBufferedBytes?: number

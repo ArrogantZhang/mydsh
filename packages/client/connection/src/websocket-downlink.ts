@@ -10,6 +10,10 @@ import type {
 import { RpcId } from '@deepseek-ai/dsh-host-apiproxy/api'
 
 type Frame = MuxFrame | HostFrame
+/** Protocol ceiling for forbidden client application messages, including decompressed payloads. */
+const MAX_INBOUND_PAYLOAD_BYTES = 1024
+/** Mirrors ws's process-global first-instantiation limiter and survives plugin disposal. */
+let compressionConcurrencyClaim: number | undefined
 
 /** Operational settings for the host-side WebSocket event streams. */
 export interface WebSocketDownlinkOptions {
@@ -17,7 +21,7 @@ export interface WebSocketDownlinkOptions {
   compression: boolean
   /** Minimum frame size eligible for compression, in bytes. */
   compressionThresholdBytes: number
-  /** Maximum concurrent compression operations. */
+  /** Process-wide compression concurrency, fixed by the first enabled instance until restart. */
   compressionConcurrency: number
   /** Maximum bytes queued by one socket before it is terminated. */
   maxBufferedBytes: number
@@ -44,7 +48,7 @@ function serverRequest(frame: RpcRequest<Frame>): ServerRequest {
 }
 
 function bufferLimitError(maxBufferedBytes: number): Error {
-  return new Error(`websocket downlink buffer limit exceeded (${String(maxBufferedBytes)} bytes)`)
+  return new Error(`websocket downlink queued-byte limit exceeded (${String(maxBufferedBytes)} bytes)`)
 }
 
 function sendTimeoutError(sendTimeoutMs: number): Error {
@@ -55,15 +59,18 @@ function send(
   socket: WebSocket,
   request: ServerRequest,
   options: WebSocketDownlinkOptions,
+  abort: AbortController,
 ): Promise<void> {
   const data = JSON.stringify(request)
+  const serializedBytes = Buffer.byteLength(data, 'utf8')
   return new Promise((resolve, reject) => {
     if (socket.readyState !== WebSocket.OPEN) {
       reject(new Error('websocket downlink closed before frame delivery'))
       return
     }
-    if (socket.bufferedAmount > options.maxBufferedBytes) {
+    if (socket.bufferedAmount + serializedBytes > options.maxBufferedBytes) {
       socket.terminate()
+      abort.abort()
       reject(bufferLimitError(options.maxBufferedBytes))
       return
     }
@@ -91,6 +98,7 @@ function send(
       settled = true
       cleanup()
       socket.terminate()
+      abort.abort()
       reject(error)
     }
     const onClose = (): void => {
@@ -116,10 +124,26 @@ function send(
         }
         succeed()
       })
+      if (socket.bufferedAmount > options.maxBufferedBytes) {
+        fuse(bufferLimitError(options.maxBufferedBytes))
+      }
     } catch (error) {
       fail(error instanceof Error ? error : new Error(String(error)))
     }
   })
+}
+
+function claimCompressionConcurrency(concurrency: number): void {
+  if (compressionConcurrencyClaim === undefined) {
+    compressionConcurrencyClaim = concurrency
+    return
+  }
+  if (compressionConcurrencyClaim !== concurrency) {
+    throw new Error(
+      `websocket compression concurrency is already ${String(compressionConcurrencyClaim)}; `
+      + `changing it to ${String(concurrency)} requires a process restart`,
+    )
+  }
 }
 
 function failureFrame(error: unknown): RpcRequest<Frame> {
@@ -149,12 +173,16 @@ export class WebSocketDownlinks {
     private readonly api: ApiProxy,
     private readonly options: WebSocketDownlinkOptions = DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS,
   ) {
+    if (options.compression) claimCompressionConcurrency(options.compressionConcurrency)
     this.server = new WebSocketServer({
       noServer: true,
+      maxPayload: MAX_INBOUND_PAYLOAD_BYTES,
       perMessageDeflate: options.compression
         ? {
           threshold: options.compressionThresholdBytes,
           concurrencyLimit: options.compressionConcurrency,
+          serverNoContextTakeover: true,
+          clientNoContextTakeover: true,
         }
         : false,
     })
@@ -227,12 +255,12 @@ export class WebSocketDownlinks {
   ): Promise<void> {
     try {
       for await (const frame of frames) {
-        await send(socket, serverRequest(frame), this.options)
+        await send(socket, serverRequest(frame), this.options, abort)
       }
     } catch (error) {
       if (!abort.signal.aborted) {
         try {
-          await send(socket, serverRequest(failureFrame(error)), this.options)
+          await send(socket, serverRequest(failureFrame(error)), this.options, abort)
         } catch {
           // Socket loss won the race; no downstream remains to receive the failure frame.
         }
