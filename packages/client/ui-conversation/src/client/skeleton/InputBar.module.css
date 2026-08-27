@@ -172,7 +172,7 @@
   width: 8px;
   height: 8px;
   border-radius: 50%;
-  background: var(--dsw-alias-state-business-primary);
+  background: currentColor;
   animation: input-pending 1s ease-in-out infinite alternate;
 }
 

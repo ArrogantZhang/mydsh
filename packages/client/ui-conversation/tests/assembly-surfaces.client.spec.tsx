@@ -48,7 +48,12 @@ function WorkspaceProbe({ open }: EmptyWorkspaceOwnerProps) {
   )
 }
 
-async function bench(opts?: { blank?: boolean }) {
+interface BenchOptions {
+  blank?: boolean
+  prompt?: ISession['prompt']
+}
+
+async function bench(opts?: BenchOptions) {
   const runtime = await SlotTestRuntime.create()
   runtime.provide('connection', { api: { settings: {} }, isLoopback: false })
   // The plugin injects both; these specs exercise no settings path.
@@ -67,7 +72,7 @@ async function bench(opts?: { blank?: boolean }) {
     },
     session: {
       loadOlder: vi.fn<ISession['loadOlder']>(),
-      prompt: vi.fn<ISession['prompt']>(async () => ({ ok: true, value: { accepted: true } })),
+      prompt: opts?.prompt ?? vi.fn<ISession['prompt']>(async () => ({ ok: true, value: { accepted: true } })),
     },
   })
   await runtime.root.declare(LAYOUT_CHILDREN, AppRoot)
@@ -171,6 +176,43 @@ describe('resident composer', () => {
     })
     expect(view.container.querySelector('textarea')).toBe(hero)
     await runtime.dispose()
+  })
+})
+
+describe('submission receipt across assembled surfaces', () => {
+  it('keeps pre-admission feedback out of the shared conversation state', async () => {
+    const admission = Promise.withResolvers<Awaited<ReturnType<ISession['prompt']>>>()
+    const prompt = vi.fn<ISession['prompt']>(() => admission.promise)
+    const runtime = await bench({ prompt })
+    const view = runtime.renderRoot()
+
+    try {
+      const composer = view.container.querySelector('textarea')!
+      fireEvent.change(composer, { target: { value: 'durable only' } })
+      fireEvent.keyDown(composer, { key: 'Enter' })
+
+      await waitFor(() => {
+        expect(prompt).toHaveBeenCalledOnce()
+        expect(view.getByRole('status').textContent).toBe('发送中…')
+      })
+
+      const snapshot = runtime.sessions.behavior(SID).getSnapshot()
+      expect(snapshot.nodes).toEqual([])
+      expect(snapshot.pending).toEqual([])
+      expect(snapshot.queue).toEqual([])
+      expect(view.container.querySelector('[data-chat-anchor-key]')).toBeNull()
+      expect(view.container.querySelector('[data-chat-flow-kind="user"]')).toBeNull()
+      expect(view.container.querySelector('[data-pending-steering]')).toBeNull()
+
+      // SlotTestRuntime exposes snapshot mutation rather than the real mux-frame
+      // admission path. Task 5's browser scenario owns the durable user/message
+      // handoff; this assertion stops at the real deferred Host admission point.
+    } finally {
+      admission.resolve({ ok: true, value: { accepted: true } })
+      await admission.promise
+      await runtime.flush()
+      await runtime.dispose()
+    }
   })
 })
 

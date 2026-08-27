@@ -1218,25 +1218,18 @@ describe('machine pending lock', () => {
     })
   })
 
-  it('shows the receipt without producing an optimistic chat node', async () => {
-    const deferred = Promise.withResolvers<SubmitOutcome>()
-    const { view, textarea } = bench({ draft: 'durable only', submit: () => deferred.promise })
-    fireEvent.keyDown(textarea, { key: 'Enter' })
-
-    expect(view.getByRole('status').textContent).toBe('发送中…')
-    expect(view.container.querySelector('[data-chat-flow], [data-chat-anchor-key], [data-pending-steering]')).toBeNull()
-
-    await act(async () => {
-      deferred.resolve({ kind: 'success' })
-      await deferred.promise
-      await Promise.resolve()
-    })
-  })
-
   it('defines non-visual status and reduced-motion pending styles', () => {
-    // jsdom neither applies CSS Modules rules nor emulates reduced-motion media
-    // queries, so source inspection is the only structural signal available here.
+    // jsdom neither applies CSS Modules rules, resolves theme custom properties,
+    // nor emulates reduced motion, so source inspection pins the marker's contrast
+    // and the accessibility branches that have no runtime signal in this suite.
     const source = readFileSync('packages/client/ui-conversation/src/client/skeleton/InputBar.module.css', 'utf8')
+    expect(source).toContain(`.pending {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: input-pending 1s ease-in-out infinite alternate;
+}`)
     expect(source).toContain(`.visuallyHidden {
   position: absolute;
   width: 1px;
