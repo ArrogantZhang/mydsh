@@ -174,6 +174,15 @@ describe('Host downlink batch encoder', () => {
       ['batch', 2, exactBytes],
       ['single', 1, Buffer.byteLength(serverText(values[2]), 'utf8')],
     ])
+    expect(messages[0]?.text).toBe(
+      `${BATCH_PREFIX}${serverText(values[0])},${serverText(values[1])}${BATCH_SUFFIX}`,
+    )
+    const firstMessage = messages[0]
+    if (firstMessage === undefined) throw new Error('expected an exact-fit batch')
+    expect(JSON.parse(firstMessage.text)).toEqual({
+      type: 'server-batch',
+      requests: [serverRequest(values[0]), serverRequest(values[1])],
+    })
     expect(messages.flatMap(requests).map(request => request.rpcId)).toEqual(['rpc-0', 'rpc-1', 'rpc-2'])
   })
 

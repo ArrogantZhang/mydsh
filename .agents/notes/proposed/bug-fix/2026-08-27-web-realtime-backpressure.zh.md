@@ -20,7 +20,7 @@ Status: proposed
 
 `dsh-host-apiproxy` 把完整应用帧接纳到各条逻辑流中，因此由它在无界帧积压形成前应用该流的帧容量限制。容量属于单个流实例，因此停滞的 mux 或 host 消费方无法占用其他下行的限额。
 
-`dsh-client-connection` 拥有物理 WebSocket。它会把每个 `ServerRequest` 只序列化一次，并计量序列化后的 UTF-8 字节数。调用 `send()` 前，当 `bufferedAmount` 加上这些字节后超过配置上限时，载体会拒绝该 frame；恰好达到上限则允许发送。这是在压缩前对应用字节进行的刻意保守核算。载体会在 `send()` 返回后立即再次检查 `bufferedAmount`，并在其回调后再检查一次。字节限制或发送超时会终止受影响的 WebSocket、中止其 source，并且只产生内部的类别与上限诊断；不保证已终止的 peer 会收到 `stream/error` frame。既有代际失败语义随后会关闭配套流，并为该浏览器连接重连两条流。会话、agent 与模型生命周期以及其他浏览器或客户端连接不会收到该传输中止。
+`dsh-client-connection` 拥有物理 WebSocket。它会把每个逻辑 `ServerRequest` 只序列化一次，并以 UTF-8 字节计量每条完整物理消息。调用 `send()` 前，当 `bufferedAmount` 加上这些字节后超过配置上限时，载体会拒绝该物理消息；恰好达到上限则允许发送。这是在压缩前对应用字节进行的刻意保守核算。载体会在 `send()` 返回后立即再次检查 `bufferedAmount`，并在其回调后再检查一次。字节限制或按物理消息计算的发送超时会终止受影响的 WebSocket、中止其 source，并且只产生内部的类别与上限诊断；不保证已终止的 peer 会收到 `stream/error` frame。既有代际失败语义随后会关闭配套流，并为该浏览器连接重连两条流。会话、agent 与模型生命周期以及其他浏览器或客户端连接不会收到该传输中止。
 
 压缩使用 `permessage-deflate`，并同时禁用服务端与客户端 context takeover。这会限制每条连接的 zlib 状态，并使 `downlinkCompressionThresholdBytes` 生效。`ws` 并发 limiter 位于进程全局且使用首个值，因此 `downlinkCompressionConcurrency` 接受 1 至 16，第一个启用压缩的实例会在进程重启前占有该值，之后的不同值会使插件加载失败。`dsh-client-connection` 是生产环境中 `ws` 的唯一所有方。
 

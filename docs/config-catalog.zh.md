@@ -436,7 +436,7 @@ export interface ConnectionConfig {
   downlinkBatchFlushMs?: number
   /** Per-socket buffered-byte limit, from 1 through 67,108,864. Default: 1,048,576. */
   downlinkMaxBufferedBytes?: number
-  /** Per-frame send timeout in milliseconds, from 1 through 60,000. Default: 5,000. */
+  /** Send timeout per physical WebSocket message, from 1 through 60,000 milliseconds. Default: 5,000. */
   downlinkSendTimeoutMs?: number
 }
 ```

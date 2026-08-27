@@ -65,6 +65,7 @@ function send(
   const { text, utf8Bytes } = message
   return new Promise((resolve, reject) => {
     if (socket.readyState !== WebSocket.OPEN) {
+      abort.abort()
       reject(new Error('websocket downlink closed before frame delivery'))
       return
     }
@@ -85,6 +86,7 @@ function send(
       if (settled) return
       settled = true
       cleanup()
+      abort.abort()
       reject(error)
     }
     const succeed = (): void => {

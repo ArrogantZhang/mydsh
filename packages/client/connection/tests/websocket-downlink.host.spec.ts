@@ -19,6 +19,8 @@ type HostSource = (signal: AbortSignal) => AsyncIterable<RpcRequest<HostFrame>>
 
 const running: (() => Promise<void>)[] = []
 const TEST_COMPRESSION_CONCURRENCY = 4
+const BATCH_PREFIX = '{"type":"server-batch","requests":['
+const BATCH_SUFFIX = ']}'
 
 afterEach(async () => {
   await Promise.all(running.splice(0).map(close => close()))
@@ -84,12 +86,16 @@ function muxFrame(rpcId: string, sessionId: string): RpcRequest<MuxFrame> {
 }
 
 function serializedFrameBytes(frame: RpcRequest<MuxFrame>): number {
-  return Buffer.byteLength(JSON.stringify({
+  return Buffer.byteLength(serializedFrameText(frame), 'utf8')
+}
+
+function serializedFrameText(frame: RpcRequest<MuxFrame>): string {
+  return JSON.stringify({
     type: 'server-request',
     rpcId: frame.rpcId,
     method: frame.payload.type,
     payload: frame.payload,
-  }), 'utf8')
+  })
 }
 
 async function serve(downlinks: WebSocketDownlinks): Promise<{
@@ -150,6 +156,18 @@ function readUpTo<T = ServerRequest>(socket: WebSocket, count: number): Promise<
 function physicalRequests(message: unknown): ServerRequest[] {
   const parsed = message as ServerRequest | { type: 'server-batch'; requests: ServerRequest[] }
   return parsed.type === 'server-batch' ? parsed.requests : [parsed]
+}
+
+function batchMessage(message: unknown): { type: 'server-batch'; requests: ServerRequest[] } {
+  expect(message).toMatchObject({ type: 'server-batch' })
+  const batch = message as { type: 'server-batch'; requests: ServerRequest[] }
+  expect(Array.isArray(batch.requests)).toBe(true)
+  return batch
+}
+
+function singleMessage(message: unknown): ServerRequest {
+  expect(message).toMatchObject({ type: 'server-request' })
+  return message as ServerRequest
 }
 
 async function acceptedSocket(downlinks: WebSocketDownlinks): Promise<WebSocket> {
@@ -499,10 +517,12 @@ describe('WebSocket downlinks', () => {
     const messages = await readUpTo<unknown>(socket, 2)
 
     expect(messages).toHaveLength(2)
-    expect(messages[0]).toMatchObject({ type: 'server-batch' })
-    expect(physicalRequests(messages[0]).map(request => request.rpcId))
+    const first = batchMessage(messages[0])
+    const second = singleMessage(messages[1])
+    expect(first.requests).toHaveLength(64)
+    expect(first.requests.map(request => request.rpcId))
       .toEqual(Array.from({ length: 64 }, (_, index) => `batch-${String(index)}`))
-    expect(physicalRequests(messages[1]).map(request => request.rpcId)).toEqual(['batch-64'])
+    expect(second.rpcId).toBe('batch-64')
   })
 
   it('sends 65 frames as 65 physical messages when batching is disabled', async () => {
@@ -519,11 +539,114 @@ describe('WebSocket downlinks', () => {
     const messages = await readUpTo<unknown>(socket, 65)
 
     expect(messages).toHaveLength(65)
+    expect(messages.every(message => (message as { type?: unknown }).type === 'server-request')).toBe(true)
     expect(messages.flatMap(physicalRequests).map(request => request.rpcId))
       .toEqual(Array.from({ length: 65 }, (_, index) => `single-${String(index)}`))
   })
 
-  it('keeps a healthy peer pumping after a slow peer crosses its byte fuse', async () => {
+  it('flushes a real one-request partial batch after its 16 ms deadline', async () => {
+    let finished!: () => void
+    const sourceFinished = new Promise<void>((resolve) => { finished = resolve })
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        try {
+          yield muxFrame('timer-partial', 'timer-partial')
+          await untilAbort(signal)
+        } finally {
+          finished()
+        }
+      },
+      idle,
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true, flushMs: 16 },
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const [message] = await readUpTo<unknown>(socket, 1)
+
+    expect(singleMessage(message).rpcId).toBe('timer-partial')
+    const closed = once(socket, 'close')
+    socket.close()
+    await closed
+    await sourceFinished
+  })
+
+  it('flushes a clean-end partial batch as one raw batch message', async () => {
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        yield muxFrame('clean-end-0', 'clean-end-0')
+        yield muxFrame('clean-end-1', 'clean-end-1')
+      },
+      idle,
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true },
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const [message] = await readUpTo<unknown>(socket, 1)
+    const batch = batchMessage(message)
+
+    expect(batch.requests.map(request => request.rpcId)).toEqual(['clean-end-0', 'clean-end-1'])
+  })
+
+  it('sends a wrapper-oversized request as one raw single message', async () => {
+    const oversized = muxFrame('oversized-single', '会'.repeat(32))
+    const text = serializedFrameText(oversized)
+    const wrappedBytes = Buffer.byteLength(`${BATCH_PREFIX}${text}${BATCH_SUFFIX}`, 'utf8')
+    const downlinks = configuredDownlinks(api(
+      async function * () { yield oversized },
+      idle,
+    ), {
+      batch: {
+        ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch,
+        enabled: true,
+        maxBytes: wrappedBytes - 1,
+      },
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const [message] = await readUpTo<unknown>(socket, 1)
+
+    expect(singleMessage(message).rpcId).toBe('oversized-single')
+  })
+
+  it('admits an exact batch byte fit through the socket fuse', async () => {
+    const first = muxFrame('exact-batch-0', '会'.repeat(8))
+    const second = muxFrame('exact-batch-1', '会'.repeat(9))
+    const exactText = `${BATCH_PREFIX}${serializedFrameText(first)},${serializedFrameText(second)}${BATCH_SUFFIX}`
+    const exactBytes = Buffer.byteLength(exactText, 'utf8')
+    const downlinks = configuredDownlinks(api(
+      async function * () {
+        yield first
+        yield second
+      },
+      idle,
+    ), {
+      batch: {
+        ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch,
+        enabled: true,
+        maxBytes: exactBytes,
+      },
+      maxBufferedBytes: exactBytes,
+    })
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+
+    const [message] = await readUpTo<unknown>(socket, 1)
+
+    expect(batchMessage(message).requests.map(request => request.rpcId))
+      .toEqual(['exact-batch-0', 'exact-batch-1'])
+    expect(Buffer.byteLength(JSON.stringify(message), 'utf8')).toBe(exactBytes)
+  })
+
+  it('keeps a batching-enabled healthy peer pumping after a slow peer crosses its byte fuse', async () => {
     let release!: () => void
     const gate = new Promise<void>((resolve) => { release = resolve })
     const aborted: boolean[] = []
@@ -534,17 +657,18 @@ describe('WebSocket downlinks', () => {
         aborted[index] = false
         try {
           await gate
-          yield {
-            rpcId: RpcId(`peer-${String(index)}`),
-            payload: { type: 'session/subscribed', sessionId: `session-${String(index)}` as never, lastSeq: index },
-          }
+          yield muxFrame(`peer-${String(index)}-0`, `session-${String(index)}`)
+          yield muxFrame(`peer-${String(index)}-1`, `session-${String(index)}`)
           await untilAbort(signal)
         } finally {
           aborted[index] = true
         }
       },
       idle,
-    ), { maxBufferedBytes: 1_000 })
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true, maxFrames: 2 },
+      maxBufferedBytes: 1_000,
+    })
     const host = await serve(downlinks)
     running.push(host.close)
     const slow = peer(`${host.origin}${MUX_EVENTS_PATH}`)
@@ -555,9 +679,10 @@ describe('WebSocket downlinks', () => {
     await once(healthy, 'open')
     const slowClosed = once(slow, 'close')
     const slowMessages = readUpTo(slow, 1)
-    const healthyFrame = read(healthy)
+    const healthyMessage = readUpTo<unknown>(healthy, 1)
     release()
-    expect(await healthyFrame).toMatchObject({ rpcId: 'peer-1' })
+    expect(batchMessage((await healthyMessage)[0]).requests.map(request => request.rpcId))
+      .toEqual(['peer-1-0', 'peer-1-1'])
     const messages = await slowMessages
     if (messages.length > 0) {
       slow.close()
@@ -711,7 +836,7 @@ describe('WebSocket downlinks', () => {
     const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
     const messages = await readUpTo<unknown>(socket, 2)
     expect(messages).toHaveLength(1)
-    const [failure] = physicalRequests(messages[0])
+    const failure = singleMessage(messages[0])
     expect(failure?.payload).toEqual({
       type: 'stream/error',
       error: { code: 'internal', message: 'Error: mux source failed', details: {} },
@@ -774,21 +899,23 @@ describe('WebSocket downlinks', () => {
     await finished
   })
 
-  it('contains socket send callback failures and closes the downlink', async () => {
-    let release!: () => void
-    const gate = new Promise<void>((resolve) => { release = resolve })
-    const downlinks = new WebSocketDownlinks(api(
-      async function * () {
-        await gate
-        yield {
-          rpcId: RpcId('send-failure'),
-          payload: { type: 'session/subscribed', sessionId: 'session-send' as never, lastSeq: 0 },
+  it('aborts a pending batched read before a send callback rejection settles', async () => {
+    let finish!: () => void
+    const sourceFinished = new Promise<void>((resolve) => { finish = resolve })
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        try {
+          yield muxFrame('send-failure', 'session-send')
+          await untilAbort(signal)
+        } finally {
+          finish()
         }
       },
       idle,
-    ))
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true, flushMs: 16 },
+    })
     const host = await serve(downlinks)
-    running.push(host.close)
     const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
     await once(socket, 'open')
     const accepted = await acceptedSocket(downlinks)
@@ -803,10 +930,92 @@ describe('WebSocket downlinks', () => {
       done?.(new Error('socket send failed'))
     }) as WebSocket['send'])
     const closed = once(socket, 'close')
+    const quiesced = Promise.all([closed, sourceFinished]).then(() => true)
+    const completed = await Promise.race([
+      quiesced,
+      new Promise<false>(resolve => setTimeout(() => { resolve(false) }, 500)),
+    ])
+    if (!completed) accepted.terminate()
+    await quiesced
+    try {
+      expect(completed).toBe(true)
+      expect(send).toHaveBeenCalledOnce()
+      await expect(host.close()).resolves.toBeUndefined()
+    } finally {
+      send.mockRestore()
+      if (!completed) await host.close()
+    }
+  })
+
+  it('aborts the source before a synchronous send throw reaches iterator cleanup', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let abortedAtCleanup = false
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        try {
+          await gate
+          yield muxFrame('send-throw', 'send-throw')
+        } finally {
+          abortedAtCleanup = signal.aborted
+        }
+      },
+      idle,
+    ))
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    const send = vi.spyOn(accepted, 'send').mockImplementation(() => {
+      throw new Error('synchronous send failure')
+    })
+    const closed = once(socket, 'close')
+
     release()
     await closed
-    expect(send).toHaveBeenCalledTimes(2)
+
+    expect(abortedAtCleanup).toBe(true)
+    expect(send).toHaveBeenCalledOnce()
     send.mockRestore()
+  })
+
+  it('aborts the source before rejecting a send whose socket is not open', async () => {
+    let release!: () => void
+    const gate = new Promise<void>((resolve) => { release = resolve })
+    let finish!: () => void
+    const sourceFinished = new Promise<void>((resolve) => { finish = resolve })
+    let abortedAtCleanup = false
+    const downlinks = configuredDownlinks(api(
+      async function * (signal) {
+        try {
+          await gate
+          yield muxFrame('not-open', 'not-open')
+        } finally {
+          abortedAtCleanup = signal.aborted
+          finish()
+        }
+      },
+      idle,
+    ))
+    const host = await serve(downlinks)
+    running.push(host.close)
+    const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
+    await once(socket, 'open')
+    const accepted = await acceptedSocket(downlinks)
+    const readyState = vi.spyOn(accepted, 'readyState', 'get').mockReturnValue(WebSocket.CLOSING)
+    const send = vi.spyOn(accepted, 'send')
+
+    release()
+    await sourceFinished
+
+    expect(abortedAtCleanup).toBe(true)
+    expect(send).not.toHaveBeenCalled()
+    readyState.mockRestore()
+    send.mockRestore()
+    const closed = once(socket, 'close')
+    socket.close()
+    await closed
   })
 
   it('rejects when its acceptor has already closed', async () => {
@@ -821,9 +1030,13 @@ describe('WebSocket downlinks', () => {
     let releaseCleanup!: () => void
     const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve })
     let cleaned = false
-    const downlinks = new WebSocketDownlinks(api(
+    let awaitingAbort!: () => void
+    const sourcePending = new Promise<void>((resolve) => { awaitingAbort = resolve })
+    const downlinks = configuredDownlinks(api(
       async function * (signal) {
         try {
+          yield muxFrame('teardown-partial', 'teardown-partial')
+          awaitingAbort()
           await untilAbort(signal)
         } finally {
           cleanupStarted()
@@ -832,10 +1045,13 @@ describe('WebSocket downlinks', () => {
         }
       },
       idle,
-    ))
+    ), {
+      batch: { ...DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch, enabled: true },
+    })
     const host = await serve(downlinks)
     const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
     await once(socket, 'open')
+    await sourcePending
     let closed = false
     const closing = host.close().then(() => { closed = true })
     try {
