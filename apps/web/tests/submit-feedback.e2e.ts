@@ -42,7 +42,10 @@ interface SubmitProbe {
 
 interface PendingContrast {
   readonly markerBackground: string
+  readonly markerBackgroundAlpha: number
+  readonly markerOpacity: string
   readonly buttonBackground: string
+  readonly buttonBackgroundAlpha: number
   readonly buttonOpacity: string
   readonly ratio: number
 }
@@ -137,13 +140,21 @@ async function pendingContrast(page: Page): Promise<PendingContrast> {
     if (marker === null || marker === undefined || button === null || button === undefined) {
       throw new Error('pending contrast requires the painted marker and Send button')
     }
-    const channels = (color: string): readonly [number, number, number] => {
-      const values = color.match(/[\d.]+/g)?.slice(0, 3).map(Number)
-      if (values === undefined || values.length !== 3) throw new Error(`unsupported computed color ${color}`)
-      return [values[0]!, values[1]!, values[2]!]
+    const parseColor = (color: string): {
+      readonly channels: readonly [number, number, number]
+      readonly alpha: number
+    } => {
+      const values = color.match(/[\d.]+/g)?.map(Number)
+      if (!/^rgba?\(/.test(color) || values === undefined || (values.length !== 3 && values.length !== 4)) {
+        throw new Error(`unsupported computed color ${color}`)
+      }
+      return {
+        channels: [values[0]!, values[1]!, values[2]!],
+        alpha: values[3] ?? 1,
+      }
     }
-    const luminance = (color: string): number => {
-      const linear = channels(color).map((channel) => {
+    const luminance = (channels: readonly [number, number, number]): number => {
+      const linear = channels.map((channel) => {
         const value = channel / 255
         return value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4
       })
@@ -151,11 +162,16 @@ async function pendingContrast(page: Page): Promise<PendingContrast> {
     }
     const markerStyle = getComputedStyle(marker)
     const buttonStyle = getComputedStyle(button)
-    const markerLuminance = luminance(markerStyle.backgroundColor)
-    const buttonLuminance = luminance(buttonStyle.backgroundColor)
+    const markerColor = parseColor(markerStyle.backgroundColor)
+    const buttonColor = parseColor(buttonStyle.backgroundColor)
+    const markerLuminance = luminance(markerColor.channels)
+    const buttonLuminance = luminance(buttonColor.channels)
     return {
       markerBackground: markerStyle.backgroundColor,
+      markerBackgroundAlpha: markerColor.alpha,
+      markerOpacity: markerStyle.opacity,
       buttonBackground: buttonStyle.backgroundColor,
+      buttonBackgroundAlpha: buttonColor.alpha,
       buttonOpacity: buttonStyle.opacity,
       ratio: (Math.max(markerLuminance, buttonLuminance) + 0.05)
         / (Math.min(markerLuminance, buttonLuminance) + 0.05),
@@ -234,6 +250,7 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       const expectedAssistant = recordedTextBlocks[0]!
 
       const sessionEvents: SessionEvent[] = []
+      const consoleErrors: string[] = []
       const consoleWarnings: string[] = []
       scaffold = await launchWebScaffold({ replayFixture: FIXTURE })
       scaffold.ctx.on('session/event', (_session, event: SessionEvent) => { sessionEvents.push(event) })
@@ -241,6 +258,7 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       const page = await newEnglishPage(browser)
       const tripwire = watchConsole(page)
       page.on('console', (message) => {
+        if (message.type() === 'error') consoleErrors.push(message.text())
         if (message.type() === 'warning') consoleWarnings.push(message.text())
       })
       await page.goto(scaffold.baseUrl, { waitUntil: 'load' })
@@ -309,6 +327,12 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       } finally {
         await page.evaluate(() => { document.body.removeAttribute('data-ds-dark-theme') })
       }
+      expect(lightContrast.markerBackgroundAlpha).toBe(1)
+      expect(darkContrast!.markerBackgroundAlpha).toBe(1)
+      expect(lightContrast.markerOpacity).toBe('1')
+      expect(darkContrast!.markerOpacity).toBe('1')
+      expect(lightContrast.buttonBackgroundAlpha).toBe(1)
+      expect(darkContrast!.buttonBackgroundAlpha).toBe(1)
       expect(lightContrast.buttonOpacity).toBe('1')
       expect(darkContrast!.buttonOpacity).toBe('1')
       expect(lightContrast.ratio).toBeGreaterThanOrEqual(3)
@@ -345,17 +369,35 @@ describe.skipIf(MODE === 'record')('web e2e: submit feedback before Host admissi
       })).toBe(false)
       expect(await textarea.inputValue()).toBe('')
 
-      const users = sessionEvents.filter((event): event is SessionEvent<'user/message'> => (
-        event.type === 'user/message' && event.data.source.kind === 'user' && userText(event) === PROMPT
+      const turnEvents = sessionEvents.slice(sessionEventCountBeforeSubmit)
+      const users = turnEvents.filter((event): event is SessionEvent<'user/message'> => (
+        event.type === 'user/message'
       ))
-      const assistants = sessionEvents.filter((event): event is SessionEvent<'assistant/message'> => (
+      const assistants = turnEvents.filter((event): event is SessionEvent<'assistant/message'> => (
         event.type === 'assistant/message'
       ))
-      expect(users).toHaveLength(1)
-      expect(users[0]?.surfaceOp).toBe('append')
+      expect(users).toHaveLength(2)
+      expect(users.map(event => event.data.source.kind).sort()).toEqual(['plugin', 'user'])
+      expect(users.every(event => event.surfaceOp === 'append')).toBe(true)
+      const human = users.find(event => event.data.source.kind === 'user')
+      if (human === undefined) throw new Error('submit turn omitted its human user message')
+      expect(userText(human)).toBe(PROMPT)
+      const runtimeContext = users.find(event => event.data.source.kind === 'plugin')
+      if (runtimeContext?.data.source.kind !== 'plugin') {
+        throw new Error('submit turn omitted its system-prompt runtime-context snapshot')
+      }
+      expect(runtimeContext.data.source.plugin).toBe('@deepseek-ai/dsh-system-prompt')
+      expect(runtimeContext.data.source.form).toBe('snapshot')
       expect(assistants).toHaveLength(1)
       expect(assistantText(assistants[0]!)).toBe(expectedAssistant)
       expect(assistants[0]?.data.turn).toBe(1)
+      expect(assistants[0]?.data.message.source).toEqual({
+        kind: 'model',
+        provider: 'deepseek-official',
+        model: 'deepseek-v4-flash',
+      })
+      expect(assistants[0]?.surfaceOp).toBe('append')
+      expect(consoleErrors).toEqual([])
       expect(consoleWarnings).toEqual([])
       expect(tripwire.warnings).toEqual([])
       expect(tripwire.pageErrors).toEqual([])
