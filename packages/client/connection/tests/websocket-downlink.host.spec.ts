@@ -136,21 +136,25 @@ function isServerRequestWithRpcId(value: unknown, rpcId: string): boolean {
   return candidate.type === 'server-request' && candidate.rpcId === rpcId
 }
 
-function readUpTo<T = ServerRequest>(socket: WebSocket, count: number): Promise<T[]> {
+function readTextUpTo(socket: WebSocket, count: number): Promise<string[]> {
   return new Promise((resolve) => {
-    const messages: T[] = []
+    const messages: string[] = []
     const finish = (): void => {
       socket.off('message', onMessage)
       socket.off('close', finish)
       resolve(messages)
     }
     const onMessage = (data: WebSocket.RawData): void => {
-      messages.push(JSON.parse(rawDataText(data)) as T)
+      messages.push(rawDataText(data))
       if (messages.length === count) finish()
     }
     socket.on('message', onMessage)
     socket.once('close', finish)
   })
+}
+
+async function readUpTo<T = ServerRequest>(socket: WebSocket, count: number): Promise<T[]> {
+  return (await readTextUpTo(socket, count)).map(text => JSON.parse(text) as T)
 }
 
 function physicalRequests(message: unknown): ServerRequest[] {
@@ -639,11 +643,13 @@ describe('WebSocket downlinks', () => {
     running.push(host.close)
     const socket = peer(`${host.origin}${MUX_EVENTS_PATH}`)
 
-    const [message] = await readUpTo<unknown>(socket, 1)
+    const [receivedText] = await readTextUpTo(socket, 1)
+    expect(receivedText).toBe(exactText)
+    const message = JSON.parse(receivedText ?? '') as unknown
 
     expect(batchMessage(message).requests.map(request => request.rpcId))
       .toEqual(['exact-batch-0', 'exact-batch-1'])
-    expect(Buffer.byteLength(JSON.stringify(message), 'utf8')).toBe(exactBytes)
+    expect(Buffer.byteLength(receivedText ?? '', 'utf8')).toBe(exactBytes)
   })
 
   it('keeps a batching-enabled healthy peer pumping after a slow peer crosses its byte fuse', async () => {
@@ -931,19 +937,33 @@ describe('WebSocket downlinks', () => {
     }) as WebSocket['send'])
     const closed = once(socket, 'close')
     const quiesced = Promise.all([closed, sourceFinished]).then(() => true)
-    const completed = await Promise.race([
-      quiesced,
-      new Promise<false>(resolve => setTimeout(() => { resolve(false) }, 500)),
-    ])
-    if (!completed) accepted.terminate()
-    await quiesced
+    let watchdog: ReturnType<typeof setTimeout> | undefined
+    let hostClosing: Promise<void> | undefined
+    const closeHost = (): Promise<void> => {
+      hostClosing ??= host.close()
+      return hostClosing
+    }
+    const clearWatchdog = (): void => {
+      if (watchdog !== undefined) clearTimeout(watchdog)
+      watchdog = undefined
+    }
     try {
+      const completed = await Promise.race([
+        quiesced,
+        new Promise<false>((resolve) => {
+          watchdog = setTimeout(() => { resolve(false) }, 500)
+        }),
+      ])
+      clearWatchdog()
+      if (!completed) accepted.terminate()
+      await quiesced
       expect(completed).toBe(true)
       expect(send).toHaveBeenCalledOnce()
-      await expect(host.close()).resolves.toBeUndefined()
     } finally {
+      clearWatchdog()
+      if (accepted.readyState !== WebSocket.CLOSED) accepted.terminate()
       send.mockRestore()
-      if (!completed) await host.close()
+      await closeHost()
     }
   })
 

@@ -81,7 +81,7 @@ export interface ConnectionConfig {
    */
   downlinkCompressionConcurrency?: number
   /** Whether logical downlink requests share bounded physical messages. Default: false. */
-  downlinkBatch?: boolean
+  downlinkBatching?: boolean
   /** Maximum requests per physical batch, from 1 through 256. Default: 64. */
   downlinkBatchMaxFrames?: number
   /** Maximum complete batch size, from 1 through 1,048,576 UTF-8 bytes. Default: 262,144. */
@@ -105,7 +105,7 @@ export const Config: z<ConnectionConfig> = z.object({
     .min(1)
     .max(MAX_DOWNLINK_COMPRESSION_CONCURRENCY)
     .default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency),
-  downlinkBatch: z.boolean().default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled),
+  downlinkBatching: z.boolean().default(DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled),
   downlinkBatchMaxFrames: z.natural()
     .min(1)
     .max(MAX_DOWNLINK_BATCH_FRAMES)
@@ -200,7 +200,7 @@ export function apply(ctx: Context, config?: ConnectionConfig): void {
     compressionConcurrency: config?.downlinkCompressionConcurrency
       ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.compressionConcurrency,
     batch: {
-      enabled: config?.downlinkBatch ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled,
+      enabled: config?.downlinkBatching ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.enabled,
       maxFrames: config?.downlinkBatchMaxFrames ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxFrames,
       maxBytes: config?.downlinkBatchMaxBytes ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.maxBytes,
       flushMs: config?.downlinkBatchFlushMs ?? DEFAULT_WEBSOCKET_DOWNLINK_OPTIONS.batch.flushMs,

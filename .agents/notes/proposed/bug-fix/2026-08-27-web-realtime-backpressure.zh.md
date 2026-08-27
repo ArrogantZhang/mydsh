@@ -24,7 +24,7 @@ Status: proposed
 
 压缩使用 `permessage-deflate`，并同时禁用服务端与客户端 context takeover。这会限制每条连接的 zlib 状态，并使 `downlinkCompressionThresholdBytes` 生效。`ws` 并发 limiter 位于进程全局且使用首个值，因此 `downlinkCompressionConcurrency` 接受 1 至 16，第一个启用压缩的实例会在进程重启前占有该值，之后的不同值会使插件加载失败。`dsh-client-connection` 是生产环境中 `ws` 的唯一所有方。
 
-压缩后的逐帧基准测试在交付完成前填满了每个生产方的 4,096 帧队列，因此仅靠压缩并未限制测得突发流量下的调度与写入开销。此修订因此选择显式、无损的 Host batching。生产候选值是 64 个逻辑请求、262,144 个完整消息 UTF-8 字节，以及从首个已缓冲请求起算的 16 毫秒；插件默认仍为禁用，直至部署选择启用。Host 会在计数、完整 wrapper 字节、首项 deadline 或 source 正常结束要求发送时发出消息。它把多请求消息编码为严格的 `server-batch` wrapper，并保留每个内部请求的顺序、`rpcId` 与 payload。单请求 flush 与对 batch wrapper 而言过大的请求仍使用普通 `server-request` 消息。启用的 batch 字节上限若大于 socket 字节上限，插件会在注册 route 或 socket 之前加载失败。
+压缩后的逐帧基准测试在交付完成前填满了每个生产方的 4,096 帧队列，因此仅靠压缩并未限制测得突发流量下的调度与写入开销。此修订因此选择显式、无损的 Host batching。生产候选值是 64 个逻辑请求、262,144 个完整消息 UTF-8 字节，以及从首个已缓冲请求起算的 16 毫秒；插件默认仍为禁用，直至部署选择启用。Host 会在计数、完整 wrapper 字节、首项 deadline 或 source 正常结束要求发送时发出消息。同时最多只有一个 source `next()` 处于 pending；deadline 先完成时，accumulator 会 flush 当前请求，并为下一 batch 保留该 outstanding promise，而不会并发读取 source。它把多请求消息编码为严格的 `server-batch` wrapper，并保留每个内部请求的顺序、`rpcId` 与 payload。单请求 flush 与对 batch wrapper 而言过大的请求仍使用普通 `server-request` 消息。启用的 batch 字节上限若大于 socket 字节上限，插件会在注册 route 或 socket 之前加载失败。
 
 入站业务消息仍然被禁止。固定的 1 KiB `maxPayload` 限制解压后的消息大小：上限内的消息会进入协议拒绝逻辑并以状态码 1008 关闭，较大的压缩或未压缩消息则由 `ws` 在交付给业务之前以状态码 1009 拒绝，且解压后的数据不会无界增长。该限制是协议不变量，而不是部署配置。
 

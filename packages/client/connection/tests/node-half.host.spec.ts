@@ -107,13 +107,19 @@ describe('connection node half', () => {
       downlinkCompression: false,
       downlinkCompressionThresholdBytes: 0,
       downlinkCompressionConcurrency: 4,
-      downlinkBatch: false,
+      downlinkBatching: false,
       downlinkBatchMaxFrames: 64,
       downlinkBatchMaxBytes: 262_144,
       downlinkBatchFlushMs: 16,
       downlinkMaxBufferedBytes: 1_048_576,
       downlinkSendTimeoutMs: 5_000,
     })
+  })
+
+  it('uses downlinkBatching as the exact overlay key without a legacy alias', () => {
+    expect(Config({ downlinkBatching: true })).toMatchObject({ downlinkBatching: true })
+    const legacy = Config({ downlinkBatch: true } as unknown as ConnectionConfig) as Record<string, unknown>
+    expect(legacy.downlinkBatching).toBe(false)
   })
 
   it.each([
@@ -158,7 +164,7 @@ describe('connection node half', () => {
     ctx.provide('apiProxy', {} as ApiProxy)
 
     expect(() => { apply(ctx, {
-      downlinkBatch: true,
+      downlinkBatching: true,
       downlinkBatchMaxBytes: 2,
       downlinkMaxBufferedBytes: 1,
     }) }).toThrow(

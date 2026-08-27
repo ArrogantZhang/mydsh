@@ -425,7 +425,7 @@ export interface ConnectionConfig {
    */
   downlinkCompressionConcurrency?: number
   /** Whether logical downlink requests share bounded physical messages. Default: false. */
-  downlinkBatch?: boolean
+  downlinkBatching?: boolean
   /** Maximum requests per physical batch, from 1 through 256. Default: 64. */
   downlinkBatchMaxFrames?: number
   /** Maximum complete batch size, from 1 through 1,048,576 UTF-8 bytes. Default: 262,144. */
