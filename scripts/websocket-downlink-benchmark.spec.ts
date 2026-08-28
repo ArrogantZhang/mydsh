@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest'
 import {
+  createWorkerProcessController,
   evaluateBenchmarkReports,
   parseWorkerReport,
+  runBenchmarkCli,
+  settleWorkerTeardown,
   type WebSocketDownlinkBenchmarkReport,
 } from './websocket-downlink-benchmark.ts'
 
@@ -78,6 +81,13 @@ describe('WebSocket downlink benchmark report evaluation', () => {
     )).toThrow('compressed.serializedBytes actual=0 threshold=>0')
   })
 
+  it('rejects zero compressed transport bytes independently', () => {
+    expect(() => evaluateBenchmarkReports(
+      report(false),
+      report(true, { transportBytes: 0 }),
+    )).toThrow('compressed.transportBytes actual=0 threshold=>0')
+  })
+
   it('rejects less than sixty percent transport-byte reduction', () => {
     expect(() => evaluateBenchmarkReports(
       report(false),
@@ -123,6 +133,15 @@ describe('WebSocket downlink benchmark report evaluation', () => {
   })
 
   it.each([
+    ['plain frame maximum', report(false, { maxBatchFrames: 0 }), report(true), 'plain.maxBatchFrames actual=0 threshold=>0'],
+    ['compressed frame maximum', report(false), report(true, { maxBatchFrames: 0 }), 'compressed.maxBatchFrames actual=0 threshold=>0'],
+    ['plain byte maximum', report(false, { maxBatchBytes: 0 }), report(true), 'plain.maxBatchBytes actual=0 threshold=>0'],
+    ['compressed byte maximum', report(false), report(true, { maxBatchBytes: 0 }), 'compressed.maxBatchBytes actual=0 threshold=>0'],
+  ])('rejects a zero %s', (_name, plain, compressed, message) => {
+    expect(() => evaluateBenchmarkReports(plain, compressed)).toThrow(message)
+  })
+
+  it.each([
     ['plain', report(false, { webSocketMessages: 12_129 }), report(true), 'plainMessageReduction actual=0.8999917546174142 threshold=>=0.9'],
     ['compressed', report(false), report(true, { webSocketMessages: 12_129 }), 'compressedMessageReduction actual=0.8999917546174142 threshold=>=0.9'],
   ])('rejects insufficient %s physical-message reduction', (_name, plain, compressed, message) => {
@@ -134,6 +153,171 @@ describe('WebSocket downlink benchmark report evaluation', () => {
     ['compressed', report(false), report(true, { webSocketMessages: 0 }), 'compressed.webSocketMessages actual=0 threshold=>0'],
   ])('rejects a zero %s physical-message count', (_name, plain, compressed, message) => {
     expect(() => evaluateBenchmarkReports(plain, compressed)).toThrow(message)
+  })
+})
+
+describe('WebSocket downlink benchmark CLI orchestration', () => {
+  it('rejects every top-level argument before starting a worker', async () => {
+    const modes: boolean[] = []
+
+    await expect(runBenchmarkCli(['unexpected'], async (compression) => {
+      modes.push(compression)
+      return report(compression)
+    })).rejects.toThrow('usage: websocket-downlink-benchmark.ts')
+    expect(modes).toEqual([])
+  })
+
+  it('runs plain then compressed and returns the validated summary', async () => {
+    const modes: boolean[] = []
+
+    const summary = await runBenchmarkCli([], async (compression) => {
+      modes.push(compression)
+      return report(compression)
+    })
+
+    expect(modes).toEqual([false, true])
+    expect(summary.compressionRssOverheadBytes).toBe(24 * 1024 * 1024)
+  })
+
+  it('retains validated plain metrics without copying a compressed failure payload', async () => {
+    const plain = report(false)
+
+    const failure = await runBenchmarkCli([], async (compression) => {
+      if (!compression) return plain
+      throw new Error('forbidden-payload-text')
+    }).catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toContain(`validated plain metrics=${JSON.stringify(plain)}`)
+    expect((failure as Error).message).toContain('failure="Error"')
+    expect((failure as Error).message).not.toContain('forbidden-payload-text')
+  })
+
+  it('includes both validated reports and RSS overhead in evaluator failures', async () => {
+    const plain = report(false, { rssDeltaBytes: 197 * 1024 * 1024 })
+    const compressed = report(true, { rssDeltaBytes: 261 * 1024 * 1024 + 1 })
+
+    const failure = await runBenchmarkCli([], async compression => compression ? compressed : plain)
+      .catch((error: unknown) => error)
+
+    expect(failure).toBeInstanceOf(Error)
+    expect((failure as Error).message).toContain(`plain=${JSON.stringify(plain)}`)
+    expect((failure as Error).message).toContain(`compressed=${JSON.stringify(compressed)}`)
+    expect((failure as Error).message).toContain('compressionRssOverheadBytes=67108865')
+  })
+})
+
+describe('WebSocket downlink worker process control', () => {
+  it.each(['stdout', 'stderr'] as const)('kills a worker whose %s exceeds the output cap', async (channel) => {
+    let kills = 0
+    const controller = createWorkerProcessController('off', () => { kills++ })
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    if (channel === 'stdout') controller.writeStdout(Buffer.alloc(64 * 1024 + 1))
+    else controller.writeStderr(Buffer.alloc(64 * 1024 + 1))
+    controller.close(null, 'SIGTERM')
+
+    expect(await outcome).toMatchObject({
+      message: `compression-off worker ${channel} bytes actual=>65536 threshold=<=65536`,
+    })
+    expect(kills).toBe(1)
+  })
+
+  it('kills a timed-out worker without waiting for the real deadline', async () => {
+    let kills = 0
+    const controller = createWorkerProcessController('on', () => { kills++ })
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    controller.timeout()
+    controller.close(null, 'SIGTERM')
+
+    expect(await outcome).toMatchObject({
+      message: 'compression-on worker wallMs actual=>120000 threshold=<=120000',
+    })
+    expect(kills).toBe(1)
+  })
+
+  it('reports a child spawn error without copying its payload', async () => {
+    const controller = createWorkerProcessController('off', () => {})
+    const outcome = controller.result.catch((error: unknown) => error)
+    const error = Object.assign(new Error('forbidden-payload-text'), { code: 'ENOENT' })
+
+    controller.spawnError(error)
+
+    expect(await outcome).toMatchObject({ message: 'compression-off worker spawnError code=ENOENT' })
+  })
+
+  it('reports a nonzero exit using stderr size without copying stderr', async () => {
+    const controller = createWorkerProcessController('on', () => {})
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    controller.writeStderr(Buffer.from('forbidden-payload-text'))
+    controller.close(2, null)
+
+    const failure = await outcome as Error
+    expect(failure.message).toContain('compression-on worker exitCode actual=2 expected=0 signal=null stderrBytes=22')
+    expect(failure.message).not.toContain('forbidden-payload-text')
+  })
+
+  it('rejects unexpected stderr using only its byte count', async () => {
+    const controller = createWorkerProcessController('off', () => {})
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    controller.writeStderr(Buffer.from('forbidden-payload-text'))
+    controller.close(0, null)
+
+    const failure = await outcome as Error
+    expect(failure.message).toBe('compression-off worker stderrBytes actual=22 expected=0')
+    expect(failure.message).not.toContain('forbidden-payload-text')
+  })
+
+  it('returns bounded stdout for the existing exact parser', async () => {
+    const expected = report(false)
+    const controller = createWorkerProcessController('off', () => {})
+
+    controller.writeStdout(Buffer.from(`${JSON.stringify(expected)}\n`))
+    controller.close(0, null)
+
+    expect(parseWorkerReport(await controller.result, false)).toEqual(expected)
+  })
+})
+
+describe('WebSocket downlink worker teardown', () => {
+  it('releases pre-start producers and settles their rejection before returning', async () => {
+    let releaseStart!: () => void
+    const start = new Promise<void>((resolve) => { releaseStart = resolve })
+    let producerSettled = false
+    const producer = start.then(() => { throw new Error('expected producer stop') })
+      .finally(() => { producerSettled = true })
+    const order: string[] = []
+
+    await settleWorkerTeardown(
+      () => {
+        order.push('start')
+        releaseStart()
+      },
+      () => { order.push('sources') },
+      [producer],
+      [async () => { order.push('resource') }],
+    )
+
+    expect(order.slice(0, 2)).toEqual(['start', 'sources'])
+    expect(order).toContain('resource')
+    expect(producerSettled).toBe(true)
+  })
+
+  it('settles producers before propagating a resource close failure', async () => {
+    let producerSettled = false
+    const producer = Promise.reject(new Error('expected producer stop'))
+      .finally(() => { producerSettled = true })
+
+    await expect(settleWorkerTeardown(
+      () => {},
+      () => {},
+      [producer],
+      [async () => { throw new Error('resource close failed') }],
+    )).rejects.toThrow('resource close failed')
+    expect(producerSettled).toBe(true)
   })
 })
 

@@ -28,7 +28,10 @@ import {
 } from '../packages/client/connection/src/api-path.ts'
 import { decodeDownlinkMessage } from '../packages/client/connection/src/downlink-message.ts'
 import { WebSocketDownlinks } from '../packages/client/connection/src/websocket-downlink.ts'
-import type { WebSocketDownlinkBenchmarkReport } from './websocket-downlink-benchmark.ts'
+import {
+  settleWorkerTeardown,
+  type WebSocketDownlinkBenchmarkReport,
+} from './websocket-downlink-benchmark.ts'
 
 const require = createRequire(new URL('../packages/client/connection/package.json', import.meta.url))
 const WebSocket = require('ws') as typeof WebSocketType
@@ -533,10 +536,18 @@ async function run(compression: boolean): Promise<WebSocketDownlinkBenchmarkRepo
     for (const peer of peers) {
       if (peer.socket.readyState !== WebSocket.CLOSED) peer.socket.terminate()
     }
-    for (const item of allSources) item.queue.end()
-    await downlinks.close()
-    await Promise.all(peers.map(peer => peer.closed))
-    await closeServer(server)
+    await settleWorkerTeardown(
+      () => { start.resolve() },
+      () => {
+        for (const item of allSources) item.queue.end()
+      },
+      producers,
+      [
+        () => downlinks.close(),
+        async () => { await Promise.all(peers.map(peer => peer.closed)) },
+        () => closeServer(server),
+      ],
+    )
   }
 }
 
