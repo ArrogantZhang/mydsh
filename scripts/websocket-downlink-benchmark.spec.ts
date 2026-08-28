@@ -32,6 +32,25 @@ function report(
   }
 }
 
+interface ScheduledCallback {
+  callback: () => void
+  milliseconds: number
+  cancelled: boolean
+}
+
+function lifecycleController(
+  mode: 'on' | 'off',
+  terminate: (signal: NodeJS.Signals) => boolean,
+): { controller: ReturnType<typeof createWorkerProcessController>; scheduled: ScheduledCallback[] } {
+  const scheduled: ScheduledCallback[] = []
+  const controller = createWorkerProcessController(mode, terminate, (callback, milliseconds) => {
+    const item = { callback, milliseconds, cancelled: false }
+    scheduled.push(item)
+    return () => { item.cancelled = true }
+  })
+  return { controller, scheduled }
+}
+
 describe('WebSocket downlink benchmark report evaluation', () => {
   it('accepts reports that meet every benchmark threshold', () => {
     const plain = report(false)
@@ -209,10 +228,14 @@ describe('WebSocket downlink benchmark CLI orchestration', () => {
 
 describe('WebSocket downlink worker process control', () => {
   it.each(['stdout', 'stderr'] as const)('kills a worker whose %s exceeds the output cap', async (channel) => {
-    let kills = 0
-    const controller = createWorkerProcessController('off', () => { kills++ })
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('off', (signal) => {
+      signals.push(signal)
+      return true
+    })
     const outcome = controller.result.catch((error: unknown) => error)
 
+    controller.spawned()
     if (channel === 'stdout') controller.writeStdout(Buffer.alloc(64 * 1024 + 1))
     else controller.writeStderr(Buffer.alloc(64 * 1024 + 1))
     controller.close(null, 'SIGTERM')
@@ -220,37 +243,91 @@ describe('WebSocket downlink worker process control', () => {
     expect(await outcome).toMatchObject({
       message: `compression-off worker ${channel} bytes actual=>65536 threshold=<=65536`,
     })
-    expect(kills).toBe(1)
+    expect(signals).toEqual(['SIGTERM'])
+    expect(scheduled).toMatchObject([{ milliseconds: 1_000, cancelled: true }])
   })
 
   it('kills a timed-out worker without waiting for the real deadline', async () => {
-    let kills = 0
-    const controller = createWorkerProcessController('on', () => { kills++ })
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('on', (signal) => {
+      signals.push(signal)
+      return true
+    })
     const outcome = controller.result.catch((error: unknown) => error)
 
+    controller.spawned()
     controller.timeout()
     controller.close(null, 'SIGTERM')
 
     expect(await outcome).toMatchObject({
       message: 'compression-on worker wallMs actual=>120000 threshold=<=120000',
     })
-    expect(kills).toBe(1)
+    expect(signals).toEqual(['SIGTERM'])
+    expect(scheduled).toMatchObject([{ milliseconds: 1_000, cancelled: true }])
   })
 
   it('reports a child spawn error without copying its payload', async () => {
-    const controller = createWorkerProcessController('off', () => {})
+    const signals: NodeJS.Signals[] = []
+    const { controller } = lifecycleController('off', (signal) => {
+      signals.push(signal)
+      return true
+    })
     const outcome = controller.result.catch((error: unknown) => error)
     const error = Object.assign(new Error('forbidden-payload-text'), { code: 'ENOENT' })
 
-    controller.spawnError(error)
+    controller.processError(error)
 
     expect(await outcome).toMatchObject({ message: 'compression-off worker spawnError code=ENOENT' })
+    expect(signals).toEqual([])
+  })
+
+  it('bounds termination when signals are rejected and close never arrives', async () => {
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('on', (signal) => {
+      signals.push(signal)
+      return false
+    })
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    controller.spawned()
+    controller.timeout()
+    expect(scheduled.map(item => item.milliseconds)).toEqual([1_000])
+    scheduled[0]?.callback()
+    expect(scheduled.map(item => item.milliseconds)).toEqual([1_000, 1_000])
+    scheduled[1]?.callback()
+
+    expect(await outcome).toMatchObject({
+      message: 'compression-on worker wallMs actual=>120000 threshold=<=120000 '
+        + 'termination actual=unclosed terminateAccepted=false forceAccepted=false',
+    })
+    expect(signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(scheduled.every(item => item.cancelled)).toBe(true)
+  })
+
+  it('distinguishes a running process error and waits for close', async () => {
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('off', (signal) => {
+      signals.push(signal)
+      return true
+    })
+    const outcome = controller.result.catch((error: unknown) => error)
+
+    controller.spawned()
+    controller.processError(Object.assign(new Error('forbidden-payload-text'), { code: 'EIO' }))
+    controller.close(null, 'SIGTERM')
+
+    const failure = await outcome as Error
+    expect(failure.message).toBe('compression-off worker runtimeError code=EIO')
+    expect(failure.message).not.toContain('forbidden-payload-text')
+    expect(signals).toEqual(['SIGTERM'])
+    expect(scheduled).toMatchObject([{ milliseconds: 1_000, cancelled: true }])
   })
 
   it('reports a nonzero exit using stderr size without copying stderr', async () => {
-    const controller = createWorkerProcessController('on', () => {})
+    const { controller } = lifecycleController('on', () => true)
     const outcome = controller.result.catch((error: unknown) => error)
 
+    controller.spawned()
     controller.writeStderr(Buffer.from('forbidden-payload-text'))
     controller.close(2, null)
 
@@ -260,9 +337,10 @@ describe('WebSocket downlink worker process control', () => {
   })
 
   it('rejects unexpected stderr using only its byte count', async () => {
-    const controller = createWorkerProcessController('off', () => {})
+    const { controller } = lifecycleController('off', () => true)
     const outcome = controller.result.catch((error: unknown) => error)
 
+    controller.spawned()
     controller.writeStderr(Buffer.from('forbidden-payload-text'))
     controller.close(0, null)
 
@@ -273,12 +351,39 @@ describe('WebSocket downlink worker process control', () => {
 
   it('returns bounded stdout for the existing exact parser', async () => {
     const expected = report(false)
-    const controller = createWorkerProcessController('off', () => {})
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('off', (signal) => {
+      signals.push(signal)
+      return true
+    })
 
+    controller.spawned()
     controller.writeStdout(Buffer.from(`${JSON.stringify(expected)}\n`))
     controller.close(0, null)
 
     expect(parseWorkerReport(await controller.result, false)).toEqual(expected)
+    expect(signals).toEqual([])
+    expect(scheduled).toEqual([])
+  })
+
+  it('ignores duplicate events after normal close', async () => {
+    const signals: NodeJS.Signals[] = []
+    const { controller, scheduled } = lifecycleController('off', (signal) => {
+      signals.push(signal)
+      return true
+    })
+    const expected = report(false)
+
+    controller.spawned()
+    controller.writeStdout(Buffer.from(`${JSON.stringify(expected)}\n`))
+    controller.close(0, null)
+    controller.close(1, null)
+    controller.processError(Object.assign(new Error('forbidden-payload-text'), { code: 'EIO' }))
+    controller.timeout()
+
+    expect(parseWorkerReport(await controller.result, false)).toEqual(expected)
+    expect(signals).toEqual([])
+    expect(scheduled).toEqual([])
   })
 })
 

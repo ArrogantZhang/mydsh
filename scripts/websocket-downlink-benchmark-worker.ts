@@ -26,7 +26,6 @@ import {
   HOST_EVENTS_PATH,
   MUX_EVENTS_PATH,
 } from '../packages/client/connection/src/api-path.ts'
-import { decodeDownlinkMessage } from '../packages/client/connection/src/downlink-message.ts'
 import { WebSocketDownlinks } from '../packages/client/connection/src/websocket-downlink.ts'
 import {
   settleWorkerTeardown,
@@ -50,6 +49,11 @@ const BATCH_FLUSH_MS = 16
 const MAX_BUFFERED_BYTES = 1_048_576
 const SEND_TIMEOUT_MS = 5_000
 const WATCHDOG_MS = 120_000
+// The Host-owned worker loads the real Client codec at runtime without merging the two compiler faces.
+const DOWNLINK_DECODER_URL = new URL(
+  '../packages/client/connection/src/downlink-message.ts',
+  import.meta.url,
+).href
 
 const REASONING_DELTA_TEXT = [
   'I am checking the request against the active session state before selecting the next operation.',
@@ -95,6 +99,14 @@ const TOOL_ARGUMENTS_DELTA = JSON.stringify({
 
 type ChunkEvent = SessionEvent<'assistant/chunk'>
 type Source<F> = { label: string; queue: FrameQueue<RpcRequest<F>> }
+type PayloadParser<F> = { parse: (value: unknown) => F }
+type DecodeDownlinkMessage = <F>(
+  text: string,
+  payloadSchema: PayloadParser<F>,
+) => {
+  ok: boolean
+  requests: Array<{ full: ServerRequest; envelope: RpcRequest<F> }>
+}
 
 interface Deferred<T> {
   promise: Promise<T>
@@ -229,9 +241,18 @@ function rawDataBuffer(data: WebSocketType.RawData): Buffer {
   return data
 }
 
+async function loadDownlinkDecoder(): Promise<DecodeDownlinkMessage> {
+  const loaded = await import(DOWNLINK_DECODER_URL) as { decodeDownlinkMessage?: unknown }
+  if (typeof loaded.decodeDownlinkMessage !== 'function') {
+    throw new Error('browser downlink decoder export is unavailable')
+  }
+  return loaded.decodeDownlinkMessage as DecodeDownlinkMessage
+}
+
 function decodePeerMessage(
   data: WebSocketType.RawData,
   method: 'session/event' | 'host/remote-event',
+  decodeDownlinkMessage: DecodeDownlinkMessage,
 ): { requestCount: number; utf8Bytes: number } | undefined {
   const raw = rawDataBuffer(data)
   const decoded = method === 'session/event'
@@ -249,6 +270,7 @@ function openPeer(
   method: 'session/event' | 'host/remote-event',
   expectedCount: number,
   compression: boolean,
+  decodeDownlinkMessage: DecodeDownlinkMessage,
   active: () => boolean,
   failRun: (error: Error) => void,
 ): PeerState {
@@ -283,7 +305,7 @@ function openPeer(
   })
   socket.once('open', () => { opened.resolve() })
   socket.on('message', (data, isBinary) => {
-    const decoded = isBinary ? undefined : decodePeerMessage(data, method)
+    const decoded = isBinary ? undefined : decodePeerMessage(data, method, decodeDownlinkMessage)
     if (decoded === undefined) {
       failRun(new Error(`${label} received an unexpected WebSocket frame`))
       return
@@ -366,6 +388,7 @@ async function closeServer(server: Server): Promise<void> {
 }
 
 async function run(compression: boolean): Promise<WebSocketDownlinkBenchmarkReport> {
+  const decodeDownlinkMessage = await loadDownlinkDecoder()
   const muxSources = Array.from({ length: BROWSERS }, (_, index): Source<MuxFrame> => ({
     label: `mux-${String(index)}`,
     queue: new FrameQueue<RpcRequest<MuxFrame>>(QUEUE_CAPACITY),
@@ -453,6 +476,7 @@ async function run(compression: boolean): Promise<WebSocketDownlinkBenchmarkRepo
         'session/event',
         MUX_FRAMES_PER_BROWSER,
         compression,
+        decodeDownlinkMessage,
         () => active,
         failRun,
       ))
@@ -462,6 +486,7 @@ async function run(compression: boolean): Promise<WebSocketDownlinkBenchmarkRepo
         'host/remote-event',
         HOST_FRAMES_PER_BROWSER,
         compression,
+        decodeDownlinkMessage,
         () => active,
         failRun,
       ))

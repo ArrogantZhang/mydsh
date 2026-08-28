@@ -19,6 +19,8 @@ const MAX_COMPRESSION_RSS_OVERHEAD_BYTES = 64 * 1024 * 1024
 const MAX_WORKER_OUTPUT_BYTES = 64 * 1024
 const MAX_FAILURE_DETAIL_BYTES = 4 * 1024
 const WORKER_TIMEOUT_MS = 120_000
+const TERMINATION_GRACE_MS = 1_000
+const FORCE_CLOSE_GRACE_MS = 1_000
 
 const REPORT_FIELDS = [
   'browsers',
@@ -69,6 +71,7 @@ export interface WebSocketDownlinkBenchmarkSummary {
 
 type WorkerRunner = (compression: boolean) => Promise<WebSocketDownlinkBenchmarkReport>
 type WorkerMode = 'on' | 'off'
+type Schedule = (callback: () => void, milliseconds: number) => () => void
 
 class WorkerRunError extends Error {}
 
@@ -183,35 +186,88 @@ function workerFailureDetail(error: unknown): string {
   return Buffer.from(detail, 'utf8').subarray(0, MAX_FAILURE_DETAIL_BYTES).toString('utf8')
 }
 
+function scheduleTimeout(callback: () => void, milliseconds: number): () => void {
+  const timer = setTimeout(callback, milliseconds)
+  return () => { clearTimeout(timer) }
+}
+
 /**
  * Settle one worker process from bounded output, timeout, spawn, and close events.
  * @param mode - Compression argument assigned to the worker.
- * @param kill - Terminates the child after an output or time limit is exceeded.
+ * @param terminate - Sends the requested termination signal to the child.
+ * @param schedule - Schedules bounded graceful and forced close deadlines.
  * @returns Event handlers and the successful bounded stdout promise.
  */
-export function createWorkerProcessController(mode: WorkerMode, kill: () => void) {
+export function createWorkerProcessController(
+  mode: WorkerMode,
+  terminate: (signal: NodeJS.Signals) => boolean,
+  schedule: Schedule = scheduleTimeout,
+) {
   let stdout = ''
   let stdoutBytes = 0
   let stderrBytes = 0
-  let outputFailure: WorkerRunError | undefined
-  let settled = false
+  let phase: 'starting' | 'running' | 'terminating' | 'settled' = 'starting'
+  let terminationFailure: WorkerRunError | undefined
+  let terminateAccepted: boolean | undefined
+  let forceAccepted: boolean | undefined
+  let cancelTerminationDeadline: (() => void) | undefined
+  let cancelForceDeadline: (() => void) | undefined
   let resolveResult!: (stdout: string) => void
   let rejectResult!: (error: Error) => void
   const result = new Promise<string>((resolve, reject) => {
     resolveResult = resolve
     rejectResult = reject
   })
+  const cancelDeadlines = (): void => {
+    cancelTerminationDeadline?.()
+    cancelForceDeadline?.()
+  }
+  const reject = (error: WorkerRunError): void => {
+    if (phase === 'settled') return
+    phase = 'settled'
+    cancelDeadlines()
+    rejectResult(error)
+  }
+  const resolve = (): void => {
+    if (phase === 'settled') return
+    phase = 'settled'
+    cancelDeadlines()
+    resolveResult(stdout)
+  }
+  const sendSignal = (signal: NodeJS.Signals): boolean => {
+    try {
+      return terminate(signal)
+    } catch {
+      return false
+    }
+  }
+  const beginTermination = (failure: WorkerRunError): void => {
+    if (phase === 'terminating' || phase === 'settled') return
+    phase = 'terminating'
+    terminationFailure = failure
+    terminateAccepted = sendSignal('SIGTERM')
+    cancelTerminationDeadline = schedule(() => {
+      if (phase !== 'terminating') return
+      forceAccepted = sendSignal('SIGKILL')
+      cancelForceDeadline = schedule(() => {
+        if (phase !== 'terminating') return
+        reject(new WorkerRunError(
+          `${failure.message} termination actual=unclosed `
+          + `terminateAccepted=${String(terminateAccepted)} forceAccepted=${String(forceAccepted)}`,
+        ))
+      }, FORCE_CLOSE_GRACE_MS)
+    }, TERMINATION_GRACE_MS)
+  }
   const write = (chunk: Buffer, channel: 'stdout' | 'stderr'): void => {
-    if (settled || outputFailure !== undefined) return
+    if (phase === 'settled' || phase === 'terminating') return
     if (channel === 'stdout') stdoutBytes += chunk.byteLength
     else stderrBytes += chunk.byteLength
     const bytes = channel === 'stdout' ? stdoutBytes : stderrBytes
     if (bytes > MAX_WORKER_OUTPUT_BYTES) {
-      outputFailure = new WorkerRunError(
+      beginTermination(new WorkerRunError(
         `compression-${mode} worker ${channel} bytes actual=>${String(MAX_WORKER_OUTPUT_BYTES)} `
         + `threshold=<=${String(MAX_WORKER_OUTPUT_BYTES)}`,
-      )
-      kill()
+      ))
       return
     }
     if (channel === 'stdout') stdout += chunk.toString('utf8')
@@ -221,41 +277,47 @@ export function createWorkerProcessController(mode: WorkerMode, kill: () => void
     writeStdout: (chunk: Buffer): void => { write(chunk, 'stdout') },
     writeStderr: (chunk: Buffer): void => { write(chunk, 'stderr') },
     timeout: (): void => {
-      if (settled || outputFailure !== undefined) return
-      outputFailure = new WorkerRunError(
+      beginTermination(new WorkerRunError(
         `compression-${mode} worker wallMs actual=>${String(WORKER_TIMEOUT_MS)} `
         + `threshold=<=${String(WORKER_TIMEOUT_MS)}`,
-      )
-      kill()
-    },
-    spawnError: (error: Error & { code?: string }): void => {
-      if (settled) return
-      settled = true
-      rejectResult(new WorkerRunError(
-        `compression-${mode} worker spawnError code=${error.code ?? 'unknown'}`,
       ))
     },
+    spawned: (): void => {
+      if (phase === 'starting') phase = 'running'
+    },
+    processError: (error: Error & { code?: string }): void => {
+      if (phase === 'starting') {
+        reject(new WorkerRunError(
+          `compression-${mode} worker spawnError code=${error.code ?? 'unknown'}`,
+        ))
+        return
+      }
+      if (phase === 'running') {
+        beginTermination(new WorkerRunError(
+          `compression-${mode} worker runtimeError code=${error.code ?? 'unknown'}`,
+        ))
+      }
+    },
     close: (code: number | null, signal: NodeJS.Signals | null): void => {
-      if (settled) return
-      settled = true
-      if (outputFailure !== undefined) {
-        rejectResult(outputFailure)
+      if (phase === 'settled') return
+      if (terminationFailure !== undefined) {
+        reject(terminationFailure)
         return
       }
       if (code !== 0) {
-        rejectResult(new WorkerRunError(
+        reject(new WorkerRunError(
           `compression-${mode} worker exitCode actual=${String(code)} expected=0 `
           + `signal=${String(signal)} stderrBytes=${String(stderrBytes)}`,
         ))
         return
       }
       if (stderrBytes !== 0) {
-        rejectResult(new WorkerRunError(
+        reject(new WorkerRunError(
           `compression-${mode} worker stderrBytes actual=${String(stderrBytes)} expected=0`,
         ))
         return
       }
-      resolveResult(stdout)
+      resolve()
     },
   }
 }
@@ -397,10 +459,11 @@ async function runWorker(compression: boolean): Promise<WebSocketDownlinkBenchma
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
-  const controller = createWorkerProcessController(mode, () => { child.kill() })
+  const controller = createWorkerProcessController(mode, signal => child.kill(signal))
   child.stdout.on('data', controller.writeStdout)
   child.stderr.on('data', controller.writeStderr)
-  child.once('error', controller.spawnError)
+  child.once('spawn', controller.spawned)
+  child.once('error', controller.processError)
   child.once('close', controller.close)
   const timeout = setTimeout(controller.timeout, WORKER_TIMEOUT_MS)
   const stdout = await controller.result.finally(() => { clearTimeout(timeout) })
