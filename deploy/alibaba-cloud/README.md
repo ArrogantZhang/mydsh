@@ -110,6 +110,12 @@ printf "Authenticated smoke passed.\n"
 '
 ```
 
+## WebSocket downlink limits
+
+The production overlay flushes each WebSocket downlink batch at 64 frames, 256 KiB of serialized data, or 16 ms after its first retained frame, whichever occurs first. Compression applies from zero bytes with process-wide concurrency 4; changing that concurrency requires restarting the DSH process.
+
+Each socket has a 1 MiB buffered-byte fuse and a 5-second send timeout. Crossing either limit closes the connection; the browser enters `reconnecting` and rebuilds durable session state after reconnecting. Repeated disconnects require checking the network, proxy, and slow clients. Do not replace the fuse with an unbounded buffer.
+
 ## Configure Kimi
 
 In the Web UI, open **Settings → Models**, add a custom OpenAI-compatible provider, and enter the API base URL, model identifier, and API key issued by Kimi. Follow the current [Kimi API documentation](https://platform.moonshot.cn/docs/guide/start-using-kimi-api) for account-specific values, save the provider, select its model, and send one test conversation.

@@ -256,6 +256,12 @@ main() {
         sleep 5
       done
       pnpm exec vitest run packages/host/invite-auth/tests
+      pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts
+      pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts
+      pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts
+      pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts
+      pnpm run benchmark:websocket-downlinks
+      pnpm run benchmark:websocket-downlinks
       pnpm run build
       node apps/cli/lib/bin.js web --patch deploy/alibaba-cloud/invite-auth.cordis.yml --dump-config >/dev/null
       test -f apps/cli/lib/bin.js

@@ -16,3 +16,19 @@
     printUrl: true
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
+- id: api-gateway
+  config:
+    maxEventStreamQueueFrames: 4096
+- id: connection
+  inject: [webRuntime]
+  config:
+    trustedHosts: !!js ctx.webRuntime.trustedHosts
+    downlinkBatching: true
+    downlinkBatchMaxFrames: 64
+    downlinkBatchMaxBytes: 262144
+    downlinkBatchFlushMs: 16
+    downlinkCompression: true
+    downlinkCompressionThresholdBytes: 0
+    downlinkCompressionConcurrency: 4
+    downlinkMaxBufferedBytes: 1048576
+    downlinkSendTimeoutMs: 5000

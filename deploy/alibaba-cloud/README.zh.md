@@ -110,6 +110,12 @@ printf "Authenticated smoke passed.\n"
 '
 ```
 
+## WebSocket 下行限制
+
+生产 overlay 会在每个 WebSocket 下行 batch 达到 64 帧、256 KiB 序列化数据，或保留第一帧满 16 ms 时进行 flush，以最先达到的条件为准。压缩从 0 字节起生效，进程级并发为 4；更改该并发值需要重启 DSH 进程。
+
+每个 socket 的缓冲字节熔断上限为 1 MiB，发送超时为 5 秒。超过任一限制都会关闭连接；浏览器进入 `reconnecting`，并在重连后重建持久会话状态。反复断开连接时应检查网络、代理和慢客户端。不要用无界缓冲区取代该熔断上限。
+
 ## 配置 Kimi
 
 在 Web UI 中打开 **Settings → Models**，添加自定义 OpenAI-compatible 提供方，然后输入 Kimi 签发的 API base URL、模型标识符和 API key。按照最新的 [Kimi API 文档](https://platform.moonshot.cn/docs/guide/start-using-kimi-api)填写账户对应的值，保存提供方，选择其模型，并发送一条测试对话。

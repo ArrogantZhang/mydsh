@@ -12,6 +12,12 @@ function asset(name: string): string {
   return readFileSync(resolve(deploymentRoot, name), 'utf8')
 }
 
+function topLevelCordisEntry(config: string, id: string): string {
+  return config
+    .split(/(?=^- id: )/m)
+    .find(entry => entry.startsWith(`- id: ${id}\n`)) ?? ''
+}
+
 function runBash(body: string, assetName = 'deploy-release.sh'): ReturnType<typeof spawnSync> {
   if (!linuxFilesystemTestsEnabled) throw new Error('real Bash filesystem tests run only on Linux CI')
   const deploymentScript = resolve(deploymentRoot, assetName)
@@ -80,6 +86,25 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(dropIn).toContain('EnvironmentFile=/etc/mydsh/public.env')
     expect(dropIn).not.toContain('mydsh.env')
     expect(dropIn).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET/)
+  })
+
+  it('enables bounded batched compressed downlinks in the production overlay', () => {
+    const overlay = asset('invite-auth.cordis.yml')
+    const apiGateway = topLevelCordisEntry(overlay, 'api-gateway')
+    const connection = topLevelCordisEntry(overlay, 'connection')
+
+    expect(apiGateway).toContain('config:\n    maxEventStreamQueueFrames: 4096')
+    expect(connection).toContain('inject: [webRuntime]')
+    expect(connection).toContain('trustedHosts: !!js ctx.webRuntime.trustedHosts')
+    expect(connection).toContain('downlinkBatching: true')
+    expect(connection).toContain('downlinkBatchMaxFrames: 64')
+    expect(connection).toContain('downlinkBatchMaxBytes: 262144')
+    expect(connection).toContain('downlinkBatchFlushMs: 16')
+    expect(connection).toContain('downlinkCompression: true')
+    expect(connection).toContain('downlinkCompressionThresholdBytes: 0')
+    expect(connection).toContain('downlinkCompressionConcurrency: 4')
+    expect(connection).toContain('downlinkMaxBufferedBytes: 1048576')
+    expect(connection).toContain('downlinkSendTimeoutMs: 5000')
   })
 
   it('uses one root-owned runtime lock for bootstrap and release operations', () => {
@@ -323,8 +348,33 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(script).toContain('pnpm-11.7.0.tgz')
     expect(script).toContain('sha512-GcyFLBIMcSV2DyRD7mvgyltA+fUFmN4aCaHxd1A+AQ5Xwjx3ZG4B52HeWb+HT7IqM5jDOrlpH8E+uUa28PTWIA==')
     expect(script).toContain('--frozen-lockfile')
-    expect(script).toContain('vitest run packages/host/invite-auth/tests')
-    expect(script).toContain('run build')
+    const containerBodyStart = script.indexOf('"$NODE_IMAGE" bash -euo pipefail -c \'')
+    const containerBodyEnd = script.indexOf('\n     \'\n', containerBodyStart)
+    expect(containerBodyStart).toBeGreaterThanOrEqual(0)
+    expect(containerBodyEnd).toBeGreaterThan(containerBodyStart)
+    const containerCommands = script.slice(containerBodyStart, containerBodyEnd)
+      .split(/\r?\n/)
+      .map(line => line.trim())
+    const releaseCommands = [
+      'pnpm exec vitest run packages/host/invite-auth/tests',
+      'pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts',
+      'pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts',
+      'pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts',
+      'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts',
+      'pnpm run benchmark:websocket-downlinks',
+      'pnpm run benchmark:websocket-downlinks',
+      'pnpm run build',
+    ]
+    for (const command of new Set(releaseCommands)) {
+      const expectedCount = command === 'pnpm run benchmark:websocket-downlinks' ? 2 : 1
+      expect(containerCommands.filter(line => line === command)).toHaveLength(expectedCount)
+    }
+    let commandIndex = -1
+    for (const command of releaseCommands) {
+      const nextIndex = containerCommands.indexOf(command, commandIndex + 1)
+      expect(nextIndex).toBeGreaterThan(commandIndex)
+      commandIndex = nextIndex
+    }
     expect(script).toContain('--dump-config')
     expect(script).toContain('format=1')
     expect(script).toContain('helper_journal_format=1')
