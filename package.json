@@ -17,6 +17,7 @@
     "website"
   ],
   "scripts": {
+    "benchmark:websocket-downlinks": "tsx scripts/websocket-downlink-benchmark.ts",
     "build": "tsx scripts/build.ts",
     "build:official": "tsx scripts/build.ts --profile official",
     "build:lib": "npm run build:lib:host && npm run build:lib:client",
