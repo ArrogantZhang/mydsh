@@ -1,21 +1,49 @@
 /** Contract tests for the single-host Alibaba Cloud deployment assets. */
 
 import { spawnSync } from 'node:child_process'
-import { readFileSync } from 'node:fs'
-import { resolve } from 'node:path'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import { describe, expect, it } from 'vitest'
 
+const repositoryRoot = resolve(import.meta.dirname, '..')
 const deploymentRoot = resolve(import.meta.dirname, '../deploy/alibaba-cloud')
+const baseBundleConfig = resolve(repositoryRoot, 'packages/bundle/base/cordis.patch.yml')
+const webBundleConfig = resolve(repositoryRoot, 'packages/bundle/web-app/cordis.patch.yml')
 const linuxFilesystemTestsEnabled = process.platform === 'linux'
 
 function asset(name: string): string {
   return readFileSync(resolve(deploymentRoot, name), 'utf8')
 }
 
-function topLevelCordisEntry(config: string, id: string): string {
-  return config
-    .split(/(?=^- id: )/m)
-    .find(entry => entry.startsWith(`- id: ${id}\n`)) ?? ''
+function expectProductionDownlinkPolicy(overlayPath: string): void {
+  const entries = composeEntries([
+    loadOverlayPatches('Alibaba Cloud deployment spec', baseBundleConfig),
+    loadOverlayPatches('Alibaba Cloud deployment spec', webBundleConfig),
+    loadOverlayPatches('Alibaba Cloud deployment spec', overlayPath),
+  ])
+  const apiGateways = entries.filter(entry => entry.id === 'api-gateway')
+  const connections = entries.filter(entry => entry.id === 'connection')
+
+  expect(apiGateways).toHaveLength(1)
+  expect(connections).toHaveLength(1)
+  expect(apiGateways[0]?.name).toBe('@deepseek-ai/dsh-host-apiproxy')
+  expect(apiGateways[0]?.config).toEqual({ maxEventStreamQueueFrames: 4096 })
+  expect(connections[0]?.name).toBe('@deepseek-ai/dsh-client-connection')
+  expect(connections[0]?.inject).toEqual(['webRuntime'])
+  expect(connections[0]?.config).toEqual({
+    trustedHosts: { __jsExpr: 'ctx.webRuntime.trustedHosts' },
+    downlinkBatching: true,
+    downlinkBatchMaxFrames: 64,
+    downlinkBatchMaxBytes: 262144,
+    downlinkBatchFlushMs: 16,
+    downlinkCompression: true,
+    downlinkCompressionThresholdBytes: 0,
+    downlinkCompressionConcurrency: 4,
+    downlinkMaxBufferedBytes: 1048576,
+    downlinkSendTimeoutMs: 5000,
+  })
 }
 
 function runBash(body: string, assetName = 'deploy-release.sh'): ReturnType<typeof spawnSync> {
@@ -89,22 +117,52 @@ describe('Alibaba Cloud deployment assets', () => {
   })
 
   it('enables bounded batched compressed downlinks in the production overlay', () => {
-    const overlay = asset('invite-auth.cordis.yml')
-    const apiGateway = topLevelCordisEntry(overlay, 'api-gateway')
-    const connection = topLevelCordisEntry(overlay, 'connection')
+    expectProductionDownlinkPolicy(resolve(deploymentRoot, 'invite-auth.cordis.yml'))
+  })
 
-    expect(apiGateway).toContain('config:\n    maxEventStreamQueueFrames: 4096')
-    expect(connection).toContain('inject: [webRuntime]')
-    expect(connection).toContain('trustedHosts: !!js ctx.webRuntime.trustedHosts')
-    expect(connection).toContain('downlinkBatching: true')
-    expect(connection).toContain('downlinkBatchMaxFrames: 64')
-    expect(connection).toContain('downlinkBatchMaxBytes: 262144')
-    expect(connection).toContain('downlinkBatchFlushMs: 16')
-    expect(connection).toContain('downlinkCompression: true')
-    expect(connection).toContain('downlinkCompressionThresholdBytes: 0')
-    expect(connection).toContain('downlinkCompressionConcurrency: 4')
-    expect(connection).toContain('downlinkMaxBufferedBytes: 1048576')
-    expect(connection).toContain('downlinkSendTimeoutMs: 5000')
+  it('rejects commented values followed by duplicate policy patches', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'dsh-alibaba-policy-'))
+    const overlay = join(dir, 'mutated.cordis.yml')
+    try {
+      writeFileSync(overlay, [
+        '- id: api-gateway',
+        '  config:',
+        '    maxEventStreamQueueFrames: 4096',
+        '- id: connection',
+        '  inject: [webRuntime]',
+        '  config:',
+        '    trustedHosts: !!js ctx.webRuntime.trustedHosts',
+        '    # downlinkBatching: true',
+        '    # downlinkBatchMaxFrames: 64',
+        '    # downlinkBatchMaxBytes: 262144',
+        '    # downlinkBatchFlushMs: 16',
+        '    # downlinkCompression: true',
+        '    # downlinkCompressionThresholdBytes: 0',
+        '    # downlinkCompressionConcurrency: 4',
+        '    # downlinkMaxBufferedBytes: 1048576',
+        '    # downlinkSendTimeoutMs: 5000',
+        '- id: api-gateway',
+        '  config:',
+        '    maxEventStreamQueueFrames: 1024',
+        '- id: connection',
+        '  inject: []',
+        '  config:',
+        '    trustedHosts: []',
+        '    downlinkBatching: false',
+        '    downlinkBatchMaxFrames: 32',
+        '    downlinkBatchMaxBytes: 131072',
+        '    downlinkBatchFlushMs: 8',
+        '    downlinkCompression: false',
+        '    downlinkCompressionThresholdBytes: 1024',
+        '    downlinkCompressionConcurrency: 2',
+        '    downlinkMaxBufferedBytes: 524288',
+        '    downlinkSendTimeoutMs: 2500',
+        '',
+      ].join('\n'))
+      expect(() => { expectProductionDownlinkPolicy(overlay) }).toThrow()
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('uses one root-owned runtime lock for bootstrap and release operations', () => {
@@ -1523,6 +1581,7 @@ wait "$holder"
       expect(readme).toContain('git archive "$DEPLOY_REF"')
       expect(readme).toContain('PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh')
       expect(readme).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
+      expect(readme).toMatch(/focused tests and two benchmark passes before building|在构建前运行焦点测试和两次 benchmark/)
       expect(readme).toContain('/var/lib/mydsh-deploy/uploads')
       expect(readme).toMatch(/1 GiB.*500,000.*512 MiB.*8 GiB|1 GiB.*500,000.*512 MiB.*8 GiB/)
       expect(readme).toMatch(/byte-for-byte identical|逐字节相同/)
