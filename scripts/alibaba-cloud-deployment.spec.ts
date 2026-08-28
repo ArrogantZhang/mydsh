@@ -413,16 +413,30 @@ describe('Alibaba Cloud deployment assets', () => {
     const containerCommands = script.slice(containerBodyStart, containerBodyEnd)
       .split(/\r?\n/)
       .map(line => line.trim())
+    const deploymentPolicyTestNames = [
+      'enables bounded batched compressed downlinks in the production overlay',
+      'rejects commented values followed by duplicate policy patches',
+      'packages an exact reviewed ref in a bounded Node 24 container',
+    ]
+    const deploymentPolicyTestCommand = 'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"'
+    const deploymentPolicyTestPattern = deploymentPolicyTestCommand.match(/ -t "([^"]+)"$/)?.[1]
+    expect(deploymentPolicyTestPattern).toBeDefined()
+    const deploymentPolicyTestFilter = new RegExp(deploymentPolicyTestPattern ?? '')
+    for (const name of deploymentPolicyTestNames) {
+      expect(deploymentPolicyTestFilter.test(`Alibaba Cloud deployment assets > ${name}`)).toBe(true)
+    }
+    expect(deploymentPolicyTestFilter.test('Alibaba Cloud deployment assets > verifies synthetic systemd roots on the executable release filesystem')).toBe(false)
     const releaseCommands = [
       'pnpm exec vitest run packages/host/invite-auth/tests',
       'pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts',
       'pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts',
       'pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts',
-      'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts',
+      deploymentPolicyTestCommand,
       'pnpm run benchmark:websocket-downlinks',
       'pnpm run benchmark:websocket-downlinks',
       'pnpm run build',
     ]
+    expect(containerCommands).not.toContain('pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts')
     for (const command of new Set(releaseCommands)) {
       const expectedCount = command === 'pnpm run benchmark:websocket-downlinks' ? 2 : 1
       expect(containerCommands.filter(line => line === command)).toHaveLength(expectedCount)

@@ -60,7 +60,7 @@ The release packager runs the focused ApiProxy, connection, and deployment tests
 
 ## Verification
 
-Focused tests pin per-stream queue overflow and isolation; lossless count, byte, deadline, and source-end batching; the single-pending-read invariant; the 256-request wire maximum; atomic browser validation and code-1002 reconnect; byte, send-failure, and timeout source abort; peer isolation; immediate accessible submission feedback; exactly-once transcript rebuild; and deployment-gate ordering before build.
+Focused tests pin per-stream queue overflow and isolation; lossless count, byte, deadline, and source-end batching; the single-pending-read invariant; the 256-request wire maximum; atomic browser validation and code-1002 reconnect; byte, send-failure, and timeout source abort; peer isolation; immediate accessible submission feedback; exactly-once transcript rebuild; and deployment-gate ordering before build. The artifact builder's deployment filter selects exactly the deployment-policy tests, while root- and systemd-dependent deployment-helper integration remains in Linux CI.
 
 The fixed benchmark uses five browsers and ten real WebSocket downlinks. Every source produces 24 frames every 16 milliseconds, each mux source delivers 24,000 session frames, each host source delivers 256 host frames, and the plain and compressed modes carry identical serialized application bytes without reporting payload content.
 

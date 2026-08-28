@@ -16,7 +16,7 @@ The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed nam
 
 ## Prepare and upload a release
 
-Run these commands from the repository root on your development machine. The selected ref supplies the packager itself, and the packager reads only Git objects from that ref. It pins `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`, bounds the container to 4 CPUs, 8 GiB of memory, 1,024 processes, and 45 minutes, installs dependencies with fresh state, runs the focused tests and two benchmark passes before building, and then validates the resolved config. Container network and disk use are not bounded. Docker is mandatory; there is no host-build fallback.
+Run these commands from the repository root on your development machine. The selected ref supplies the packager itself, and the packager reads only Git objects from that ref. It pins `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`, bounds the container to 4 CPUs, 8 GiB of memory, 1,024 processes, and 45 minutes, installs dependencies with fresh state, runs the focused tests and two benchmark passes before building, and then validates the resolved config. Within those focused tests, the artifact builder runs the exact deployment-policy selection; root- and systemd-dependent deployment-helper integration remains in Linux CI rather than the artifact builder. Container network and disk use are not bounded. Docker is mandatory; there is no host-build fallback.
 
 ```bash
 set -euo pipefail

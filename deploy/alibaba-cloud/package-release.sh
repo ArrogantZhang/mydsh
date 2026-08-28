@@ -259,7 +259,7 @@ main() {
       pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts
       pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts
       pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts
-      pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts
+      pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"
       pnpm run benchmark:websocket-downlinks
       pnpm run benchmark:websocket-downlinks
       pnpm run build
