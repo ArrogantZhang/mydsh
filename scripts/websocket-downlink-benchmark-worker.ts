@@ -28,6 +28,7 @@ import {
 } from '../packages/client/connection/src/api-path.ts'
 import { WebSocketDownlinks } from '../packages/client/connection/src/websocket-downlink.ts'
 import {
+  observeOwnedPromise,
   settleWorkerTeardown,
   type WebSocketDownlinkBenchmarkReport,
 } from './websocket-downlink-benchmark.ts'
@@ -131,10 +132,10 @@ interface PeerState {
 function deferred<T>(): Deferred<T> {
   let resolvePromise!: (value: T) => void
   let rejectPromise!: (error: Error) => void
-  const promise = new Promise<T>((resolve, reject) => {
+  const promise = observeOwnedPromise(new Promise<T>((resolve, reject) => {
     resolvePromise = resolve
     rejectPromise = reject
-  })
+  }))
   return { promise, resolve: resolvePromise, reject: rejectPromise }
 }
 
@@ -442,20 +443,20 @@ async function run(compression: boolean): Promise<WebSocketDownlinkBenchmarkRepo
   let peakQueueFrames = 0
   const observeQueue = (size: number): void => { peakQueueFrames = Math.max(peakQueueFrames, size) }
   const producers = [
-    ...muxSources.map((item, browser) => produce(
+    ...muxSources.map((item, browser) => observeOwnedPromise(produce(
       item,
       MUX_FRAMES_PER_BROWSER,
       index => muxFrame(browser, index),
       start.promise,
       observeQueue,
-    )),
-    ...hostSources.map((item, browser) => produce(
+    ))),
+    ...hostSources.map((item, browser) => observeOwnedPromise(produce(
       item,
       HOST_FRAMES_PER_BROWSER,
       index => hostFrame(browser, index),
       start.promise,
       observeQueue,
-    )),
+    ))),
   ]
   let rssTimer: NodeJS.Timeout | undefined
   let watchdog: NodeJS.Timeout | undefined

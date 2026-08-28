@@ -1,5 +1,9 @@
+import { spawn as spawnChild, spawnSync } from 'node:child_process'
+import { EventEmitter, once } from 'node:events'
+import { PassThrough } from 'node:stream'
 import { describe, expect, it } from 'vitest'
 import {
+  captureWorkerProcess,
   createWorkerProcessController,
   evaluateBenchmarkReports,
   parseWorkerReport,
@@ -36,6 +40,31 @@ interface ScheduledCallback {
   callback: () => void
   milliseconds: number
   cancelled: boolean
+}
+
+class FakeChildProcess extends EventEmitter {
+  readonly stdout = new PassThrough()
+  readonly stderr = new PassThrough()
+  readonly signals: NodeJS.Signals[] = []
+  unrefs = 0
+  acceptSignals = true
+
+  kill(signal: NodeJS.Signals): boolean {
+    this.signals.push(signal)
+    return this.acceptSignals
+  }
+
+  unref(): void {
+    this.unrefs++
+  }
+}
+
+function manualSchedule(target: ScheduledCallback[]) {
+  return (callback: () => void, milliseconds: number): (() => void) => {
+    const item = { callback, milliseconds, cancelled: false }
+    target.push(item)
+    return () => { item.cancelled = true }
+  }
 }
 
 function lifecycleController(
@@ -387,6 +416,88 @@ describe('WebSocket downlink worker process control', () => {
   })
 })
 
+describe('WebSocket downlink child lifecycle', () => {
+  it('cleans streams, listeners, timers, and handles after double-false termination without close', async () => {
+    const child = new FakeChildProcess()
+    child.acceptSignals = false
+    const termination: ScheduledCallback[] = []
+    const watchdog: ScheduledCallback[] = []
+    const outcome = captureWorkerProcess('on', child, {
+      scheduleTermination: manualSchedule(termination),
+      scheduleWatchdog: manualSchedule(watchdog),
+    }).catch((error: unknown) => error)
+
+    child.emit('spawn')
+    watchdog[0]?.callback()
+    termination[0]?.callback()
+    termination[1]?.callback()
+
+    const failure = await outcome as Error
+    expect(failure.message).toContain(
+      'termination actual=unclosed terminateAccepted=false forceAccepted=false',
+    )
+    expect(child.signals).toEqual(['SIGTERM', 'SIGKILL'])
+    expect(child.stdout.destroyed).toBe(true)
+    expect(child.stderr.destroyed).toBe(true)
+    expect(child.eventNames()).toEqual([])
+    expect(child.unrefs).toBe(1)
+    expect([...termination, ...watchdog].every(item => item.cancelled)).toBe(true)
+  })
+
+  it('observes repeated running-process errors until close and then cleans listeners', async () => {
+    const child = new FakeChildProcess()
+    const termination: ScheduledCallback[] = []
+    const watchdog: ScheduledCallback[] = []
+    const outcome = captureWorkerProcess('off', child, {
+      scheduleTermination: manualSchedule(termination),
+      scheduleWatchdog: manualSchedule(watchdog),
+    }).catch((error: unknown) => error)
+
+    child.emit('spawn')
+    child.emit('error', Object.assign(new Error('forbidden-one'), { code: 'EIO' }))
+    expect(() => {
+      child.emit('error', Object.assign(new Error('forbidden-two'), { code: 'EAGAIN' }))
+    }).not.toThrow()
+    child.emit('close', null, 'SIGTERM')
+
+    const failure = await outcome as Error
+    expect(failure.message).toBe('compression-off worker runtimeError code=EIO')
+    expect(failure.message).not.toContain('forbidden')
+    expect(child.eventNames()).toEqual([])
+    expect(child.unrefs).toBe(1)
+    expect([...termination, ...watchdog].every(item => item.cancelled)).toBe(true)
+  })
+
+  it('force-kills a real long-lived child after the graceful signal is ignored', async () => {
+    const child = spawnChild(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+      windowsHide: true,
+    })
+    const pid = child.pid
+    const termination: ScheduledCallback[] = []
+    const watchdog: ScheduledCallback[] = []
+    const outcome = captureWorkerProcess('on', child, {
+      terminate: signal => signal === 'SIGTERM' ? true : child.kill(signal),
+      scheduleTermination: manualSchedule(termination),
+      scheduleWatchdog: manualSchedule(watchdog),
+    }).catch((error: unknown) => error)
+
+    try {
+      await once(child, 'spawn')
+      watchdog[0]?.callback()
+      termination[0]?.callback()
+
+      expect(await outcome).toMatchObject({
+        message: 'compression-on worker wallMs actual=>120000 threshold=<=120000',
+      })
+      expect(pid).toBeTypeOf('number')
+      expect(() => { process.kill(pid as number, 0) }).toThrow()
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+  })
+})
+
 describe('WebSocket downlink worker teardown', () => {
   it('releases pre-start producers and settles their rejection before returning', async () => {
     let releaseStart!: () => void
@@ -423,6 +534,32 @@ describe('WebSocket downlink worker teardown', () => {
       [async () => { throw new Error('resource close failed') }],
     )).rejects.toThrow('resource close failed')
     expect(producerSettled).toBe(true)
+  })
+
+  it('observes listen and open failures from creation under strict rejection handling', () => {
+    const benchmarkUrl = new URL('./websocket-downlink-benchmark.ts', import.meta.url).href
+    const script = `
+      import { observeOwnedPromise } from ${JSON.stringify(benchmarkUrl)}
+      const listenFailure = observeOwnedPromise(Promise.reject(new Error('listen failed')))
+      const openFailure = observeOwnedPromise(Promise.reject(new Error('open failed')))
+      await new Promise(resolve => setImmediate(resolve))
+      const results = await Promise.allSettled([listenFailure, openFailure])
+      if (results.some(result => result.status !== 'rejected')) process.exitCode = 2
+    `
+
+    const result = spawnSync(process.execPath, [
+      '--unhandled-rejections=strict',
+      '--import', import.meta.resolve('tsx/esm'),
+      '--input-type=module',
+      '--eval', script,
+    ], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      windowsHide: true,
+    })
+
+    expect(result.status, result.stderr).toBe(0)
+    expect(result.stderr).toBe('')
   })
 })
 

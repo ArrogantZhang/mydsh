@@ -73,6 +73,35 @@ type WorkerRunner = (compression: boolean) => Promise<WebSocketDownlinkBenchmark
 type WorkerMode = 'on' | 'off'
 type Schedule = (callback: () => void, milliseconds: number) => () => void
 
+interface WorkerOutputStream {
+  on: (event: 'data', listener: (chunk: Buffer) => void) => unknown
+  off: (event: 'data', listener: (chunk: Buffer) => void) => unknown
+  destroy: () => unknown
+}
+
+interface WorkerChildProcess {
+  stdout: WorkerOutputStream
+  stderr: WorkerOutputStream
+  on: {
+    (event: 'spawn', listener: () => void): unknown
+    (event: 'error', listener: (error: Error & { code?: string }) => void): unknown
+    (event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown
+  }
+  off: {
+    (event: 'spawn', listener: () => void): unknown
+    (event: 'error', listener: (error: Error & { code?: string }) => void): unknown
+    (event: 'close', listener: (code: number | null, signal: NodeJS.Signals | null) => void): unknown
+  }
+  kill: (signal: NodeJS.Signals) => boolean
+  unref: () => void
+}
+
+interface CaptureWorkerProcessOptions {
+  terminate?: (signal: NodeJS.Signals) => boolean
+  scheduleTermination?: Schedule
+  scheduleWatchdog?: Schedule
+}
+
 class WorkerRunError extends Error {}
 
 function reportRecord(value: unknown): Record<string, unknown> {
@@ -192,16 +221,28 @@ function scheduleTimeout(callback: () => void, milliseconds: number): () => void
 }
 
 /**
+ * Attach rejection observation at promise creation while preserving later propagation.
+ * @param promise - Owned async work that may reject before its eventual aggregate is built.
+ * @returns The original promise for later race or aggregate membership.
+ */
+export function observeOwnedPromise<T>(promise: Promise<T>): Promise<T> {
+  void promise.catch(() => undefined)
+  return promise
+}
+
+/**
  * Settle one worker process from bounded output, timeout, spawn, and close events.
  * @param mode - Compression argument assigned to the worker.
  * @param terminate - Sends the requested termination signal to the child.
  * @param schedule - Schedules bounded graceful and forced close deadlines.
+ * @param abandon - Releases runner-owned child resources after close fails to arrive.
  * @returns Event handlers and the successful bounded stdout promise.
  */
 export function createWorkerProcessController(
   mode: WorkerMode,
   terminate: (signal: NodeJS.Signals) => boolean,
   schedule: Schedule = scheduleTimeout,
+  abandon: () => void = () => {},
 ) {
   let stdout = ''
   let stdoutBytes = 0
@@ -251,9 +292,16 @@ export function createWorkerProcessController(
       forceAccepted = sendSignal('SIGKILL')
       cancelForceDeadline = schedule(() => {
         if (phase !== 'terminating') return
+        let cleanupFailed = false
+        try {
+          abandon()
+        } catch {
+          cleanupFailed = true
+        }
         reject(new WorkerRunError(
           `${failure.message} termination actual=unclosed `
-          + `terminateAccepted=${String(terminateAccepted)} forceAccepted=${String(forceAccepted)}`,
+          + `terminateAccepted=${String(terminateAccepted)} forceAccepted=${String(forceAccepted)}`
+          + (cleanupFailed ? ' runnerCleanup=failed' : ''),
         ))
       }, FORCE_CLOSE_GRACE_MS)
     }, TERMINATION_GRACE_MS)
@@ -320,6 +368,55 @@ export function createWorkerProcessController(
       resolve()
     },
   }
+}
+
+/**
+ * Capture one spawned worker with bounded output, termination, and listener ownership.
+ * @param mode - Compression argument assigned to the worker.
+ * @param child - Spawned child with piped stdout and stderr.
+ * @param options - Optional deterministic termination and scheduling hooks.
+ * @returns The worker's bounded stdout after a clean close.
+ */
+export async function captureWorkerProcess(
+  mode: WorkerMode,
+  child: WorkerChildProcess,
+  options: CaptureWorkerProcessOptions = {},
+): Promise<string> {
+  let cleaned = false
+  const watchdog: { cancel?: () => void } = {}
+  function cleanup(): void {
+    if (cleaned) return
+    cleaned = true
+    watchdog.cancel?.()
+    child.stdout.off('data', onStdout)
+    child.stderr.off('data', onStderr)
+    child.off('spawn', onSpawn)
+    child.off('error', onError)
+    child.off('close', onClose)
+    child.stdout.destroy()
+    child.stderr.destroy()
+    child.unref()
+  }
+  const controller = createWorkerProcessController(
+    mode,
+    options.terminate ?? (signal => child.kill(signal)),
+    options.scheduleTermination,
+    cleanup,
+  )
+  const onStdout = (chunk: Buffer): void => { controller.writeStdout(chunk) }
+  const onStderr = (chunk: Buffer): void => { controller.writeStderr(chunk) }
+  const onSpawn = (): void => { controller.spawned() }
+  const onError = (error: Error & { code?: string }): void => { controller.processError(error) }
+  const onClose = (code: number | null, signal: NodeJS.Signals | null): void => {
+    controller.close(code, signal)
+  }
+  child.stdout.on('data', onStdout)
+  child.stderr.on('data', onStderr)
+  child.on('spawn', onSpawn)
+  child.on('error', onError)
+  child.on('close', onClose)
+  watchdog.cancel = (options.scheduleWatchdog ?? scheduleTimeout)(controller.timeout, WORKER_TIMEOUT_MS)
+  return await controller.result.finally(cleanup)
 }
 
 /**
@@ -459,14 +556,7 @@ async function runWorker(compression: boolean): Promise<WebSocketDownlinkBenchma
     stdio: ['ignore', 'pipe', 'pipe'],
     windowsHide: true,
   })
-  const controller = createWorkerProcessController(mode, signal => child.kill(signal))
-  child.stdout.on('data', controller.writeStdout)
-  child.stderr.on('data', controller.writeStderr)
-  child.once('spawn', controller.spawned)
-  child.once('error', controller.processError)
-  child.once('close', controller.close)
-  const timeout = setTimeout(controller.timeout, WORKER_TIMEOUT_MS)
-  const stdout = await controller.result.finally(() => { clearTimeout(timeout) })
+  const stdout = await captureWorkerProcess(mode, child)
   try {
     return parseWorkerReport(stdout, compression)
   } catch {
