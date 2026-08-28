@@ -60,6 +60,25 @@ function expectBashSuccess(body: string, assetName?: string): void {
   expect(result.status, stderr).toBe(0)
 }
 
+function expectWebSocketUpgradeHeadersConfinedToForwardAuth(caddyfile: string): void {
+  const guardedHandle = caddyfile.slice(caddyfile.indexOf('\thandle {\n'))
+  const forwardAuthMatch = guardedHandle.match(/\t\tforward_auth 127\.0\.0\.1:3080 \{\n[\s\S]*?\t\t\}\n/)
+  expect(forwardAuthMatch).not.toBeNull()
+  const forwardAuth = forwardAuthMatch?.[0] ?? ''
+  const finalProxy = guardedHandle.slice((forwardAuthMatch?.index ?? 0) + forwardAuth.length)
+  const connectionRemoval = '\t\t\theader_up -Connection\n'
+  const upgradeRemoval = '\t\t\theader_up -Upgrade\n'
+
+  expect(caddyfile.match(/header_up -Connection/g)).toHaveLength(1)
+  expect(caddyfile.match(/header_up -Upgrade/g)).toHaveLength(1)
+  expect(forwardAuth).toContain(connectionRemoval)
+  expect(forwardAuth).toContain(upgradeRemoval)
+  expect(finalProxy).not.toMatch(/header_up -(?:Connection|Upgrade)/)
+  expect(forwardAuth.indexOf('\t\t\turi /__invite/check\n')).toBeLessThan(forwardAuth.indexOf(connectionRemoval))
+  expect(forwardAuth.indexOf(connectionRemoval)).toBeLessThan(forwardAuth.indexOf(upgradeRemoval))
+  expect(forwardAuth.indexOf(upgradeRemoval)).toBeLessThan(forwardAuth.indexOf('\t\t\theader_up X-DSH-Invite-Client-IP'))
+}
+
 describe('Alibaba Cloud deployment assets', () => {
   it('keeps Caddy as the only public entry point', () => {
     const caddyfile = asset('Caddyfile')
@@ -77,6 +96,27 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(caddyfile.match(/header_up X-Forwarded-Host \{host\}/g)).toHaveLength(2)
     expect(caddyfile).not.toMatch(/(?:^|\s):3080(?:\s|$)/m)
     expect(caddyfile).not.toContain(';')
+  })
+
+  it('keeps WebSocket upgrade headers out of forward auth', () => {
+    const caddyfile = asset('Caddyfile')
+
+    expectWebSocketUpgradeHeadersConfinedToForwardAuth(caddyfile)
+    expect(() => {
+      expectWebSocketUpgradeHeadersConfinedToForwardAuth(caddyfile.replace('\t\t\theader_up -Connection\n', ''))
+    }).toThrow()
+    expect(() => {
+      expectWebSocketUpgradeHeadersConfinedToForwardAuth(caddyfile.replace('\t\t\theader_up -Upgrade\n', ''))
+    }).toThrow()
+    const deletions = '\t\t\theader_up -Connection\n\t\t\theader_up -Upgrade\n'
+    const movedToFinalProxy = caddyfile
+      .replace(deletions, '')
+      .replace(
+        '\t\t}\n\t\treverse_proxy 127.0.0.1:3080\n',
+        '\t\t}\n\t\treverse_proxy 127.0.0.1:3080 {\n\t\t\theader_up -Connection\n\t\t\theader_up -Upgrade\n\t\t}\n',
+      )
+    expect(movedToFinalProxy).toContain('\t\treverse_proxy 127.0.0.1:3080 {\n\t\t\theader_up -Connection\n\t\t\theader_up -Upgrade\n')
+    expect(() => { expectWebSocketUpgradeHeadersConfinedToForwardAuth(movedToFinalProxy) }).toThrow()
   })
 
   it('runs one hardened loopback-only DSH service', () => {
@@ -382,6 +422,23 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(deploy.indexOf('validate_candidate_configs')).toBeLessThan(deploy.indexOf('publish_extracted_release'))
   })
 
+  it('runs authenticated WebSocket acceptance after login and home checks', () => {
+    const script = asset('deploy-release.sh')
+    const helperStart = script.indexOf('\nauthenticated_websocket_acceptance() (')
+    const acceptanceStart = script.indexOf('\nauthenticated_acceptance() (')
+    const acceptanceEnd = script.indexOf('\nremove_first_link() {', acceptanceStart)
+    expect(helperStart).toBeGreaterThanOrEqual(0)
+    expect(acceptanceStart).toBeGreaterThan(helperStart)
+    expect(acceptanceEnd).toBeGreaterThan(acceptanceStart)
+    const acceptance = script.slice(acceptanceStart, acceptanceEnd)
+    const login = acceptance.indexOf('$base/__invite/login')
+    const home = acceptance.indexOf('--cookie "$cookie_jar" "$base/"')
+    const websocket = acceptance.indexOf('authenticated_websocket_acceptance "$cookie_jar"')
+    expect(login).toBeGreaterThanOrEqual(0)
+    expect(home).toBeGreaterThan(login)
+    expect(websocket).toBeGreaterThan(home)
+  })
+
   it('packages an exact reviewed ref in a bounded Node 24 container', () => {
     const script = asset('package-release.sh')
 
@@ -414,11 +471,14 @@ describe('Alibaba Cloud deployment assets', () => {
       .split(/\r?\n/)
       .map(line => line.trim())
     const deploymentPolicyTestNames = [
+      'keeps WebSocket upgrade headers out of forward auth',
+      'accepts both authenticated WebSocket upgrades only after 101 timeouts',
+      'rejects failed, unauthorized, closed, or incomplete WebSocket upgrades',
       'enables bounded batched compressed downlinks in the production overlay',
       'rejects commented values followed by duplicate policy patches',
       'packages an exact reviewed ref in a bounded Node 24 container',
     ]
-    const deploymentPolicyTestCommand = 'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"'
+    const deploymentPolicyTestCommand = 'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:keeps WebSocket upgrade headers out of forward auth|accepts both authenticated WebSocket upgrades only after 101 timeouts|rejects failed, unauthorized, closed, or incomplete WebSocket upgrades|enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"'
     const deploymentPolicyTestPattern = deploymentPolicyTestCommand.match(/ -t "([^"]+)"$/)?.[1]
     expect(deploymentPolicyTestPattern).toBeDefined()
     const deploymentPolicyTestFilter = new RegExp(deploymentPolicyTestPattern ?? '')
@@ -474,6 +534,81 @@ describe('Alibaba Cloud deployment assets', () => {
   // atomic_replace_link uses GNU mv -T. Linux CI executes these tests; Windows
   // keeps static coverage without requiring WSL, and macOS avoids BSD mv.
   describe.runIf(linuxFilesystemTestsEnabled)('Linux release-link helpers', () => {
+    it('accepts both authenticated WebSocket upgrades only after 101 timeouts', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+cookie_jar="$root/cookies"
+curl_log="$root/curl.log"
+touch "$cookie_jar"
+curl() {
+  printf 'CALL\n' >>"$curl_log"
+  printf '%s\n' "$@" >>"$curl_log"
+  printf '101'
+  return 28
+}
+authenticated_websocket_acceptance "$cookie_jar"
+[[ $(grep -Fxc 'CALL' "$curl_log") -eq 2 ]]
+for argument in \
+  '--http1.1' \
+  '--output' \
+  '/dev/null' \
+  '--write-out' \
+  '%{http_code}' \
+  '--max-time' \
+  '2' \
+  '--resolve' \
+  "$DSH_PUBLIC_HOST:443:127.0.0.1" \
+  '--cookie' \
+  "$cookie_jar" \
+  "Origin: https://$DSH_PUBLIC_HOST" \
+  'Connection: Upgrade' \
+  'Upgrade: websocket' \
+  'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
+  'Sec-WebSocket-Version: 13'; do
+  [[ $(grep -Fxc -- "$argument" "$curl_log") -eq 2 ]]
+done
+[[ $(grep -Fxc -- '--header' "$curl_log") -eq 10 ]]
+[[ $(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.mux" "$curl_log") -eq 1 ]]
+[[ $(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.host" "$curl_log") -eq 1 ]]
+`)
+    })
+
+    it('rejects failed, unauthorized, closed, or incomplete WebSocket upgrades', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+cookie_jar="$root/cookies"
+touch "$cookie_jar"
+curl() {
+  local url=\${!#}
+  if [[ $url == */api/events.mux ]]; then
+    printf '%s' "$mux_code"
+    return "$mux_exit"
+  fi
+  if [[ $url == */api/events.host ]]; then
+    printf '%s' "$host_code"
+    return "$host_exit"
+  fi
+  return 99
+}
+expect_rejected() {
+  mux_code=$1
+  mux_exit=$2
+  host_code=$3
+  host_exit=$4
+  if authenticated_websocket_acceptance "$cookie_jar"; then return 90; fi
+}
+expect_rejected 502 28 101 28
+expect_rejected 101 28 401 28
+expect_rejected 101 0 101 28
+expect_rejected 101 28 101 0
+expect_rejected 101 28 000 7
+`)
+    })
+
     it('accepts the root-owned runtime directory and rejects world-writable lock parents', () => {
       for (const name of ['bootstrap-host.sh', 'deploy-release.sh']) {
         expectBashSuccess(`

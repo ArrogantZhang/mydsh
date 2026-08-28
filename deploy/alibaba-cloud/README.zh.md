@@ -51,13 +51,13 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 
 ## 部署 release
 
-通过 root 安装的稳定 helper 部署预构建 artifact set。在部署锁保护下，它先只删除中断操作留下的规范、root 所有 `.upload.*` 与 `.extract.*` 目录，并拒绝不安全的匹配项。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳完整的 1 GiB 压缩文件上限、1 GiB 预留空间，以及 1 MiB checksum 与 metadata 开销，再把两个文件复制到持久的 root-private 新 inode。该固定最坏情况预算不信任可变上传文件的当前大小。helper 验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。解压前还会为每个 member 预算 4,096 字节文件系统 metadata、保留 10,000 个 inode，并保留既有 1 GiB release 余量。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接和不足的 release 空间。本地 packager 也会在原子发布前应用相同 artifact 限制。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、平台、运行时输出和 overlay。manifest ref 使用 `refs/heads/` 或 `refs/tags/` 下的严格常用子集；不安装 Git 的服务器会拒绝空格、控制字符、生僻标点、点开头的 component、`.lock` 后缀和有歧义的分隔符。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
+通过 root 安装的稳定 helper 部署预构建 artifact set。在部署锁保护下，它先只删除中断操作留下的规范、root 所有 `.upload.*` 与 `.extract.*` 目录，并拒绝不安全的匹配项。helper 要求以 commit 命名的目录中恰好只有 tarball 和 sidecar，先检查承载 `/var/lib/mydsh-deploy/uploads` 的 `/var` 文件系统能否容纳完整的 1 GiB 压缩文件上限、1 GiB 预留空间，以及 1 MiB checksum 与 metadata 开销，再把两个文件复制到持久的 root-private 新 inode。该固定最坏情况预算不信任可变上传文件的当前大小。helper 验证严格 sidecar 与 SHA-256 值，并执行 1 GiB 压缩大小、500,000 个 member、每个 member 512 MiB 和 8 GiB 展开大小限制。解压前还会为每个 member 预算 4,096 字节文件系统 metadata、保留 10,000 个 inode，并保留既有 1 GiB release 余量。它拒绝 sparse 或特殊 member、不安全路径、重复名称、越界链接和不足的 release 空间。本地 packager 也会在原子发布前应用相同 artifact 限制。它还验证 manifest 格式 `1`、固定构建镜像 digest、helper journal 兼容版本 `1`、commit、平台、运行时输出和 overlay。manifest ref 使用 `refs/heads/` 或 `refs/tags/` 下的严格常用子集；不安装 Git 的服务器会拒绝空格、控制字符、生僻标点、点开头的 component、`.lock` 后缀和有歧义的分隔符。候选 unit、Caddyfile 与 Caddy drop-in 必须和已安装、受管理的控制平面逐字节相同；任何漂移都会在激活前失败，并要求单独评审的控制平面维护。Caddy 会从发给 `/__invite/check` 的 `forward_auth` 请求中删除继承的逐跳 `Connection` 与 `Upgrade` header；最终 reverse proxy 不会删除或改写它们，因此已认证 WebSocket 请求会保留 upgrade 握手。helper 绝不会运行 Git、pnpm、hook、测试、构建命令、配置脚本或 release 内的控制流。
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
-远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
+远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。认证登录和主页请求成功后，helper 会使用同一个 root-private cookie jar，要求 `/api/events.mux` 与 `/api/events.host` 都完成真实的 `101` upgrade；每条连接都必须保持打开，直到两秒探测超时。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
 
 ## 验证 HTTPS 和登录
 
@@ -76,7 +76,7 @@ openssl s_client -connect dsh.example.com:443 -servername dsh.example.com </dev/
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。关闭全部浏览器窗口，重新打开站点，并确认 30 天 cookie 仍能认证浏览器；随后退出登录，并确认登录页再次出现。以下服务端冒烟测试会检查相同的验收路径，同时不打印密钥、响应正文、响应头或 cookie 值：未认证 HTML 返回 `303`，未认证 API 流量返回 `401`，登录返回 `303`，新客户端进程复用有效期至少还剩 29 天的 cookie，篡改会被拒绝，退出登录后访问也会再次被拒绝。
+打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。关闭全部浏览器窗口，重新打开站点，并确认 30 天 cookie 仍能认证浏览器；随后退出登录，并确认登录页再次出现。以下服务端冒烟测试会检查相同的验收路径，同时不打印密钥、响应正文、响应头或 cookie 值：未认证 HTML 返回 `303`，未认证 API 流量返回 `401`，登录返回 `303`，已认证主页返回 `200`，两个实时 endpoint 都以 `101` 完成 upgrade 并保持打开直至探测超时，新客户端进程复用有效期至少还剩 29 天的 cookie，篡改会被拒绝，退出登录后访问也会再次被拒绝。
 
 ```bash
 sudo bash -c '
@@ -88,6 +88,13 @@ tampered_jar=$(mktemp)
 trap '\''rm -f -- "$cookie_jar" "$tampered_jar"'\'' EXIT
 base="https://$DSH_PUBLIC_HOST"
 resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
+websocket_acceptance() {
+  local path=$1
+  local websocket_status
+  local curl_status=0
+  websocket_status=$(curl --silent --http1.1 --output /dev/null --write-out "%{http_code}" --max-time 2 --resolve "$resolve" --cookie "$cookie_jar" --header "Origin: $base" --header "Connection: Upgrade" --header "Upgrade: websocket" --header "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" --header "Sec-WebSocket-Version: 13" "$base$path") || curl_status=$?
+  [[ $websocket_status == 101 && $curl_status -eq 28 ]]
+}
 home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
 [[ $home_unauth_status == 303 ]]
 api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
@@ -96,6 +103,8 @@ post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent -
 [[ $post_status == 303 ]]
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
+websocket_acceptance /api/events.mux
+websocket_acceptance /api/events.host
 cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
 [[ $cookie_expiry =~ ^[0-9]+$ ]]
 (( cookie_expiry >= $(date +%s) + 2505600 ))

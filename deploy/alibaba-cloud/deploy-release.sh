@@ -984,6 +984,20 @@ public_acceptance() {
   [[ $api_status == 401 ]] || return 1
 }
 
+authenticated_websocket_acceptance() (
+  local cookie_jar=$1
+  local base="https://$DSH_PUBLIC_HOST"
+  local resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
+  local path
+  local websocket_status
+  local curl_status
+  for path in /api/events.mux /api/events.host; do
+    curl_status=0
+    websocket_status=$(curl --silent --http1.1 --output /dev/null --write-out '%{http_code}' --max-time 2 --resolve "$resolve" --cookie "$cookie_jar" --header "Origin: $base" --header 'Connection: Upgrade' --header 'Upgrade: websocket' --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --header 'Sec-WebSocket-Version: 13' "$base$path") || curl_status=$?
+    [[ $websocket_status == 101 && $curl_status -eq 28 ]] || return 1
+  done
+)
+
 authenticated_acceptance() (
   local cookie_jar
   local base="https://$DSH_PUBLIC_HOST"
@@ -1002,7 +1016,8 @@ authenticated_acceptance() (
   fi
   [[ $post_status == 303 ]] || return 1
   get_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/") || get_status=000
-  [[ $get_status == 200 ]]
+  [[ $get_status == 200 ]] || return 1
+  authenticated_websocket_acceptance "$cookie_jar"
 )
 
 remove_first_link() {

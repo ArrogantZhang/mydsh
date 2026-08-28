@@ -51,13 +51,13 @@ The script creates the non-login `mydsh` runtime account, persistent and release
 
 ## Deploy the release
 
-Deploy the prebuilt artifact set through the stable root-installed helper. Under the deployment lock it first removes only canonical root-owned `.upload.*` and `.extract.*` directories left by interrupted operations and refuses unsafe matching entries. It requires the commit-named directory to contain exactly the tarball and sidecar, checks that the `/var` filesystem holding `/var/lib/mydsh-deploy/uploads` has room for the full 1 GiB compressed-file cap, a 1 GiB reserve, and 1 MiB of checksum and metadata overhead, then copies both files into persistent root-private new inodes. This fixed worst-case budget does not trust the mutable uploaded file's current size. The helper verifies the strict sidecar and SHA-256 value and enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. Before extraction it also budgets 4,096 bytes of filesystem metadata per member, 10,000 spare inodes, and the existing 1 GiB release reserve. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release space. The local packager applies the same artifact bounds before atomic publication. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, platform, runtime outputs, and overlay. Manifest refs use a strict ordinary subset under `refs/heads/` or `refs/tags/`; the Git-free server rejects spaces, control characters, obscure punctuation, dot-prefixed components, `.lock` suffixes, and ambiguous separators. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
+Deploy the prebuilt artifact set through the stable root-installed helper. Under the deployment lock it first removes only canonical root-owned `.upload.*` and `.extract.*` directories left by interrupted operations and refuses unsafe matching entries. It requires the commit-named directory to contain exactly the tarball and sidecar, checks that the `/var` filesystem holding `/var/lib/mydsh-deploy/uploads` has room for the full 1 GiB compressed-file cap, a 1 GiB reserve, and 1 MiB of checksum and metadata overhead, then copies both files into persistent root-private new inodes. This fixed worst-case budget does not trust the mutable uploaded file's current size. The helper verifies the strict sidecar and SHA-256 value and enforces limits of 1 GiB compressed, 500,000 members, 512 MiB per member, and 8 GiB expanded. Before extraction it also budgets 4,096 bytes of filesystem metadata per member, 10,000 spare inodes, and the existing 1 GiB release reserve. It rejects sparse or special members, unsafe paths, duplicate names, escaping links, and insufficient release space. The local packager applies the same artifact bounds before atomic publication. It validates manifest format `1`, the pinned build-image digest, helper journal compatibility `1`, commit, platform, runtime outputs, and overlay. Manifest refs use a strict ordinary subset under `refs/heads/` or `refs/tags/`; the Git-free server rejects spaces, control characters, obscure punctuation, dot-prefixed components, `.lock` suffixes, and ambiguous separators. The candidate unit, Caddyfile, and Caddy drop-in must be byte-for-byte identical to the installed managed control plane; any drift fails with no activation and requires separate reviewed control-plane maintenance. Caddy removes inherited hop-by-hop `Connection` and `Upgrade` headers from the `forward_auth` request to `/__invite/check`; the final reverse proxy does not delete or rewrite them, so an authenticated WebSocket request retains its upgrade handshake. The helper never runs Git, pnpm, hooks, tests, build commands, config scripts, or release-contained control flow.
 
 ```bash
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
-The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
+The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. After authenticated login and a successful home request, the helper uses the same root-private cookie jar to require real `101` upgrades for both `/api/events.mux` and `/api/events.host`; each connection must remain open until the two-second probe times out. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
 
 ## Verify HTTPS and login
 
@@ -76,7 +76,7 @@ An administrator may retrieve the initial invite code directly over SSH. Run thi
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. Close every browser window, reopen the site, and confirm the 30-day cookie still authenticates the browser; then log out and confirm the login page returns. The following server-side smoke test exercises the same acceptance path without printing secrets, response bodies, headers, or cookie values: unauthenticated HTML receives `303`, unauthenticated API traffic receives `401`, login receives `303`, a new client process reuses a cookie whose expiry is at least 29 days away, tampering is rejected, and logout denies access again.
+Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. Close every browser window, reopen the site, and confirm the 30-day cookie still authenticates the browser; then log out and confirm the login page returns. The following server-side smoke test exercises the same acceptance path without printing secrets, response bodies, headers, or cookie values: unauthenticated HTML receives `303`, unauthenticated API traffic receives `401`, login receives `303`, the authenticated home returns `200`, both realtime endpoints upgrade with `101` and stay open until the probe timeout, a new client process reuses a cookie whose expiry is at least 29 days away, tampering is rejected, and logout denies access again.
 
 ```bash
 sudo bash -c '
@@ -88,6 +88,13 @@ tampered_jar=$(mktemp)
 trap '\''rm -f -- "$cookie_jar" "$tampered_jar"'\'' EXIT
 base="https://$DSH_PUBLIC_HOST"
 resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
+websocket_acceptance() {
+  local path=$1
+  local websocket_status
+  local curl_status=0
+  websocket_status=$(curl --silent --http1.1 --output /dev/null --write-out "%{http_code}" --max-time 2 --resolve "$resolve" --cookie "$cookie_jar" --header "Origin: $base" --header "Connection: Upgrade" --header "Upgrade: websocket" --header "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" --header "Sec-WebSocket-Version: 13" "$base$path") || curl_status=$?
+  [[ $websocket_status == 101 && $curl_status -eq 28 ]]
+}
 home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
 [[ $home_unauth_status == 303 ]]
 api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
@@ -96,6 +103,8 @@ post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent -
 [[ $post_status == 303 ]]
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
+websocket_acceptance /api/events.mux
+websocket_acceptance /api/events.host
 cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
 [[ $cookie_expiry =~ ^[0-9]+$ ]]
 (( cookie_expiry >= $(date +%s) + 2505600 ))

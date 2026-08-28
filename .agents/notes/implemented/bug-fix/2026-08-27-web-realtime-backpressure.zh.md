@@ -60,7 +60,7 @@ release packager 会在 `pnpm run build` 前运行 ApiProxy、connection 与部�
 
 ## 验证
 
-聚焦测试钉住按流队列溢出与隔离；按数量、字节、deadline 与 source 正常结束进行的无损 batching；单 pending-read 不变量；256 请求的 wire 上限；浏览器原子校验与状态码 1002 重连；字节、发送失败与超时导致的 source 中止；peer 隔离；即时且无障碍的提交反馈；恰好一次的 transcript 重建；以及 build 前的部署门禁顺序。产物构建器的部署筛选会精确选择部署策略测试，而依赖 root 和 systemd 工具的部署 helper 集成测试仍由 Linux CI 运行。
+聚焦测试钉住按流队列溢出与隔离；按数量、字节、deadline 与 source 正常结束进行的无损 batching；单 pending-read 不变量；256 请求的 wire 上限；浏览器原子校验与状态码 1002 重连；字节、发送失败与超时导致的 source 中止；peer 隔离；即时且无障碍的提交反馈；恰好一次的 transcript 重建；以及 build 前的部署门禁顺序。产物构建器采用锚定的部署筛选，精确选择生产策略、`forward_auth` header 隔离与非 root 的已认证 WebSocket helper 测试。helper 测试要求 mux 与 host 探测都收到 `101` 且只能以 curl 超时结束；`502`、`401`、其他退出状态或缺少一条已接受路径都会失败。依赖 root 和 systemd 工具的部署 helper 集成测试仍由 Linux CI 运行。
 
 固定基准使用五个浏览器与十条真实 WebSocket 下行。每个 source 每 16 毫秒产生 24 帧，每个 mux source 交付 24,000 个会话帧，每个 host source 交付 256 个 host 帧；plain 与 compressed 模式携带完全相同的已序列化应用字节，且不报告 payload 内容。
 

@@ -14,6 +14,8 @@
 	handle {
 		forward_auth 127.0.0.1:3080 {
 			uri /__invite/check
+			header_up -Connection
+			header_up -Upgrade
 			header_up X-DSH-Invite-Client-IP {remote_host}
 			header_up X-Forwarded-Proto {scheme}
 			header_up X-Forwarded-Host {host}
