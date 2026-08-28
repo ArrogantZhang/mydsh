@@ -537,6 +537,7 @@ describe('Alibaba Cloud deployment assets', () => {
     it('accepts both authenticated WebSocket upgrades only after 101 timeouts', () => {
       expectBashSuccess(`
 set -euo pipefail
+DSH_PUBLIC_HOST=dsh.example.test
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
 cookie_jar="$root/cookies"
@@ -578,12 +579,15 @@ done
     it('rejects failed, unauthorized, closed, or incomplete WebSocket upgrades', () => {
       expectBashSuccess(`
 set -euo pipefail
+DSH_PUBLIC_HOST=dsh.example.test
 root=$(mktemp -d)
 trap 'rm -rf -- "$root"' EXIT
 cookie_jar="$root/cookies"
+curl_log="$root/curl.log"
 touch "$cookie_jar"
 curl() {
   local url=\${!#}
+  printf 'CALL\n%s\n' "$url" >>"$curl_log"
   if [[ $url == */api/events.mux ]]; then
     printf '%s' "$mux_code"
     return "$mux_exit"
@@ -595,17 +599,29 @@ curl() {
   return 99
 }
 expect_rejected() {
-  mux_code=$1
-  mux_exit=$2
-  host_code=$3
-  host_exit=$4
+  local mux_code=$1
+  local mux_exit=$2
+  local host_code=$3
+  local host_exit=$4
+  local expected_mux_calls=$5
+  local expected_host_calls=$6
+  local call_count
+  local mux_calls
+  local host_calls
+  : >"$curl_log"
   if authenticated_websocket_acceptance "$cookie_jar"; then return 90; fi
+  call_count=$(grep -Fxc 'CALL' "$curl_log" || true)
+  mux_calls=$(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.mux" "$curl_log" || true)
+  host_calls=$(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.host" "$curl_log" || true)
+  [[ $call_count -eq $((expected_mux_calls + expected_host_calls)) ]]
+  [[ $mux_calls -eq expected_mux_calls ]]
+  [[ $host_calls -eq expected_host_calls ]]
 }
-expect_rejected 502 28 101 28
-expect_rejected 101 28 401 28
-expect_rejected 101 0 101 28
-expect_rejected 101 28 101 0
-expect_rejected 101 28 000 7
+expect_rejected 502 28 101 28 1 0
+expect_rejected 101 28 401 28 1 1
+expect_rejected 101 0 101 28 1 0
+expect_rejected 101 28 101 0 1 1
+expect_rejected 101 28 000 7 1 1
 `)
     })
 
