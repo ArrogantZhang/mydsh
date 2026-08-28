@@ -12,6 +12,8 @@ English | [中文](2026-08-27-web-realtime-backpressure.zh.md)
 
 **Design:** [Approved design](../specs/2026-08-27-web-realtime-backpressure-design.md)
 
+**Continuation:** The [lossless WebSocket batching plan](2026-08-27-lossless-websocket-batching.md) owns the `server-batch` wire, batching benchmark, and production rollout; Task 6 in this plan is limited to the compression-only baseline.
+
 ---
 
 ## File map
@@ -562,6 +564,8 @@ git commit -m "test(web): pin send feedback and reconnect recovery"
 ```
 
 ## Task 6: Add and pass the five-browser downlink benchmark
+
+This task specifies the compression-only baseline. The [lossless WebSocket batching plan](2026-08-27-lossless-websocket-batching.md) owns the active batching continuation and its fixed production cadence.
 
 **Files:**
 

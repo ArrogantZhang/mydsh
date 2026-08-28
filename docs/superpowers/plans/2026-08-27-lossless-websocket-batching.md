@@ -31,7 +31,7 @@ English | [中文](2026-08-27-lossless-websocket-batching.zh.md)
 - `packages/client/connection/tests/websocket-downlink.host.spec.ts` — real WebSocket batch delivery, failure, and teardown integration.
 - `packages/client/connection/tests/node-half.host.spec.ts` — batching defaults, ranges, and cross-field validation.
 - `packages/client/connection/README.md`, `README.zh.md`, `README.i18n.yaml` — batching, ordering, timing, and recovery contract.
-- `.agents/notes/proposed/bug-fix/2026-08-27-web-realtime-backpressure.md`, `.zh.md`, `.i18n.yaml` — selected batching decision and measured prerequisite.
+- `.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`, `.zh.md`, `.i18n.yaml` — selected batching decision and measured prerequisite.
 - `docs/config-catalog.md`, `config-catalog.zh.md`, `config-catalog.i18n.yaml` — regenerated configuration reference.
 
 ### Benchmark and deployment
@@ -368,14 +368,14 @@ git commit -m "deploy: enable batched compressed downlinks"
 
 **Files:**
 
-- Move the active Agent Note triplet from `.agents/notes/proposed/bug-fix/` to `.agents/notes/implemented/bug-fix/`.
+- Current record: `.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`, `.zh.md`, `.i18n.yaml`.
 - Modify: `docs/superpowers/plans/2026-08-27-web-realtime-backpressure.md`
 - Modify: `docs/superpowers/plans/2026-08-27-web-realtime-backpressure.zh.md`
 - Modify: `docs/superpowers/plans/2026-08-27-web-realtime-backpressure.i18n.yaml`
 
 - [ ] **Step 1: Record shipped reality**
 
-Move the complete Agent Note pair/sidecar with `git mv`, set `Status: implemented`, replace proposal/acceptance/risks headings with decision/consequences/current verification, preserve alternatives, and record the two real benchmark reports and shipped defaults without payload text. Update the earlier implementation plan so its compression-only Task 6 no longer contradicts the batching continuation; link this plan as the remaining-work owner. Re-record both pairs.
+Move the complete Agent Note pair/sidecar with `git mv`, set `Status: implemented`, replace proposal/acceptance/risks headings with decision/consequences/current verification, preserve alternatives, and record the two real benchmark reports and shipped defaults without payload text. The Web realtime backpressure plan defines Task 6 as the compression-only baseline and links this plan as the remaining-work owner. Re-record both pairs.
 
 - [ ] **Step 2: Run the complete relevant evidence once**
 

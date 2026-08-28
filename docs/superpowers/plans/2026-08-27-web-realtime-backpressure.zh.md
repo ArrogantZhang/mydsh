@@ -12,6 +12,8 @@
 
 **设计：** [已批准设计](../specs/2026-08-27-web-realtime-backpressure-design.zh.md)
 
+**延续工作：** [无损 WebSocket 批处理计划](2026-08-27-lossless-websocket-batching.zh.md)拥有 `server-batch` wire、批处理基准与生产上线；本计划的任务 6 仅涵盖只使用压缩的基线。
+
 ---
 
 ## 文件映射
@@ -562,6 +564,8 @@ git commit -m "test(web): pin send feedback and reconnect recovery"
 ```
 
 ## 任务 6：增加并通过五浏览器下行基准
+
+本任务规定只使用压缩的基线。[无损 WebSocket 批处理计划](2026-08-27-lossless-websocket-batching.zh.md)拥有当前批处理延续工作及其固定生产节奏。
 
 **文件：**
 

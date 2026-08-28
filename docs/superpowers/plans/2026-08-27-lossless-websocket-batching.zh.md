@@ -31,7 +31,7 @@
 - `packages/client/connection/tests/websocket-downlink.host.spec.ts` — 真实 WebSocket batch 交付、失败与 teardown 集成。
 - `packages/client/connection/tests/node-half.host.spec.ts` — 批处理默认值、范围与跨字段验证。
 - `packages/client/connection/README.md`、`README.zh.md`、`README.i18n.yaml` — 批处理、顺序、时序与恢复约定。
-- `.agents/notes/proposed/bug-fix/2026-08-27-web-realtime-backpressure.md`、`.zh.md`、`.i18n.yaml` — 所选批处理决策与测量得到的前提。
+- `.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`、`.zh.md`、`.i18n.yaml` — 所选批处理决策与测量得到的前提。
 - `docs/config-catalog.md`、`config-catalog.zh.md`、`config-catalog.i18n.yaml` — 重新生成的配置参考。
 
 ### 基准与部署
@@ -368,14 +368,14 @@ git commit -m "deploy: enable batched compressed downlinks"
 
 **文件：**
 
-- 把 active Agent Note 三件套从 `.agents/notes/proposed/bug-fix/` 移到 `.agents/notes/implemented/bug-fix/`。
+- 当前记录：`.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`、`.zh.md`、`.i18n.yaml`。
 - 修改：`docs/superpowers/plans/2026-08-27-web-realtime-backpressure.md`
 - 修改：`docs/superpowers/plans/2026-08-27-web-realtime-backpressure.zh.md`
 - 修改：`docs/superpowers/plans/2026-08-27-web-realtime-backpressure.i18n.yaml`
 
 - [ ] **步骤 1：记录已发布事实**
 
-使用 `git mv` 移动完整 Agent Note 配对/sidecar，设置 `Status: implemented`，用 decision/consequences/当前验证替换 proposal/acceptance/risks 标题，保留 alternatives，并在不包含 payload 文本的情况下记录两份真实基准报告与已发布默认值。更新先前实施计划，使其仅压缩 Task 6 不再与 batching continuation 冲突；链接本计划作为剩余工作 owner。重新记录两个配对。
+使用 `git mv` 移动完整 Agent Note 配对/sidecar，设置 `Status: implemented`，用 decision/consequences/当前验证替换 proposal/acceptance/risks 标题，保留 alternatives，并在不包含 payload 文本的情况下记录两份真实基准报告与已发布默认值。Web 实时背压计划把任务 6 定义为只使用压缩的基线，并链接本计划作为剩余工作 owner。重新记录两个配对。
 
 - [ ] **步骤 2：运行一次完整相关证据**
 

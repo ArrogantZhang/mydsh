@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/superpowers/plans/2026-08-27-lossless-websocket-batching.md
-2026-08-27-lossless-websocket-batching.md: 2ae3c8ab15f813afb6357b6ac5ad0a3ecb379c96
-2026-08-27-lossless-websocket-batching.zh.md: 321980df284ab89d9a0eaff5d123addee6cad338
+2026-08-27-lossless-websocket-batching.md: 78e5508ed1e9d13f4b6d4a8f92b03c4e1a71176d
+2026-08-27-lossless-websocket-batching.zh.md: b864f2b7687de8be5bb4022bb9971bf54bdb6bd8
