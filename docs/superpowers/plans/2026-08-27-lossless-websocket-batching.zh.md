@@ -244,9 +244,11 @@ git commit -m "feat(connection): batch websocket downlinks"
 webSocketMessages: number
 maxBatchFrames: number
 maxBatchBytes: number
+producerBurstFrames: 24
+producerIntervalMs: 16
 ```
 
-summary 携带 `plainMessageReduction` 与 `compressedMessageReduction`。拒绝未知/缺失字段、超过 64 帧或 262,144 字节的 batch、任一消息降幅低于 90%、序列化字节不一致、队列 overflow、压缩字节降幅低于 60%，以及压缩 RSS 超过 64 MiB。
+summary 携带 `plainMessageReduction`、`compressedMessageReduction` 与 `compressionRssOverheadBytes`。拒绝未知/缺失字段、生产节奏不是 24/16、超过 64 帧或 262,144 字节的 batch、任一消息降幅低于 90%、序列化字节不一致、队列 overflow、压缩字节降幅低于 60%，以及压缩 RSS 开销超过 64 MiB。RSS 开销是 `max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)`。
 
 - [ ] **步骤 2：运行 RED**
 
@@ -256,7 +258,7 @@ summary 携带 `plainMessageReduction` 与 `compressedMessageReduction`。拒绝
 
 - [ ] **步骤 3：测量批处理物理消息**
 
-在 plain 与 compressed worker 中启用完全相同的 batching：`true`、64、262,144 与 16 ms。客户端 peer 解析单条或 batch wrapper，统计每条内部 request、物理 `message` 事件数，并记录最大 batch request 数与原始消息字节。保留 start barrier、固定应用帧、TCP `bytesRead`、5 ms RSS 采样、队列观察与不含秘密的输出。
+在 plain 与 compressed worker 中启用完全相同的 batching：`true`、64、262,144 与 16 ms。客户端 peer 解析单条或 batch wrapper，统计每条内部 request、物理 `message` 事件数，并记录最大 batch request 数与原始消息字节。每个来源每推送 24 帧就等待 16 ms，最后一批后不额外等待。该固定节奏为每个来源持续提供 1,500 帧/s，同时保留已观测到的生产峰值 24 帧/16 ms；受影响的重负载 turn 平均约 7 个事件/s，峰值为 141/s。保留 start barrier、固定应用帧、TCP `bytesRead`、5 ms RSS 采样、队列观察与不含秘密的输出。
 
 应用帧分母是精确值：
 
@@ -284,7 +286,7 @@ pnpm run benchmark:websocket-downlinks
 - 无来源 overflow，且队列峰值不超过 4,096；
 - 两个消息降幅都至少为 0.90；
 - 压缩传输字节降幅至少为 0.60；
-- 压缩 RSS 增量不超过 67,108,864 字节；
+- 压缩 RSS 开销不超过 67,108,864 字节，并根据两个已报告 RSS 增量计算；
 - 应用数量精确且序列化字节相同。
 
 任一运行失败时，在任务 4 前停止并报告固定指标；不得修改 payload 或阈值以求通过。

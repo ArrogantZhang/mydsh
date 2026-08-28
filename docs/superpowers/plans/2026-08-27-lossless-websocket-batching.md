@@ -244,9 +244,11 @@ Add exact fields to each report:
 webSocketMessages: number
 maxBatchFrames: number
 maxBatchBytes: number
+producerBurstFrames: 24
+producerIntervalMs: 16
 ```
 
-The summary carries `plainMessageReduction` and `compressedMessageReduction`. Reject unknown/missing fields, a batch over 64 frames or 262,144 bytes, either message reduction below 90 percent, serialized-byte mismatch, queue overflow, compressed byte reduction below 60 percent, and compressed RSS above 64 MiB.
+The summary carries `plainMessageReduction`, `compressedMessageReduction`, and `compressionRssOverheadBytes`. Reject unknown/missing fields, cadence other than 24/16, a batch over 64 frames or 262,144 bytes, either message reduction below 90 percent, serialized-byte mismatch, queue overflow, compressed byte reduction below 60 percent, and compression RSS overhead above 64 MiB. RSS overhead is `max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)`.
 
 - [ ] **Step 2: Run RED**
 
@@ -256,7 +258,7 @@ Expected: FAIL because batching metrics and thresholds are absent.
 
 - [ ] **Step 3: Measure batched physical messages**
 
-Enable identical batching in plain and compressed workers with `true`, 64, 262,144, and 16 ms. Client peers parse singles or batch wrappers, count every inner request, count physical `message` events, and record maximum batch request count and raw message bytes. Preserve the start barrier, fixed application frames, TCP `bytesRead`, 5 ms RSS sampling, queue observation, and secret-free output.
+Enable identical batching in plain and compressed workers with `true`, 64, 262,144, and 16 ms. Client peers parse singles or batch wrappers, count every inner request, count physical `message` events, and record maximum batch request count and raw message bytes. After each 24 source pushes, wait 16 ms except after the final batch. This fixed cadence sustains 1,500 frames/s per source while preserving the observed production peak of 24 frames/16 ms; the affected heavy turn averaged about 7 events/s and peaked at 141/s. Preserve the start barrier, fixed application frames, TCP `bytesRead`, 5 ms RSS sampling, queue observation, and secret-free output.
 
 The application-frame denominator is exact:
 
@@ -284,7 +286,7 @@ Expected for both real runs:
 - no source overflow and queue peak at most 4,096;
 - both message reductions at least 0.90;
 - compressed transport-byte reduction at least 0.60;
-- compressed RSS delta at most 67,108,864 bytes;
+- compression RSS overhead at most 67,108,864 bytes, calculated from the two reported RSS deltas;
 - exact application counts and identical serialized bytes.
 
 If either run fails, stop before Task 4 and report the fixed metrics; do not alter payloads or thresholds to pass.

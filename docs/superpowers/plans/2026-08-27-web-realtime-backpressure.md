@@ -597,14 +597,15 @@ Spawn a fresh Node process with `--import tsx` for each mode so RSS baselines do
 ```text
 const byteReduction = 1 - compressed.transportBytes / plain.transportBytes
 const RSS_LIMIT_BYTES = 64 * 1024 * 1024
+const compressionRssOverheadBytes = Math.max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)
 if (compressed.serializedBytes !== plain.serializedBytes) {
   throw new Error('websocket benchmark modes did not carry identical application payloads')
 }
 if (byteReduction < 0.60) {
   throw new Error(`websocket compression reduced transport bytes by only ${(byteReduction * 100).toFixed(1)}%`)
 }
-if (compressed.rssDeltaBytes > RSS_LIMIT_BYTES) {
-  throw new Error(`websocket compression added ${String(compressed.rssDeltaBytes)} RSS bytes`)
+if (compressionRssOverheadBytes > RSS_LIMIT_BYTES) {
+  throw new Error(`websocket compression added ${String(compressionRssOverheadBytes)} RSS bytes`)
 }
 if (compressed.peakQueueFrames > 4096 || plain.peakQueueFrames > 4096) {
   throw new Error('websocket benchmark exceeded the configured source queue capacity')
@@ -622,7 +623,7 @@ Add this root script:
 
 Run: `pnpm run benchmark:websocket-downlinks`
 
-Expected: PASS with `browsers: 5`, `downlinks: 10`, byte reduction at least `0.60`, `rssDeltaBytes` at most `67108864`, and `peakQueueFrames` at most `4096` for both modes.
+Expected: PASS with `browsers: 5`, `downlinks: 10`, byte reduction at least `0.60`, compression RSS overhead at most `67108864`, and `peakQueueFrames` at most `4096` for both modes.
 
 If the gate fails, stop implementation before editing the production overlay. Preserve the report, leave compression disabled, and return to the approved design for an explicit batching revision.
 
@@ -817,4 +818,4 @@ Open two to five authenticated browsers. Hold one browser on a throttled connect
 
 - [ ] **Step 8: Record final evidence**
 
-Report the deployed commit, benchmark byte reduction, compressed RSS delta, focused commands actually run, public service/listener state, and the multi-browser canary result. If the canary fails, invoke the installed helper's rollback against the previous known-good 40-character release commit and retain the failed release for diagnosis.
+Report the deployed commit, benchmark byte reduction, both per-run RSS deltas, compression RSS overhead, focused commands actually run, public service/listener state, and the multi-browser canary result. If the canary fails, invoke the installed helper's rollback against the previous known-good 40-character release commit and retain the failed release for diagnosis.

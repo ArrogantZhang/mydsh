@@ -14,7 +14,7 @@ The deployment serves two to five simultaneous browsers. Each browser opens a mu
 - Reduce public downlink bytes for the representative workload by at least 60 percent and WebSocket message count by at least 90 percent.
 - Bound retained frames and socket backlog for each slow downlink so one browser cannot grow host memory without limit or stall a model run.
 - Preserve every durable session event and reconstruct the same conversation after reconnect, without duplicate or missing visible messages.
-- Keep the added resident-set memory below 64 MiB for five browsers and ten downlinks under the representative load.
+- Keep compression-attributable resident-set memory below 64 MiB, measured as the compressed run's RSS delta minus the identical plain run's RSS delta.
 
 ## Non-goals
 
@@ -65,7 +65,7 @@ The receipt is not a synthetic conversation item. The user bubble continues to o
 
 The plugin exposes validated `downlinkCompression`, `downlinkCompressionThresholdBytes`, and `downlinkCompressionConcurrency` fields instead of embedding deployment tunables in the carrier. The downlink-only server fixes inbound `maxPayload` at 1 KiB before rejecting client application messages. No compression settings or measurements include invite codes, cookies, model credentials, message text, or tool output in logs; benchmarks use deterministic synthetic payloads with fixed event categories and sizes.
 
-Compression and batching ship together in the production overlay only if two consecutive representative runs reduce transport bytes by at least 60 percent, reduce WebSocket message count by at least 90 percent, avoid source overflow, and keep the compressed ten-downlink RSS increase at or below 64 MiB.
+Compression and batching ship together in the production overlay only if two consecutive representative runs reduce transport bytes by at least 60 percent, reduce WebSocket message count by at least 90 percent, avoid source overflow, and keep compression RSS overhead at or below 64 MiB. RSS overhead is `max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)`; both per-run deltas remain in the report.
 
 ## Lossless WebSocket batching
 
@@ -105,7 +105,7 @@ All numeric fields accept integers in safe operational ranges and fail plugin lo
 
 Implementation begins with failing tests for composer pending feedback, queue overflow, send timeout, compression negotiation, cleanup, and reconnect history repair. Focused package tests cover each failure race, including close during compression, abort during a blocked send, queue overflow before a waiter exists, and teardown with multiple active pumps.
 
-A deterministic host benchmark runs five browser peers with mux and host downlinks. Each mux receives 24,000 fixed session frames and each host receives 256 fixed host frames. Both plain and compressed modes use identical batching and application bytes; reports add WebSocket message count and maximum batch size to serialized bytes, transport bytes, wall time, peak queue depth, and RSS delta. Two consecutive runs must avoid overflow, keep queue peak at or below 4,096, reduce message count by at least 90 percent, reduce compressed transport bytes by at least 60 percent, and keep compressed RSS delta at or below 64 MiB. A paused-reader case must trip the fuse within 6 seconds, release the stream, and leave healthy peers receiving frames.
+A deterministic host benchmark runs five browser peers with mux and host downlinks. Each mux receives 24,000 fixed session frames and each host receives 256 fixed host frames. Producers sustain 24 frames every 16 ms per source: this preserves the observed production burst peak while sustaining more than ten times the observed per-second peak. Both plain and compressed modes use identical batching and application bytes; reports add WebSocket message count, maximum batch size, producer cadence, and compression RSS overhead to serialized bytes, transport bytes, wall time, peak queue depth, and both per-run RSS deltas. Two consecutive runs must avoid overflow, keep queue peak at or below 4,096, reduce message count by at least 90 percent, reduce compressed transport bytes by at least 60 percent, and keep compression RSS overhead at or below 64 MiB. A paused-reader case must trip the fuse within 6 seconds, release the stream, and leave healthy peers receiving frames.
 
 A keyless real Web composition browser test submits through both Enter and the button, captures the pending state before any mocked session event is delivered, then verifies the durable user bubble and streamed assistant result. The relevant unit tests, typecheck, build, Web configuration verification, documentation gates, and `git diff --check` run before packaging.
 

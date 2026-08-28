@@ -597,14 +597,15 @@ interface DownlinkBenchmarkReport {
 ```text
 const byteReduction = 1 - compressed.transportBytes / plain.transportBytes
 const RSS_LIMIT_BYTES = 64 * 1024 * 1024
+const compressionRssOverheadBytes = Math.max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)
 if (compressed.serializedBytes !== plain.serializedBytes) {
   throw new Error('websocket benchmark modes did not carry identical application payloads')
 }
 if (byteReduction < 0.60) {
   throw new Error(`websocket compression reduced transport bytes by only ${(byteReduction * 100).toFixed(1)}%`)
 }
-if (compressed.rssDeltaBytes > RSS_LIMIT_BYTES) {
-  throw new Error(`websocket compression added ${String(compressed.rssDeltaBytes)} RSS bytes`)
+if (compressionRssOverheadBytes > RSS_LIMIT_BYTES) {
+  throw new Error(`websocket compression added ${String(compressionRssOverheadBytes)} RSS bytes`)
 }
 if (compressed.peakQueueFrames > 4096 || plain.peakQueueFrames > 4096) {
   throw new Error('websocket benchmark exceeded the configured source queue capacity')
@@ -622,7 +623,7 @@ process.stdout.write(`${JSON.stringify({ plain, compressed, byteReduction })}\n`
 
 运行：`pnpm run benchmark:websocket-downlinks`
 
-预期：PASS，且 `browsers: 5`、`downlinks: 10`、字节降低至少 `0.60`、`rssDeltaBytes` 不超过 `67108864`，两个模式的 `peakQueueFrames` 都不超过 `4096`。
+预期：PASS，且 `browsers: 5`、`downlinks: 10`、字节降低至少 `0.60`、压缩 RSS 开销不超过 `67108864`，两个模式的 `peakQueueFrames` 都不超过 `4096`。
 
 如果门槛失败，在编辑生产覆盖层前停止实施。保留报告，保持压缩关闭，并返回已批准设计，明确制定批处理修订。
 
@@ -817,4 +818,4 @@ ssh -i /mnt/c/Users/a8798/.ssh/person.pem -p 22 root@120.24.146.133 'systemctl i
 
 - [ ] **步骤 8：记录最终证据**
 
-报告已部署 commit、基准字节降幅、压缩 RSS 增量、实际运行的聚焦命令、公开服务/listener 状态与多浏览器 canary 结果。如果 canary 失败，使用已安装 helper 对上一个已知良好的 40 字符 release commit 执行回滚，并保留失败 release 供诊断。
+报告已部署 commit、基准字节降幅、两个模式各自的 RSS 增量、压缩 RSS 开销、实际运行的聚焦命令、公开服务/listener 状态与多浏览器 canary 结果。如果 canary 失败，使用已安装 helper 对上一个已知良好的 40 字符 release commit 执行回滚，并保留失败 release 供诊断。

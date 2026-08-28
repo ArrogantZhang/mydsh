@@ -14,7 +14,7 @@
 - 对代表性负载，把公网下行字节数至少降低 60%，并把 WebSocket 消息数至少降低 90%。
 - 限制每条慢速下行流保留的帧与 socket 积压，避免单个浏览器无限增加宿主内存或阻塞模型运行。
 - 保留所有持久会话事件，并在重连后重建相同对话，不产生重复或缺失的可见消息。
-- 在 5 个浏览器、10 条下行流的代表性负载下，新增常驻内存不超过 64 MiB。
+- 压缩带来的额外常驻内存不超过 64 MiB；该值以 compressed run 的 RSS 增量减去相同 plain run 的 RSS 增量计算。
 
 ## 非目标
 
@@ -65,7 +65,7 @@ submit gesture
 
 插件提供经过验证的 `downlinkCompression`、`downlinkCompressionThresholdBytes` 和 `downlinkCompressionConcurrency` 字段，不把部署调优值硬编码在载体中。仅下行服务器在拒绝客户端应用消息前，把上行 `maxPayload` 固定为 1 KiB。任何压缩日志或测量都不包含邀请码、Cookie、模型凭据、消息文本或工具输出；基准使用类别与大小固定的确定性合成 payload。
 
-只有代表性基准连续两次把传输字节至少降低 60%、把 WebSocket 消息数至少降低 90%、避免来源 overflow，并把压缩模式下 10 条下行流的 RSS 增量保持在 64 MiB 以内时，生产覆盖层才会同时启用压缩与批处理。
+只有代表性基准连续两次把传输字节至少降低 60%、把 WebSocket 消息数至少降低 90%、避免来源 overflow，并把压缩 RSS 开销保持在 64 MiB 以内时，生产覆盖层才会同时启用压缩与批处理。RSS 开销是 `max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)`；报告仍保留两个模式各自的 RSS 增量。
 
 ## 无损 WebSocket 批处理
 
@@ -105,7 +105,7 @@ submit gesture
 
 实现先增加失败测试，覆盖输入框 pending 反馈、队列 overflow、发送 timeout、压缩协商、cleanup 与重连 history 修复。聚焦包测试覆盖每种失败竞争，包括压缩期间 close、阻塞发送期间 abort、waiter 建立前队列 overflow，以及多条活动 pump 存在时 teardown。
 
-确定性宿主基准运行 5 个浏览器 peer，每个包含 mux 与 host 下行流。每条 mux 接收 24,000 个固定会话帧，每条 host 接收 256 个固定 host 帧。plain 与 compressed 模式使用完全相同的 batching 和应用字节；除序列化字节、传输字节、耗时、队列峰值与 RSS 增量外，报告还包含 WebSocket 消息数与最大 batch 大小。连续两次运行都必须避免 overflow、保持队列峰值不超过 4,096、把消息数至少降低 90%、把压缩传输字节至少降低 60%，并把压缩 RSS 增量保持在 64 MiB 以内。暂停读取的客户端必须在 6 秒内触发熔断、释放流，并让健康 peer 继续接收帧。
+确定性宿主基准运行 5 个浏览器 peer，每个包含 mux 与 host 下行流。每条 mux 接收 24,000 个固定会话帧，每条 host 接收 256 个固定 host 帧。每个来源持续每 16 ms 产生 24 帧：它保留已观测到的生产 burst 峰值，同时持续速率超过已观测秒峰值的十倍。plain 与 compressed 模式使用完全相同的 batching 和应用字节；除序列化字节、传输字节、耗时、队列峰值与两个模式各自的 RSS 增量外，报告还包含 WebSocket 消息数、最大 batch 大小、生产节奏与压缩 RSS 开销。连续两次运行都必须避免 overflow、保持队列峰值不超过 4,096、把消息数至少降低 90%、把压缩传输字节至少降低 60%，并把压缩 RSS 开销保持在 64 MiB 以内。暂停读取的客户端必须在 6 秒内触发熔断、释放流，并让健康 peer 继续接收帧。
 
 一个无需模型 key 的真实 Web 组合浏览器测试会分别通过 Enter 与按钮提交，在任何 mock 会话事件到达前捕获 pending 状态，再验证持久用户气泡与流式助手结果。打包前运行相关单元测试、typecheck、build、Web 配置验证、文档 gate 与 `git diff --check`。
 

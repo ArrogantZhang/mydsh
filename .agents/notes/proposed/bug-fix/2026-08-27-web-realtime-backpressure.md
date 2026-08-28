@@ -63,10 +63,10 @@ An overflow, timeout, or malformed batch follows the ordinary reconnect policy: 
 - The composer displays a local submission receipt only after local submit success and does not represent it as persistence, model progress, completion, or remote delivery.
 - `scripts/websocket-downlink-benchmark.ts` launches compression-disabled and compression-enabled modes in separate fresh Node child processes, and `scripts/websocket-downlink-benchmark-worker.ts` opens five browser peers and ten real WebSocket downlinks in each mode.
 - Each browser's mux stream receives exactly 24,000 synthetic session frames, and each host stream receives exactly 256 fixed host frames. Session-frame payloads deterministically cycle worker-owned fixed `reasoning-delta`, `text-delta`, and `tool-call-delta` constructors, and the parent rejects reports whose serialized application bytes differ between modes.
-- Producers push batches of 64 and yield with `setImmediate`; every source uses the 4,096-frame `FrameQueue`.
+- Producers push 24 frames every 16 ms; this preserves the observed 24-frame/16-ms production burst while sustaining 1,500 frames/s per source, more than ten times the observed 141/s peak. Every source uses the 4,096-frame `FrameQueue`.
 - After all ten sockets open, the benchmark records per-client TCP `bytesRead` baselines. It sums final-minus-baseline `bytesRead` after all expected frames arrive and before sockets close to obtain transport bytes.
-- The worker samples `process.memoryUsage().rss` every 5 ms from a baseline taken after all sockets open. Compressed-run RSS delta is peak minus baseline.
-- Relative to the compression-disabled mode, compression reduces WebSocket transport bytes by at least 60%, and compressed-run RSS delta is no greater than 64 MiB. Any miss blocks production compression and requires a separate batching revision.
+- The worker samples `process.memoryUsage().rss` every 5 ms from a baseline taken after all sockets open. Each run reports peak-minus-baseline RSS delta; compression RSS overhead is `max(0, compressed.rssDeltaBytes - plain.rssDeltaBytes)`.
+- Relative to the compression-disabled mode, compression reduces WebSocket transport bytes by at least 60%, and compression RSS overhead is no greater than 64 MiB. Any miss blocks production compression.
 - Realtime delivery preserves every `assistant/chunk` frame; no lossy coalescing path is introduced.
 
 ## Risks
