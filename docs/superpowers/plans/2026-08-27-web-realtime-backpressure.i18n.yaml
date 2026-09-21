@@ -2,5 +2,5 @@
 # side as of the last confirmed-consistent state. Both languages carry equal authority;
 # after editing either side, bring the other along and re-record with:
 #   pnpm run verify-translation-pairing --write docs/superpowers/plans/2026-08-27-web-realtime-backpressure.md
-2026-08-27-web-realtime-backpressure.md: 378e81fd1d75e0fe4ba11c0ab23ad48efbef4d66
-2026-08-27-web-realtime-backpressure.zh.md: badb12001698bdf7f201d553cc3bebc1c465e10b
+2026-08-27-web-realtime-backpressure.md: c079b05b9a296f1dd067239f452124356c8c8ee2
+2026-08-27-web-realtime-backpressure.zh.md: 43a619ffedcd83c6cfe1b7b1dd0bbb86c8d27069

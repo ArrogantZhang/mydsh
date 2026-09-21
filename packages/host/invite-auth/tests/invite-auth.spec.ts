@@ -16,15 +16,15 @@ import { Context } from '@deepseek-ai/cordis'
 import Loader from '@deepseek-ai/cordis-plugin-loader'
 import Include from '@deepseek-ai/cordis-plugin-include'
 import HttpServer from '@deepseek-ai/dsh-host-webserver'
-import InvariantRegistry from '@deepseek-ai/dsh-invariants'
+import * as Connection from '@deepseek-ai/dsh-client-connection'
+import LocalCredentials from '@deepseek-ai/dsh-credentials-local'
 import {
   createLaunchEnvironmentSnapshot,
   DSH_LAUNCH_ENVIRONMENT_KEY,
   type LaunchEnvironmentLayerInput,
 } from '@deepseek-ai/dsh-launch-environment'
 import * as InviteAuth from '../src/index.ts'
-import * as InviteAuthInvariant from '../src/invariant.ts'
-import { verifySessionToken } from '../src/token.ts'
+import { issueSessionToken, verifySessionToken } from '../src/token.ts'
 
 const INVITE_CODE = 'shared-code-123'
 const SESSION_SECRET = '0123456789abcdef0123456789abcdef'
@@ -54,7 +54,7 @@ interface Composition {
 interface LoadOptions {
   layers?: readonly LaunchEnvironmentLayerInput[]
   port?: number
-  config?: Readonly<Record<string, string | number>>
+  config?: Readonly<Record<string, string | number | boolean>>
   onFailure?: (error: unknown, logs: readonly string[]) => void
 }
 
@@ -90,6 +90,15 @@ async function loadComposition(options: LoadOptions = {}): Promise<Composition> 
     '  config:',
     "    host: '127.0.0.1'",
     `    port: ${String(options.port ?? 0)}`,
+    ...options.config?.bridgeBrowserAuth === true ? [
+      "- name: '@deepseek-ai/dsh-credentials-local'",
+      '  config:',
+      `    path: ${JSON.stringify(join(root, 'credentials.yaml'))}`,
+      '    watch: false',
+      "- name: '@deepseek-ai/dsh-client-connection'",
+      '  config:',
+      "    trustedHosts: ['dsh.example']",
+    ] : [],
     '- id: invite-auth',
     "  name: '@deepseek-ai/dsh-host-invite-auth'",
     ...configLines.length === 0 ? [] : ['  config:', ...configLines],
@@ -113,6 +122,8 @@ async function loadComposition(options: LoadOptions = {}): Promise<Composition> 
     context.loader.builtins.include = Include
     const modules = new Map<string, unknown>([
       ['@deepseek-ai/dsh-host-webserver', HttpServer],
+      ['@deepseek-ai/dsh-client-connection', Connection],
+      ['@deepseek-ai/dsh-credentials-local', LocalCredentials],
       ['@deepseek-ai/dsh-host-invite-auth', InviteAuth],
     ])
     context.loader.internal = {
@@ -127,6 +138,7 @@ async function loadComposition(options: LoadOptions = {}): Promise<Composition> 
       config: { path: pathToFileURL(configPath).href },
     })
     await context.loader.await()
+    for (const entry of context.loader.entries()) await entry.fiber?.await()
     composition.port = context.webServer.port
     return composition
   } catch (error) {
@@ -300,6 +312,101 @@ function expectSecurityHeaders(result: Result): void {
 }
 
 describe('real Loader invite-auth composition', () => {
+  it.each(['dsh.example:443', 'dsh.example:8443', 'dsh.example:80'])(
+    'binds exchanged and restored browser cookies to the forwarded Host %s', async (authority) => {
+      const composition = await loadComposition({ config: { bridgeBrowserAuth: true } })
+      const proxyHeaders = { 'x-forwarded-proto': 'https', 'x-forwarded-host': authority }
+      const accepted = await login(composition, INVITE_CODE, {
+        headers: { ...proxyHeaders, origin: `https://${authority}` },
+      })
+      expect(accepted.status).toBe(303)
+      const cookies = accepted.headers.getSetCookie()
+      const official = cookies.find(cookie => cookie.startsWith('dsh-auth-'))!
+      const invite = cookies.find(cookie => cookie.startsWith('__Host-dsh_invite='))!
+      expect(composition.context.connection.requestRejection({
+        headers: { host: authority, cookie: requestCookie(official) },
+      })).toBeUndefined()
+      const restored = await request(composition, '/__invite/login', {
+        headers: { ...proxyHeaders, cookie: requestCookie(invite) },
+      })
+      expect(restored.status).toBe(303)
+      expect(composition.context.connection.requestRejection({
+        headers: { host: authority, cookie: requestCookie(restored.headers.getSetCookie()[0]!) },
+      })).toBeUndefined()
+    },
+  )
+
+  it('exchanges only accepted invite access for official browser cookies and retains the invite guard', async () => {
+    const composition = await loadComposition({ config: { bridgeBrowserAuth: true } })
+    const connection = composition.context.connection
+    composition.context.effect(() => connection.fetch.register({
+      path: '/api/invite-probe', methods: ['GET'], requestBody: 'buffered',
+      fetch: async () => new Response('AUTHENTICATED'),
+    }))
+    const api = (cookie?: string): Promise<{ status: number; body: string }> => new Promise((resolve, reject) => {
+      const outgoing = sendHttpRequest({
+        host: '127.0.0.1', port: composition.port, path: '/api/invite-probe',
+        headers: { host: 'dsh.example', ...cookie === undefined ? {} : { cookie } },
+      }, (incoming) => {
+        let body = ''
+        incoming.setEncoding('utf8')
+        incoming.on('data', (chunk) => { body += String(chunk) })
+        incoming.on('end', () => { resolve({ status: incoming.statusCode!, body }) })
+        incoming.on('error', reject)
+      })
+      outgoing.on('error', reject)
+      outgoing.end()
+    })
+    expect((await api()).status).toBe(401)
+    const wrong = await login(composition, 'wrong-invite')
+    expect(wrong.status).toBe(401)
+    expect(wrong.headers.getSetCookie()).toEqual([])
+    const accepted = await login(composition, INVITE_CODE, { next: '/sessions' })
+    expect(accepted.status).toBe(303)
+    expect(accepted.headers.get('location')).toBe('/sessions')
+    const cookies = accepted.headers.getSetCookie()
+    expect(cookies).toHaveLength(2)
+    const invite = cookies.find(cookie => cookie.startsWith('__Host-dsh_invite='))!
+    const official = cookies.find(cookie => cookie.startsWith('dsh-auth-'))!
+    expect(official).toContain('; Secure')
+    expect((await api(requestCookie(invite))).status).toBe(401)
+    expect(await api(requestCookie(official))).toMatchObject({ status: 200, body: 'AUTHENTICATED' })
+    const refresh = await request(composition, '/__invite/login?next=%2Fsessions', {
+      headers: { cookie: requestCookie(invite), 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example' },
+    })
+    expect(refresh.status).toBe(303)
+    expect(refresh.headers.getSetCookie()).toHaveLength(1)
+    expect((await api(requestCookie(refresh.headers.getSetCookie()[0]!))).status).toBe(200)
+    const invalid = await request(composition, '/__invite/login', {
+      headers: { cookie: '__Host-dsh_invite=invalid', 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example' },
+    })
+    expect(invalid.headers.getSetCookie()).toEqual([])
+    const missingProxy = await request(composition, '/__invite/login', { headers: { cookie: requestCookie(invite) } })
+    expect(missingProxy.status).toBe(403)
+    expect(missingProxy.headers.getSetCookie()).toEqual([])
+    const logout = await request(composition, '/__invite/logout', {
+      method: 'POST', headers: { origin: PUBLIC_ORIGIN, 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example' },
+    })
+    expect(logout.status).toBe(303)
+    expect(logout.headers.get('set-cookie')).toContain('Max-Age=0')
+    expect((await request(composition, '/__invite/check', { headers: { cookie: requestCookie(official) } })).status).toBe(401)
+    const expired = issueSessionToken(SESSION_SECRET, 60, Date.now() - 61_000)
+    const expiredCookie = `__Host-dsh_invite=${expired}; ${requestCookie(official)}`
+    expect((await request(composition, '/__invite/check', { headers: { cookie: expiredCookie } })).status).toBe(401)
+    const expiredLogin = await request(composition, '/__invite/login', { headers: {
+      cookie: expiredCookie, 'x-forwarded-proto': 'https', 'x-forwarded-host': 'dsh.example',
+    } })
+    expect(expiredLogin.status).toBe(200)
+    expect(expiredLogin.headers.getSetCookie()).toEqual([])
+    const processToken = new URL(connection.authenticatedUrl(PUBLIC_ORIGIN)).searchParams.get('token')!
+    expect([accepted.body, accepted.headers.get('location'), ...composition.logs].join('\n')).not.toContain(processToken)
+    const connectionEntry = [...composition.context.loader.entries()]
+      .find(entry => entry.options.name === '@deepseek-ai/dsh-client-connection')!
+    await connectionEntry.fiber!.dispose()
+    expect(composition.context.get('inviteAuthReadiness')).toBeUndefined()
+    expect((await request(composition, '/__invite/login')).status).toBe(404)
+  })
+
   it('withholds the fallback until the delayed invite route is ready', { timeout: 60_000 }, async () => {
     const root = await mkdtemp(join(tmpdir(), 'dsh-invite-auth-readiness-'))
     const configPath = join(root, 'cordis.yml')
@@ -729,6 +836,7 @@ describe('real Loader invite-auth composition', () => {
     expect(InviteAuth.name).toBe('invite-auth')
     expect(InviteAuth.inject).toEqual(['webServer'])
     expect(InviteAuth.Config({})).toEqual({
+      bridgeBrowserAuth: false,
       inviteCodeEnv: 'DSH_INVITE_CODE_SECRET',
       sessionSecretEnv: 'DSH_INVITE_SESSION_SECRET',
       sessionTtlSeconds: 2_592_000,
@@ -773,13 +881,4 @@ describe('real Loader invite-auth composition', () => {
     expect(composition.context.get('inviteAuthReadiness')).toBeUndefined()
   })
 
-  it('registers and disposes the package invariant companion', async () => {
-    const context = new Context()
-    await context.plugin(InvariantRegistry, { enabled: true })
-    const fiber = context.plugin(InviteAuthInvariant)
-    await expect(fiber.await()).resolves.toBeDefined()
-    await fiber.dispose()
-    await expect(context.plugin(InviteAuthInvariant).await()).resolves.toBeDefined()
-    await context.fiber.dispose()
-  })
 })

@@ -8,7 +8,7 @@
 
 使用一台全新的 Linux amd64 Ubuntu 22.04 或 24.04 ECS 实例，并准备公网地址、可执行 sudo 的 SSH 账户，以及 A 或 AAAA 记录指向该实例的全小写 DNS 主机名。bootstrap 会在获取锁或执行任何网络和文件系统变更前检查 `dpkg --print-architecture`，并拒绝 `amd64` 之外的架构。在阿里云安全组中，仅允许管理员地址访问 TCP 22，并允许预期客户端访问 TCP 80 和 443。绝不能开放 TCP 3080：访问该端口会绕过 Caddy 认证。
 
-宿主 bootstrap 只从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy；它不安装 Git。打包需要开发机安装 Git 和 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
+宿主 bootstrap 安装 bubblewrap，并从 [NodeSource 官方软件源](https://github.com/nodesource/distributions)安装 Node.js 24 运行时，并从 [Caddy 官方稳定版 Debian 软件源](https://caddyserver.com/docs/install#debian-ubuntu-raspbian)安装 Caddy；它不安装 Git。打包需要开发机安装 Git 和 Docker，并在官方 Node 24 Linux 镜像内验证 pnpm 11.7.0 的固定 SHA-512 integrity。脚本要求 NodeSource 指纹为 `6F71F525282841EEDAF851B42F59B5F99B1BE0B4`、Caddy 指纹为 `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`；已签名软件源中的补丁版本可能前进。在长期运行的主机上执行 root 脚本前，请先检查这两个软件源的操作说明。
 
 打包编排必须在 Linux 或 WSL 上运行，并提供 Bash、Python 3、GNU coreutils（`realpath`、`stat`、`sync`、`timeout` 和 `mktemp`）、GNU tar、Git 与 Docker。不支持单独使用 Windows PowerShell 或 macOS。Docker 只隔离构建，不能取代用于验证并原子发布 artifact set 的 Linux/GNU 宿主工具。
 
@@ -16,7 +16,7 @@
 
 ## 准备并上传 release
 
-在开发机的仓库根目录运行以下命令。打包脚本本身来自选定 ref，且只读取该 ref 的 Git 对象。脚本固定使用 `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`，把容器限制为 4 个 CPU、8 GiB 内存、1,024 个进程和 45 分钟，以全新状态安装依赖，在构建前运行焦点测试和两次 benchmark，完成构建后再验证解析后的配置。在这些焦点测试中，产物构建器会运行精确选择的部署策略测试；依赖 root 和 systemd 工具的部署 helper 集成测试仍由 Linux CI 运行，不进入产物构建器。容器的网络和磁盘使用量不受限制。Docker 是强制依赖，不存在宿主构建回退。
+在开发机的仓库根目录运行以下命令。打包脚本本身来自选定 ref，且只读取该 ref 的 Git 对象。脚本固定使用 `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`，把容器限制为 4 个 CPU、8 GiB 内存、1,024 个进程和 45 分钟，以全新状态安装依赖，构建当前平台 flock 模块，并在构建前运行传输和认证焦点测试，完成构建后再验证解析后的配置。归档不包含 Git 元数据；`DSH_CLIENT_COMMIT_HASH` 将已审查的提交传给上游构建元数据解析器。在这些焦点测试中，产物构建器会运行精确选择的部署策略测试；依赖 root 和 systemd 工具的部署 helper 集成测试仍由 Linux CI 运行，不进入产物构建器。容器的网络和磁盘使用量不受限制。Docker 是强制依赖，不存在宿主构建回退。
 
 ```bash
 set -euo pipefail
@@ -57,7 +57,7 @@ ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo bash ./bootstrap-host.sh dsh.exampl
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
-远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。认证登录和主页请求成功后，helper 会使用同一个 root-private cookie jar，要求 `/api/events.mux` 与 `/api/events.host` 都完成真实的 `101` upgrade；每条连接都必须保持打开，直到两秒探测超时。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
+远程命令只在成功后删除上传目录。激活只改变不可变 release 链接和服务启用状态；已安装的 unit 与 Caddy 文件保持不变。认证登录和主页请求成功后，helper 会使用同一个 root-private cookie jar，要求 `/api/remote.mux` 完成真实的 `101` upgrade；连接必须保持打开，直到两秒探测超时。更新失败时，它会保留确切的 artifact set，恢复上一个 `current` 目标和启用状态并将其重启；首次部署失败时，它会保留上传目录和失败的不可变 release，只删除新建且已验证的符号链接，禁用并停止 `mydsh`，并保留任何未完成的恢复 journal。
 
 ## 验证 HTTPS 和登录
 
@@ -76,7 +76,7 @@ openssl s_client -connect dsh.example.com:443 -servername dsh.example.com </dev/
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。关闭全部浏览器窗口，重新打开站点，并确认 30 天 cookie 仍能认证浏览器；随后退出登录，并确认登录页再次出现。以下服务端冒烟测试会检查相同的验收路径，同时不打印密钥、响应正文、响应头或 cookie 值：未认证 HTML 返回 `303`，未认证 API 流量返回 `401`，登录返回 `303`，已认证主页返回 `200`，两个实时 endpoint 都以 `101` 完成 upgrade 并保持打开直至探测超时，新客户端进程复用有效期至少还剩 29 天的 cookie，篡改会被拒绝，退出登录后访问也会再次被拒绝。
+打开 `https://dsh.example.com`，输入该邀请码，并确认 DSH 页面加载成功。关闭全部浏览器窗口，重新打开站点，并确认 30 天 cookie 仍能认证浏览器；随后退出登录，并确认登录页再次出现。以下服务端冒烟测试会检查相同的验收路径，同时不打印密钥、响应正文、响应头或 cookie 值：未认证 HTML 返回 `303`，未认证 API 流量返回 `401`，登录返回 `303`，已认证主页返回 `200`，Remote endpoint 以 `101` 完成 upgrade 并保持打开直至探测超时，新客户端进程复用有效期至少还剩 29 天的 cookie，篡改会被拒绝，退出登录后访问也会再次被拒绝。
 
 ```bash
 sudo bash -c '
@@ -97,14 +97,14 @@ websocket_acceptance() {
 }
 home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
 [[ $home_unauth_status == 303 ]]
-api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
+api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/remote.mux")
 [[ $api_unauth_status == 401 ]]
 post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
 [[ $post_status == 303 ]]
+awk -F "\t" '\''$6 == "__Host-dsh_invite" { invite=1 } $6 ~ /^dsh-auth-/ { official=1 } END { exit !(invite && official) }'\'' "$cookie_jar"
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
-websocket_acceptance /api/events.mux
-websocket_acceptance /api/events.host
+websocket_acceptance /api/remote.mux
 cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
 [[ $cookie_expiry =~ ^[0-9]+$ ]]
 (( cookie_expiry >= $(date +%s) + 2505600 ))
@@ -119,19 +119,35 @@ printf "Authenticated smoke passed.\n"
 '
 ```
 
-## WebSocket 下行限制
+## 浏览器认证与 Remote 传输
 
-生产 overlay 会在每个 WebSocket 下行 batch 达到 64 帧、256 KiB 序列化数据，或保留第一帧满 16 ms 时进行 flush，以最先达到的条件为准。压缩从 0 字节起生效，进程级并发为 4；更改该并发值需要重启 DSH 进程。
+生产 overlay 启用 `bridgeBrowserAuth`：邀请码登录同时签发邀请码 cookie 和官方绑定 authority 的浏览器 cookie。Caddy 在转发包括 `/api/remote.mux` 在内的所有受保护请求前检查邀请码 cookie；Connection 检查自己的浏览器 cookie 和 Host/Origin。部署禁用 URL 打印，防止官方启动 token 进入服务日志。前端等待 invite-auth 就绪；Connection 读取显式启动可信主机配置，避免依赖循环。
 
-每个 socket 的缓冲字节熔断上限为 1 MiB，发送超时为 5 秒。超过任一限制都会关闭连接；浏览器进入 `reconnecting`，并在重连后重建持久会话状态。反复断开连接时应检查网络、代理和慢客户端。不要用无界缓冲区取代该熔断上限。
+部署使用上游 Gateway WebSocket 传输，不添加批处理或压缩配置。Gateway 默认每 2 秒发送 Ping 帧，并在连续两次心跳未收到回复后终止连接。curl 探测证明认证和传输保持打开，不证明 Remote 流成功传递；应用验收应完成[配置 Kimi](#configure-kimi)中的浏览器对话检查。
 
-## 配置 Kimi
+## 配置 Kimi {#configure-kimi}
 
 在 Web UI 中打开 **Settings → Models**，添加自定义 OpenAI-compatible 提供方，然后输入 Kimi 签发的 API base URL、模型标识符和 API key。按照最新的 [Kimi API 文档](https://platform.moonshot.cn/docs/guide/start-using-kimi-api)填写账户对应的值，保存提供方，选择其模型，并发送一条测试对话。
 
 将模型 key 保存在 DSH 凭据存储中。绝不能将其加入此目录、release artifact、`/etc/mydsh/public.env`、shell tracing、部署输出或仓库日志。
 
 ## 升级和回滚
+
+首次从旧 `events.mux`/`events.host` 部署升级前，应安排 root 控制的维护：持有 `/run/mydsh-deploy.lock`，停止 `mydsh`，保留 root 所有的已安装 helper 备份，再通过相邻临时文件和原子重命名，只将 `/usr/local/sbin/mydsh-deploy-release` 替换为已审查的 helper，权限为 `0755`。不要重新运行 bootstrap，也不要从未经审查的 release 复制 helper 代码。先验证并保留已知可用的旧 release，再使用新 helper 重启它；unit、Caddy 文件和 journal 格式保持不变。旧 helper 无法验收新的 Remote 传输。新 helper 根据活动不可变 release 的 `.mydsh-transport` 选择探测：`remote-mux-v1` 要求两种登录 cookie 和 `/api/remote.mux`；缺少标记时选择两个旧端点和邀请码 cookie。未知标记或符号链接标记会使验证失败。Remote 探测失败时不会重试旧端点，因此旧版回滚仍需明确选择。
+
+全新 bootstrap 安装 `bubblewrap`，并要求在服务用户及加固设置下通过实际沙箱探测。现有宿主升级前，应从宿主签名的 Ubuntu 仓库安装 `bubblewrap`，并运行下面的相同探测。非零退出码阻止部署；应审查内核和用户命名空间限制，不能绕过沙箱约束。产物的原生构建提供当前平台 flock 模块，不提供 Landlock 回退。
+
+```bash
+sudo apt-get update
+sudo apt-get install -y bubblewrap
+sudo systemd-run --quiet --wait --pipe --collect \
+  --property=User=mydsh --property=Group=mydsh \
+  --property=NoNewPrivileges=true --property=PrivateTmp=true \
+  --property=ProtectSystem=strict --property=ProtectHome=true \
+  --property='ReadWritePaths=/var/lib/mydsh /srv/mydsh/workspace' \
+  /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent \
+  --tmpfs /tmp --bind /srv/mydsh/workspace /srv/mydsh/workspace -- /usr/bin/true
+```
 
 升级时，为新的已评审 ref 运行 `package-release.sh`，创建新的远程 staging 目录，上传一个包含 tarball 和 checksum 的原子 artifact-set 目录，再把该目录作为唯一参数调用 `/usr/local/sbin/mydsh-deploy-release`。升级时不要上传或替换 bootstrap 文件。每个完整 commit 在 `/opt/mydsh/releases` 下占用一个目录；helper 拒绝覆盖已有 release，`/opt/mydsh/current` 指向当前使用的 release。`/var/lib/mydsh` 和 `/srv/mydsh/workspace` 位于 release 之外，不随代码回滚。
 

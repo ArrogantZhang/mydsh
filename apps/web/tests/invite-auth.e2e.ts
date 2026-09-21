@@ -91,7 +91,7 @@ describe('web e2e: invite authentication login', () => {
     page = await browser.newPage({ viewport: { width: 1440, height: 960 }, locale: ZH_BROWSER_LOCALE })
     const browserBaseUrl = scaffold.baseUrl
     const publicAuthority = new URL(browserBaseUrl).host
-    await page.route(`${browserBaseUrl}/**`, async (route) => {
+    await page.route(`${browserBaseUrl}/__invite/**`, async (route) => {
       const request = route.request()
       const headers = await request.allHeaders()
       if (request.method() === 'POST' && new URL(request.url()).pathname === '/__invite/login') {
@@ -99,6 +99,7 @@ describe('web e2e: invite authentication login', () => {
       }
       if (headers.origin === browserBaseUrl) headers.origin = `https://${publicAuthority}`
       const response = await route.fetch({
+        maxRedirects: 0,
         headers: {
           ...headers,
           'x-forwarded-host': publicAuthority,
@@ -112,7 +113,11 @@ describe('web e2e: invite authentication login', () => {
   }, 120_000)
 
   afterAll(async () => {
-    await closeBrowserAndScaffold(browser, scaffold)
+    try {
+      await page?.unrouteAll({ behavior: 'wait' })
+    } finally {
+      await closeBrowserAndScaffold(browser, scaffold)
+    }
   })
 
   it('serves the static Chinese invite-code login form without exposing its boot secrets', async () => {
@@ -185,6 +190,7 @@ describe('web e2e: invite authentication login', () => {
 
     expect(loginPostOrigin).toBe(scaffold.baseUrl)
     expect(response.status()).toBe(401)
+    expect((await page.context().cookies()).filter(cookie => cookie.name.startsWith('dsh-auth-'))).toEqual([])
     expect(response.headers()['referrer-policy']).toBe('same-origin')
     expect(await page.getByRole('alert').textContent()).toBe('邀请码无效，请重试。')
     expect(await page.locator('input[type="hidden"][name="next"]').inputValue()).toBe('/sessions')
@@ -199,6 +205,27 @@ describe('web e2e: invite authentication login', () => {
     expect(tripwire.warnings).toEqual([])
     expect(tripwire.pageErrors).toEqual([])
     await compareOrRefreshGolden(INVALID_EXPECTED, aria, MODE)
+  }, 60_000)
+
+  it('opens the authenticated Web app with both cookies after a correct invite', async () => {
+    if (scaffold === undefined || page === undefined) throw new Error('invite-auth browser setup did not finish')
+    await page.goto(`${scaffold.baseUrl}/__invite/login`, { waitUntil: 'load' })
+    await page.getByLabel('邀请码', { exact: true }).fill(INVITE_SENTINEL)
+    const loginResponse = page.waitForResponse(response => response.request().method() === 'POST'
+      && new URL(response.url()).pathname === '/__invite/login')
+    await page.getByRole('button', { name: '进入', exact: true }).click()
+    const response = await loginResponse
+    expect(response.status()).toBe(303)
+    await page.waitForURL(`${scaffold.baseUrl}/`)
+    const cookies = await page.context().cookies()
+    expect(cookies.some(cookie => cookie.name === '__Host-dsh_invite')).toBe(true)
+    expect(cookies.some(cookie => cookie.name.startsWith('dsh-auth-'))).toBe(true)
+    expect(new URL(page.url()).searchParams.has('token')).toBe(false)
+    const apiStatus = await page.evaluate(async () => (await fetch('/api/invite-missing')).status)
+    expect(apiStatus).toBe(404)
+    const processToken = new URL(scaffold.authenticatedUrl).searchParams.get('token')!
+    expect(await page.content()).not.toContain(processToken)
+    expect(consoleMessages.join('\n')).not.toContain(processToken)
   }, 60_000)
 
   it('keeps its snapshot inventory closed', async () => {

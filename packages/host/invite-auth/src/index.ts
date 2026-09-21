@@ -9,6 +9,7 @@ import type { IncomingMessage, OutgoingHttpHeaders, ServerResponse } from 'node:
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import type {} from '@deepseek-ai/dsh-host-webserver'
+import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { HttpError, readUrlEncodedForm, redirect, writeEmpty, writeHtml } from './http.ts'
 import { renderLoginPage } from './page.ts'
@@ -60,6 +61,8 @@ const MAX_SESSION_TTL_SECONDS = 31_536_000
 
 /** Invite-authentication policy and launch-secret references. */
 export interface Config {
+  /** Exchange validated invite access for an official Connection browser cookie. Requires Connection. */
+  bridgeBrowserAuth?: boolean
   /** Uppercase `DSH_*` inherited process-environment variable containing the invite code. */
   inviteCodeEnv?: string
   /** Uppercase `DSH_*` inherited process-environment variable containing the session signing secret. */
@@ -80,6 +83,7 @@ const ENVIRONMENT_REFERENCE = /^DSH_[A-Z0-9_]+$/
 
 /** Validated invite-authentication configuration with deployment defaults. */
 export const Config: z<Config> = z.object({
+  bridgeBrowserAuth: z.boolean().default(false),
   inviteCodeEnv: z.string().pattern(ENVIRONMENT_REFERENCE).default('DSH_INVITE_CODE_SECRET'),
   sessionSecretEnv: z.string().pattern(ENVIRONMENT_REFERENCE).default('DSH_INVITE_SESSION_SECRET'),
   sessionTtlSeconds: z.number().step(1).min(60).max(MAX_SESSION_TTL_SECONDS).default(2_592_000),
@@ -91,6 +95,7 @@ export const Config: z<Config> = z.object({
 
 /** Runtime configuration after schema defaults and the fixed session protocol cap are applied. */
 interface ResolvedConfig {
+  bridgeBrowserAuth: boolean
   inviteCodeEnv: string
   sessionSecretEnv: string
   sessionTtlSeconds: number
@@ -101,6 +106,7 @@ interface ResolvedConfig {
 }
 
 interface Runtime {
+  connection: HostConnectionHandle | undefined
   config: ResolvedConfig
   inviteCode: string
   sessionSecret: string
@@ -169,6 +175,32 @@ function clearedSessionCookie(): string {
   return `${SESSION_COOKIE_NAME}=; Path=/; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT; Secure; HttpOnly; SameSite=Lax`
 }
 
+/** Exchange an accepted invite for Connection's cookie without exposing its process token to HTTP. */
+function browserCookies(req: IncomingMessage, runtime: Runtime): string[] {
+  if (runtime.connection === undefined) return []
+  const proto = singleHeader(req, 'x-forwarded-proto')
+  const host = singleHeader(req, 'x-forwarded-host')
+  if (proto.ambiguous || host.ambiguous || host.value === undefined ||
+    !validForwardedOrigin(`https://${host.value}`, proto.value, host.value)) {
+    throw new HttpError(403, 'origin rejected', true)
+  }
+  const target = new URL(runtime.connection.authenticatedUrl(`https://${host.value}`))
+  let cookie: string | undefined
+  runtime.connection.authorizeIndex({
+    method: 'GET',
+    url: `${target.pathname}${target.search}`,
+    // Connection canonicalizes Host independently of the external HTTPS scheme.
+    headers: { host: host.value },
+  }, {
+    writeHead(status, headers) {
+      if (status === 303) cookie = headers?.['set-cookie']
+    },
+    end() {},
+  })
+  if (cookie === undefined) throw new Error('invite-auth: Connection browser-cookie exchange failed')
+  return [`${cookie}; Secure`]
+}
+
 /** Require the three proxy headers that prove a same-origin HTTPS form request. */
 function requireValidOrigin(req: IncomingMessage): void {
   const origin = singleHeader(req, 'origin')
@@ -230,7 +262,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
   if (url.pathname === '/__invite/login' && req.method === 'GET') {
     const next = safeNextPath(url.searchParams.get('next'))
     if (validSession(req, runtime.sessionSecret)) {
-      respondRedirect(req, res, next)
+      respondRedirect(req, res, next, { 'set-cookie': browserCookies(req, runtime) })
       return
     }
     respondHtml(req, res, 200, renderLoginPage(next, false))
@@ -259,7 +291,9 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
     }
     runtime.limiter.clear(address)
     const token = issueSessionToken(runtime.sessionSecret, runtime.config.sessionTtlSeconds)
-    respondRedirect(req, res, next, { 'set-cookie': sessionCookie(token, runtime.config.sessionTtlSeconds) })
+    respondRedirect(req, res, next, {
+      'set-cookie': [sessionCookie(token, runtime.config.sessionTtlSeconds), ...browserCookies(req, runtime)],
+    })
     return
   }
 
@@ -339,6 +373,7 @@ export function apply(ctx: Context, config: Config): void {
     'bytes',
   )
   const runtime: Runtime = {
+    connection: undefined,
     config: resolved,
     inviteCode,
     sessionSecret,
@@ -348,23 +383,31 @@ export function apply(ctx: Context, config: Config): void {
       maxEntries: resolved.maxTrackedAddresses,
     }),
   }
-  ctx.effect(() => ctx.webServer.register({
-    kind: 'prefix',
-    path: '/__invite',
-    handler: async (req, res) => {
-      try {
-        await dispatch(req, res, runtime)
-      } catch (error) {
-        if (!(error instanceof HttpError)) throw error
-        respondEmpty(
-          req,
-          res,
-          error.status,
-          {},
-          error.closeConnection,
-        )
-      }
-    },
-  }), 'invite-auth: HTTP routes')
-  ctx.provide('inviteAuthReadiness', INVITE_AUTH_READINESS)
+  const register = (owner: Context, connection: HostConnectionHandle | undefined): void => {
+    const activeRuntime = { ...runtime, connection }
+    owner.effect(() => owner.webServer.register({
+      kind: 'prefix',
+      path: '/__invite',
+      handler: async (req, res) => {
+        try {
+          await dispatch(req, res, activeRuntime)
+        } catch (error) {
+          if (!(error instanceof HttpError)) throw error
+          respondEmpty(
+            req,
+            res,
+            error.status,
+            {},
+            error.closeConnection,
+          )
+        }
+      },
+    }), 'invite-auth: HTTP routes')
+    owner.provide('inviteAuthReadiness', INVITE_AUTH_READINESS)
+  }
+  if (resolved.bridgeBrowserAuth) {
+    ctx.inject(['connection'], (owner) => { register(owner, owner.connection) })
+  } else {
+    register(ctx, undefined)
+  }
 }

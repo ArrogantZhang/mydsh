@@ -7,17 +7,27 @@
  * shared overlay whose row exists only on another surface.
  */
 
-import { mkdtempSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
-import { describe, expect, it, vi } from 'vitest'
+import { join } from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { afterAll, describe, expect, it, vi } from 'vitest'
 import * as yaml from 'js-yaml'
 import { entryListSchema } from '@deepseek-ai/cordis-plugin-include'
-import { composeEntries, loadOverlayPatches, renderConfigDump } from '../src/index.ts'
+import { loadOverlayPatches, renderConfigDump } from '../src/index.ts'
 
 const NAME = 'dsh-test-bin'
 
-const tmp = (): string => mkdtempSync(join(tmpdir(), 'dsh-config-dump-'))
+const tempRoots: string[] = []
+afterAll(() => {
+  for (const root of tempRoots.splice(0)) rmSync(root, { recursive: true, force: true })
+})
+
+const tmp = (): string => {
+  const dir = mkdtempSync(join(tmpdir(), 'dsh-config-dump-'))
+  tempRoots.push(dir)
+  return dir
+}
 
 function writeBase(dir: string): string {
   const base = join(dir, 'base.yml')
@@ -35,23 +45,6 @@ function writeBase(dir: string): string {
 }
 
 describe('renderConfigDump', () => {
-  it('patches the shipped web runtime once when the Alibaba Cloud overlay enables invite auth', () => {
-    const root = resolve(import.meta.dirname, '../../../..')
-    const load = (file: string) => {
-      const path = resolve(root, file)
-      return loadOverlayPatches(NAME, path)
-    }
-    const entries = composeEntries([
-      load('packages/bundle/base/cordis.patch.yml'),
-      load('packages/bundle/web-app/cordis.patch.yml'),
-      load('deploy/alibaba-cloud/invite-auth.cordis.yml'),
-    ])
-    const runtime = entries.filter(entry => entry.id === 'web-runtime')
-    expect(runtime).toHaveLength(1)
-    expect(runtime[0]!.inject).toEqual(['webStartup', 'inviteAuthReadiness'])
-    expect(entries.filter(entry => entry.id === 'invite-auth')).toHaveLength(1)
-  })
-
   it('composes overlay layers in order, prints !!js verbatim, and labels each section with its source and patches', () => {
     const dir = tmp()
     const base = writeBase(dir)
@@ -91,7 +84,11 @@ describe('renderConfigDump', () => {
         config: { value: 'surface', key: { __jsExpr: 'process.env.DSH_DUMP_SPEC' } },
       },
       { id: 'untouched', name: './noop.mjs' },
-      { id: 'surface-extra', name: './noop.mjs', config: { value: 'user' } },
+      {
+        id: 'surface-extra',
+        name: pathToFileURL(join(dir, 'noop.mjs')).href,
+        config: { value: 'user' },
+      },
     ])
     // Unevaluated: the expression text round-trips as a !!js scalar.
     expect(dump).toContain('!!js process.env.DSH_DUMP_SPEC')

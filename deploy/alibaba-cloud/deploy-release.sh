@@ -666,6 +666,7 @@ validate_release_manifest() {
 validate_required_release_outputs() {
   local release_root=$1
   local path
+  release_transport_protocol "$release_root" >/dev/null || return 1
   for path in \
     apps/cli/lib/bin.js \
     apps/web/dist/index.html \
@@ -973,30 +974,64 @@ sync_activated_state() {
   done
 }
 
+release_transport_protocol() {
+  local release=${1:-}
+  local marker
+  [[ -n "$release" ]] || release=$(current_release) || return 1
+  [[ -d "$release" && ! -L "$release" ]] || return 1
+  marker="$release/.mydsh-transport"
+  if [[ ! -e "$marker" && ! -L "$marker" ]]; then
+    printf 'legacy-events-v1\n'
+    return 0
+  fi
+  [[ -f "$marker" && ! -L "$marker" && $(stat -c %s "$marker") -eq 14 ]] || return 1
+  [[ $(<"$marker") == remote-mux-v1 ]] || return 1
+  printf 'remote-mux-v1\n'
+}
+
 public_acceptance() {
   local base="https://$DSH_PUBLIC_HOST"
   local resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
   local html_status
   local api_status
+  local protocol
+  local api_path
+  protocol=$(release_transport_protocol) || return 1
+  case "$protocol" in
+    remote-mux-v1) api_path=/api/remote.mux ;;
+    legacy-events-v1) api_path=/api/events.mux ;;
+    *) return 1 ;;
+  esac
   html_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" --header 'Accept: text/html' "$base/") || return 1
   [[ $html_status == 303 ]] || return 1
-  api_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" "$base/api/events.mux") || return 1
+  api_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" "$base$api_path") || return 1
   [[ $api_status == 401 ]] || return 1
 }
 
 authenticated_websocket_acceptance() (
   local cookie_jar=$1
+  local protocol=${2:-remote-mux-v1}
   local base="https://$DSH_PUBLIC_HOST"
   local resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
-  local path
   local websocket_status
   local curl_status
-  for path in /api/events.mux /api/events.host; do
+  local path
+  local paths=()
+  case "$protocol" in
+    remote-mux-v1) paths=(/api/remote.mux) ;;
+    legacy-events-v1) paths=(/api/events.mux /api/events.host) ;;
+    *) return 1 ;;
+  esac
+  for path in "${paths[@]}"; do
     curl_status=0
     websocket_status=$(curl --silent --http1.1 --output /dev/null --write-out '%{http_code}' --max-time 2 --resolve "$resolve" --cookie "$cookie_jar" --header "Origin: $base" --header 'Connection: Upgrade' --header 'Upgrade: websocket' --header 'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' --header 'Sec-WebSocket-Version: 13' "$base$path") || curl_status=$?
     [[ $websocket_status == 101 && $curl_status -eq 28 ]] || return 1
   done
 )
+
+validate_login_cookies() {
+  awk -F '\t' '$6 == "__Host-dsh_invite" { invite=1 } $6 ~ /^dsh-auth-/ { official=1 } END { exit !(invite && official) }' "$1"
+}
 
 authenticated_acceptance() (
   local cookie_jar
@@ -1004,6 +1039,8 @@ authenticated_acceptance() (
   local resolve="$DSH_PUBLIC_HOST:443:127.0.0.1"
   local post_status
   local get_status
+  local protocol
+  protocol=$(release_transport_protocol) || return 1
 
   # Bootstrap owns this dynamically selected root-controlled file.
   # shellcheck disable=SC1090
@@ -1015,9 +1052,10 @@ authenticated_acceptance() (
     return 1
   fi
   [[ $post_status == 303 ]] || return 1
+  if [[ $protocol == remote-mux-v1 ]]; then validate_login_cookies "$cookie_jar" || return 1; fi
   get_status=$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/") || get_status=000
   [[ $get_status == 200 ]] || return 1
-  authenticated_websocket_acceptance "$cookie_jar"
+  authenticated_websocket_acceptance "$cookie_jar" "$protocol"
 )
 
 remove_first_link() {

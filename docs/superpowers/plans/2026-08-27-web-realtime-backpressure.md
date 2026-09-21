@@ -2,6 +2,8 @@
 
 English | [中文](2026-08-27-web-realtime-backpressure.zh.md)
 
+> Historical implementation plan; do not execute against the current version. See the [upstream integration record](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.md) for the current implementation and retired components.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make Web prompt submission visibly immediate and keep live conversations responsive and memory-bounded for two to five simultaneous public browsers.
@@ -29,9 +31,7 @@ English | [中文](2026-08-27-web-realtime-backpressure.zh.md)
 
 ### WebSocket downlinks
 
-- `packages/client/connection/src/websocket-downlink.ts` — compression negotiation, serialized send deadline, buffered-byte fuse, and idempotent cleanup.
 - `packages/client/connection/src/index.ts` — validates deployment tunables and passes resolved values to the carrier.
-- `packages/client/connection/tests/websocket-downlink.host.spec.ts` — negotiation, slow reader, timeout, peer isolation, and teardown.
 - `packages/client/connection/tests/node-half.host.spec.ts` — config defaults, invalid ranges, and plugin wiring.
 - `packages/client/connection/README.md`, `README.zh.md`, `README.i18n.yaml` — downlink configuration and recovery behavior.
 
@@ -285,9 +285,7 @@ git commit -m "fix(apiproxy): bound event stream queues"
 
 **Files:**
 
-- Modify: `packages/client/connection/src/websocket-downlink.ts`
 - Modify: `packages/client/connection/src/index.ts`
-- Modify: `packages/client/connection/tests/websocket-downlink.host.spec.ts`
 - Modify: `packages/client/connection/tests/node-half.host.spec.ts`
 - Modify: `packages/client/connection/README.md`
 - Modify: `packages/client/connection/README.zh.md`
@@ -327,7 +325,7 @@ const downlinks = new WebSocketDownlinks(api(muxSource, idle), {
 
 - [ ] **Step 3: Run the focused tests and verify they fail**
 
-Run: `pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts`
+Run: `pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts`
 
 Expected: FAIL because the new config fields/options and fuse behavior are absent.
 
@@ -379,7 +377,7 @@ Add these fields to `ConnectionConfig` and `Config`, using the defaults above. V
 
 - [ ] **Step 7: Run focused tests and document the carrier**
 
-Run: `pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts packages/client/connection/tests/connection.client.spec.ts`
+Run: `pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/connection.client.spec.ts`
 
 Expected: PASS, including the unchanged reconnect-generation suite.
 
@@ -748,7 +746,7 @@ pnpm run verify-translation-pairing --write docs/config-catalog.md
 Run these once, in order:
 
 ```bash
-pnpm exec vitest run packages/host/apiproxy/tests/session-export.spec.ts packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts packages/client/connection/tests/connection.client.spec.ts packages/client/runtime/tests/session.client.spec.ts packages/client/ui-conversation/tests/input-bar.client.spec.tsx scripts/alibaba-cloud-deployment.spec.ts
+pnpm exec vitest run packages/host/apiproxy/tests/session-export.spec.ts packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/connection.client.spec.ts packages/client/runtime/tests/session.client.spec.ts packages/client/ui-conversation/tests/input-bar.client.spec.tsx scripts/alibaba-cloud-deployment.spec.ts
 pnpm exec vitest run packages/host/apiproxy/tests -t "FrameQueue"
 pnpm run benchmark:websocket-downlinks
 pnpm run typecheck

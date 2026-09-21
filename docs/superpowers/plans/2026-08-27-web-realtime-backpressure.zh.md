@@ -2,6 +2,8 @@
 
 [English](2026-08-27-web-realtime-backpressure.md) | 中文
 
+> 历史实施计划，不适用于当前版本。当前实现与已退役的组件见[上游集成记录](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.zh.md)。
+
 > **面向智能体执行者：** 必须使用子技能 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，逐项实施本计划。各步骤使用复选框（`- [ ]`）跟踪。
 
 **目标：** 让 Web 提示词提交即时可见，并使 2 至 5 个公网浏览器同时使用时的实时对话保持响应且内存有界。
@@ -29,9 +31,7 @@
 
 ### WebSocket 下行流
 
-- `packages/client/connection/src/websocket-downlink.ts` — 压缩协商、串行发送期限、缓冲字节熔断与幂等 cleanup。
 - `packages/client/connection/src/index.ts` — 验证部署调优值，并把解析结果传给载体。
-- `packages/client/connection/tests/websocket-downlink.host.spec.ts` — 协商、慢读取方、timeout、peer 隔离与 teardown。
 - `packages/client/connection/tests/node-half.host.spec.ts` — 配置默认值、非法范围与插件接线。
 - `packages/client/connection/README.md`、`README.zh.md`、`README.i18n.yaml` — 下行配置与恢复行为。
 
@@ -285,9 +285,7 @@ git commit -m "fix(apiproxy): bound event stream queues"
 
 **文件：**
 
-- 修改：`packages/client/connection/src/websocket-downlink.ts`
 - 修改：`packages/client/connection/src/index.ts`
-- 修改：`packages/client/connection/tests/websocket-downlink.host.spec.ts`
 - 修改：`packages/client/connection/tests/node-half.host.spec.ts`
 - 修改：`packages/client/connection/README.md`
 - 修改：`packages/client/connection/README.zh.md`
@@ -327,7 +325,7 @@ const downlinks = new WebSocketDownlinks(api(muxSource, idle), {
 
 - [ ] **步骤 3：运行聚焦测试并验证失败**
 
-运行：`pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts`
+运行：`pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts`
 
 预期：FAIL，因为新配置字段/选项与熔断行为尚不存在。
 
@@ -379,7 +377,7 @@ throw new Error(`websocket downlink send exceeded ${String(options.sendTimeoutMs
 
 - [ ] **步骤 7：运行聚焦测试并记录载体约定**
 
-运行：`pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts packages/client/connection/tests/connection.client.spec.ts`
+运行：`pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/connection.client.spec.ts`
 
 预期：PASS，包括不变的重连 generation 测试集。
 
@@ -748,7 +746,7 @@ pnpm run verify-translation-pairing --write docs/config-catalog.md
 按顺序各运行一次：
 
 ```bash
-pnpm exec vitest run packages/host/apiproxy/tests/session-export.spec.ts packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/websocket-downlink.host.spec.ts packages/client/connection/tests/connection.client.spec.ts packages/client/runtime/tests/session.client.spec.ts packages/client/ui-conversation/tests/input-bar.client.spec.tsx scripts/alibaba-cloud-deployment.spec.ts
+pnpm exec vitest run packages/host/apiproxy/tests/session-export.spec.ts packages/client/connection/tests/node-half.host.spec.ts packages/client/connection/tests/connection.client.spec.ts packages/client/runtime/tests/session.client.spec.ts packages/client/ui-conversation/tests/input-bar.client.spec.tsx scripts/alibaba-cloud-deployment.spec.ts
 pnpm exec vitest run packages/host/apiproxy/tests -t "FrameQueue"
 pnpm run benchmark:websocket-downlinks
 pnpm run typecheck

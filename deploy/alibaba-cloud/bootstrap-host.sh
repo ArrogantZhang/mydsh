@@ -439,6 +439,16 @@ configure_package_repositories() {
   write_managed_file /etc/apt/sources.list.d/caddy-stable.list 0644 'deb [signed-by=/usr/share/keyrings/mydsh-caddy-stable.gpg] https://dl.cloudsmith.io/public/caddy/stable/deb/debian any-version main'
 }
 
+verify_sandbox_runner() {
+  systemd-run --quiet --wait --pipe --collect \
+    --property=User=mydsh --property=Group=mydsh \
+    --property=NoNewPrivileges=true --property=PrivateTmp=true \
+    --property=ProtectSystem=strict --property=ProtectHome=true \
+    --property='ReadWritePaths=/var/lib/mydsh /srv/mydsh/workspace' \
+    /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent \
+    --tmpfs /tmp --bind /srv/mydsh/workspace /srv/mydsh/workspace -- /usr/bin/true
+}
+
 main() {
   local architecture
   local public_host
@@ -481,8 +491,9 @@ main() {
   trap cleanup EXIT
 
   apt-get update
-  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https ca-certificates curl debian-archive-keyring debian-keyring gnupg gzip iproute2 openssl python3 tar
+  DEBIAN_FRONTEND=noninteractive apt-get install -y apt-transport-https bubblewrap ca-certificates curl debian-archive-keyring debian-keyring gnupg gzip iproute2 openssl python3 tar
   create_accounts_and_directories
+  verify_sandbox_runner || fail 'bubblewrap cannot enforce the mydsh service sandbox; review host user-namespace policy before deployment'
   configure_package_repositories
   install_managed_file "$SCRIPT_DIR/Caddyfile" /etc/caddy/Caddyfile 0644
   apt-get update

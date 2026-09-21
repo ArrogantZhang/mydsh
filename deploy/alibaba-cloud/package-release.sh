@@ -232,15 +232,10 @@ main() {
     --env DSH_HOME=/workspace/.builder/dsh-home \
     --env PNPM_TARBALL="$PNPM_TARBALL" \
     --env PNPM_INTEGRITY="$PNPM_INTEGRITY" \
-    --env EXPECTED_COMMIT="$commit" \
+    --env DSH_CLIENT_COMMIT_HASH="$commit" \
     --mount "type=bind,src=$source_root,dst=/workspace" \
     --workdir /workspace \
     "$NODE_IMAGE" bash -euo pipefail -c '
-      git init --quiet
-      git symbolic-ref HEAD refs/heads/artifact
-      mkdir -p .git/refs/heads
-      printf "%s\n" "$EXPECTED_COMMIT" >.git/refs/heads/artifact
-      test "$(git rev-parse HEAD)" = "$EXPECTED_COMMIT"
       for attempt in 1 2 3 4; do
         if node --input-type=module -e '\''import { createHash } from "node:crypto"; import { writeFile } from "node:fs/promises"; const response = await fetch(process.env.PNPM_TARBALL); if (!response.ok) throw new Error(`pnpm download failed: ${response.status}`); const bytes = Buffer.from(await response.arrayBuffer()); const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`; if (integrity !== process.env.PNPM_INTEGRITY) throw new Error("pnpm integrity mismatch"); await writeFile("/workspace/.builder/pnpm-11.7.0.tgz", bytes);'\''; then break; fi
         [[ $attempt -lt 4 ]] || exit 1
@@ -255,22 +250,21 @@ main() {
         [[ $attempt -lt 3 ]] || exit 1
         sleep 5
       done
+      pnpm run build:native-system
       pnpm exec vitest run packages/host/invite-auth/tests
-      pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts
-      pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts
+      pnpm exec vitest run packages/api/gateway/tests/stream-server.host.spec.ts
+      pnpm exec vitest run packages/api/gateway/tests/gateway-stream.host.spec.ts
       pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts
-      pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:keeps WebSocket upgrade headers out of forward auth|accepts both authenticated WebSocket upgrades only after 101 timeouts|rejects failed, unauthorized, closed, or incomplete WebSocket upgrades|enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"
-      pnpm run benchmark:websocket-downlinks
-      pnpm run benchmark:websocket-downlinks
+      pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:resolves archive build metadata without synthetic Git objects|requires a functional bubblewrap runner under service restrictions|selects exact release transport markers and rejects unsupported metadata|propagates sandbox enforcement probe failure|requires invite and official cookies after login|keeps WebSocket upgrade headers out of forward auth|accepts the authenticated Remote upgrade only after a 101 timeout|rejects failed, unauthorized, closed, or incomplete WebSocket upgrades|uses upstream transport and bridged authentication in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"
       pnpm run build
       node apps/cli/lib/bin.js web --patch deploy/alibaba-cloud/invite-auth.cordis.yml --dump-config >/dev/null
       test -f apps/cli/lib/bin.js
       test -f apps/web/dist/index.html
       test -d node_modules
-      rm -rf -- /workspace/.git
      '
 
   CIDFILE=''
+  printf 'remote-mux-v1\n' >"$source_root/.mydsh-transport"
   verify_static_inputs "$trusted_root" "$source_root" || fail 'container modified a static security input'
   for name in Caddyfile mydsh.service caddy-mydsh.conf invite-auth.cordis.yml; do cp -- "$trusted_root/deploy/alibaba-cloud/$name" "$source_root/deploy/alibaba-cloud/$name"; done
   printf 'format=1\ncommit=%s\nref=%s\nplatform=linux-amd64\nnode_major=24\npnpm_version=11.7.0\nhelper_journal_format=1\nnode_image_digest=sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975\n' "$commit" "$ref" >"$source_root/.mydsh-release-manifest"

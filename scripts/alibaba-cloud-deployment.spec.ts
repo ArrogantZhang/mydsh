@@ -6,6 +6,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { composeEntries, loadOverlayPatches } from '@deepseek-ai/dsh-app-boot'
 import { describe, expect, it } from 'vitest'
+import { repositoryClientBuildEnvironment } from './client-build-environment.ts'
 
 const repositoryRoot = resolve(import.meta.dirname, '..')
 const deploymentRoot = resolve(import.meta.dirname, '../deploy/alibaba-cloud')
@@ -17,33 +18,28 @@ function asset(name: string): string {
   return readFileSync(resolve(deploymentRoot, name), 'utf8')
 }
 
-function expectProductionDownlinkPolicy(overlayPath: string): void {
+function expectProductionTransportPolicy(overlayPath: string): void {
   const entries = composeEntries([
     loadOverlayPatches('Alibaba Cloud deployment spec', baseBundleConfig),
     loadOverlayPatches('Alibaba Cloud deployment spec', webBundleConfig),
     loadOverlayPatches('Alibaba Cloud deployment spec', overlayPath),
   ])
-  const apiGateways = entries.filter(entry => entry.id === 'api-gateway')
+  const apiGateways = entries.filter(entry => entry.id === 'typert-gateway')
   const connections = entries.filter(entry => entry.id === 'connection')
 
   expect(apiGateways).toHaveLength(1)
   expect(connections).toHaveLength(1)
-  expect(apiGateways[0]?.name).toBe('@deepseek-ai/dsh-host-apiproxy')
-  expect(apiGateways[0]?.config).toEqual({ maxEventStreamQueueFrames: 4096 })
+  expect(apiGateways[0]?.name).toBe('@deepseek-ai/dsh-api-gateway')
+  expect(apiGateways[0]?.config).toBeUndefined()
   expect(connections[0]?.name).toBe('@deepseek-ai/dsh-client-connection')
-  expect(connections[0]?.inject).toEqual(['webRuntime'])
+  expect(connections[0]?.inject).toEqual(['webStartup'])
   expect(connections[0]?.config).toEqual({
-    trustedHosts: { __jsExpr: 'ctx.webRuntime.trustedHosts' },
-    downlinkBatching: true,
-    downlinkBatchMaxFrames: 64,
-    downlinkBatchMaxBytes: 262144,
-    downlinkBatchFlushMs: 16,
-    downlinkCompression: true,
-    downlinkCompressionThresholdBytes: 0,
-    downlinkCompressionConcurrency: 4,
-    downlinkMaxBufferedBytes: 1048576,
-    downlinkSendTimeoutMs: 5000,
+    trustedHosts: { __jsExpr: 'ctx.webStartup.trustedHosts' },
   })
+  expect(entries.find(entry => entry.id === 'invite-auth')?.config).toMatchObject({ bridgeBrowserAuth: true })
+  const runtime = entries.find(entry => entry.id === 'web-runtime')
+  expect(runtime?.inject).toEqual(['webStartup', 'inviteAuthReadiness'])
+  expect(runtime?.config).toMatchObject({ printUrl: false })
 }
 
 function runBash(body: string, assetName = 'deploy-release.sh'): ReturnType<typeof spawnSync> {
@@ -80,6 +76,31 @@ function expectWebSocketUpgradeHeadersConfinedToForwardAuth(caddyfile: string): 
 }
 
 describe('Alibaba Cloud deployment assets', () => {
+  it('resolves archive build metadata without synthetic Git objects', () => {
+    const root = mkdtempSync(join(tmpdir(), 'dsh-archive-metadata-'))
+    try {
+      writeFileSync(join(root, 'package.json'), JSON.stringify({ version: '0.1.6-alpha.2' }))
+      expect(repositoryClientBuildEnvironment(root, { DSH_CLIENT_COMMIT_HASH: 'a'.repeat(40) })).toEqual({
+        DSH_CLIENT_COMMIT_HASH: 'aaaaaaa', DSH_CLIENT_VERSION: '0.1.6-alpha.2',
+      })
+      expect(() => repositoryClientBuildEnvironment(root, { DSH_CLIENT_COMMIT_HASH: 'invalid' })).toThrow()
+      expect(asset('package-release.sh')).toContain('--env DSH_CLIENT_COMMIT_HASH="$commit"')
+      expect(asset('package-release.sh')).not.toContain('git init')
+    } finally {
+      rmSync(root, { recursive: true, force: true })
+    }
+  })
+
+  it('requires a functional bubblewrap runner under service restrictions', () => {
+    const bootstrap = asset('bootstrap-host.sh')
+    expect(bootstrap).toMatch(/apt-get install -y[^\n]*\bbubblewrap\b/)
+    expect(bootstrap).toContain("verify_sandbox_runner || fail 'bubblewrap cannot enforce")
+    expect(bootstrap).toContain('--property=NoNewPrivileges=true --property=PrivateTmp=true')
+    expect(bootstrap).toContain('--property=ProtectSystem=strict --property=ProtectHome=true')
+    expect(bootstrap).toContain('--property=User=mydsh --property=Group=mydsh')
+    expect(bootstrap).toContain('/usr/bin/bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent')
+  })
+
   it('keeps Caddy as the only public entry point', () => {
     const caddyfile = asset('Caddyfile')
 
@@ -156,8 +177,8 @@ describe('Alibaba Cloud deployment assets', () => {
     expect(dropIn).not.toMatch(/DSH_INVITE_(?:CODE|SESSION)_SECRET/)
   })
 
-  it('enables bounded batched compressed downlinks in the production overlay', () => {
-    expectProductionDownlinkPolicy(resolve(deploymentRoot, 'invite-auth.cordis.yml'))
+  it('uses upstream transport and bridged authentication in the production overlay', () => {
+    expectProductionTransportPolicy(resolve(deploymentRoot, 'invite-auth.cordis.yml'))
   })
 
   it('rejects commented values followed by duplicate policy patches', () => {
@@ -165,41 +186,23 @@ describe('Alibaba Cloud deployment assets', () => {
     const overlay = join(dir, 'mutated.cordis.yml')
     try {
       writeFileSync(overlay, [
-        '- id: api-gateway',
+        '- id: typert-gateway',
         '  config:',
-        '    maxEventStreamQueueFrames: 4096',
+        '    # websocketHeartbeatIntervalMs: 2000',
         '- id: connection',
         '  inject: [webRuntime]',
         '  config:',
         '    trustedHosts: !!js ctx.webRuntime.trustedHosts',
-        '    # downlinkBatching: true',
-        '    # downlinkBatchMaxFrames: 64',
-        '    # downlinkBatchMaxBytes: 262144',
-        '    # downlinkBatchFlushMs: 16',
-        '    # downlinkCompression: true',
-        '    # downlinkCompressionThresholdBytes: 0',
-        '    # downlinkCompressionConcurrency: 4',
-        '    # downlinkMaxBufferedBytes: 1048576',
-        '    # downlinkSendTimeoutMs: 5000',
-        '- id: api-gateway',
+        '- id: typert-gateway',
         '  config:',
-        '    maxEventStreamQueueFrames: 1024',
+        '    websocketHeartbeatIntervalMs: 1',
         '- id: connection',
         '  inject: []',
         '  config:',
         '    trustedHosts: []',
-        '    downlinkBatching: false',
-        '    downlinkBatchMaxFrames: 32',
-        '    downlinkBatchMaxBytes: 131072',
-        '    downlinkBatchFlushMs: 8',
-        '    downlinkCompression: false',
-        '    downlinkCompressionThresholdBytes: 1024',
-        '    downlinkCompressionConcurrency: 2',
-        '    downlinkMaxBufferedBytes: 524288',
-        '    downlinkSendTimeoutMs: 2500',
         '',
       ].join('\n'))
-      expect(() => { expectProductionDownlinkPolicy(overlay) }).toThrow()
+      expect(() => { expectProductionTransportPolicy(overlay) }).toThrow()
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
@@ -436,6 +439,8 @@ describe('Alibaba Cloud deployment assets', () => {
     const websocket = acceptance.indexOf('authenticated_websocket_acceptance "$cookie_jar"')
     expect(login).toBeGreaterThanOrEqual(0)
     expect(home).toBeGreaterThan(login)
+    expect(acceptance.indexOf('validate_login_cookies "$cookie_jar"')).toBeGreaterThan(login)
+    expect(acceptance.indexOf('validate_login_cookies "$cookie_jar"')).toBeLessThan(home)
     expect(websocket).toBeGreaterThan(home)
   })
 
@@ -471,14 +476,19 @@ describe('Alibaba Cloud deployment assets', () => {
       .split(/\r?\n/)
       .map(line => line.trim())
     const deploymentPolicyTestNames = [
+      'resolves archive build metadata without synthetic Git objects',
+      'requires a functional bubblewrap runner under service restrictions',
+      'selects exact release transport markers and rejects unsupported metadata',
+      'propagates sandbox enforcement probe failure',
+      'requires invite and official cookies after login',
       'keeps WebSocket upgrade headers out of forward auth',
-      'accepts both authenticated WebSocket upgrades only after 101 timeouts',
+      'accepts the authenticated Remote upgrade only after a 101 timeout',
       'rejects failed, unauthorized, closed, or incomplete WebSocket upgrades',
-      'enables bounded batched compressed downlinks in the production overlay',
+      'uses upstream transport and bridged authentication in the production overlay',
       'rejects commented values followed by duplicate policy patches',
       'packages an exact reviewed ref in a bounded Node 24 container',
     ]
-    const deploymentPolicyTestCommand = 'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:keeps WebSocket upgrade headers out of forward auth|accepts both authenticated WebSocket upgrades only after 101 timeouts|rejects failed, unauthorized, closed, or incomplete WebSocket upgrades|enables bounded batched compressed downlinks in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"'
+    const deploymentPolicyTestCommand = 'pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts -t "(?:resolves archive build metadata without synthetic Git objects|requires a functional bubblewrap runner under service restrictions|selects exact release transport markers and rejects unsupported metadata|propagates sandbox enforcement probe failure|requires invite and official cookies after login|keeps WebSocket upgrade headers out of forward auth|accepts the authenticated Remote upgrade only after a 101 timeout|rejects failed, unauthorized, closed, or incomplete WebSocket upgrades|uses upstream transport and bridged authentication in the production overlay|rejects commented values followed by duplicate policy patches|packages an exact reviewed ref in a bounded Node 24 container)$"'
     const deploymentPolicyTestPattern = deploymentPolicyTestCommand.match(/ -t "([^"]+)"$/)?.[1]
     expect(deploymentPolicyTestPattern).toBeDefined()
     const deploymentPolicyTestFilter = new RegExp(deploymentPolicyTestPattern ?? '')
@@ -487,18 +497,17 @@ describe('Alibaba Cloud deployment assets', () => {
     }
     expect(deploymentPolicyTestFilter.test('Alibaba Cloud deployment assets > verifies synthetic systemd roots on the executable release filesystem')).toBe(false)
     const releaseCommands = [
+      'pnpm run build:native-system',
       'pnpm exec vitest run packages/host/invite-auth/tests',
-      'pnpm exec vitest run packages/host/apiproxy/tests/frame-queue.spec.ts',
-      'pnpm exec vitest run packages/client/connection/tests/websocket-downlink.host.spec.ts',
+      'pnpm exec vitest run packages/api/gateway/tests/stream-server.host.spec.ts',
+      'pnpm exec vitest run packages/api/gateway/tests/gateway-stream.host.spec.ts',
       'pnpm exec vitest run packages/client/connection/tests/node-half.host.spec.ts',
       deploymentPolicyTestCommand,
-      'pnpm run benchmark:websocket-downlinks',
-      'pnpm run benchmark:websocket-downlinks',
       'pnpm run build',
     ]
     expect(containerCommands).not.toContain('pnpm exec vitest run scripts/alibaba-cloud-deployment.spec.ts')
     for (const command of new Set(releaseCommands)) {
-      const expectedCount = command === 'pnpm run benchmark:websocket-downlinks' ? 2 : 1
+      const expectedCount = 1
       expect(containerCommands.filter(line => line === command)).toHaveLength(expectedCount)
     }
     let commandIndex = -1
@@ -534,7 +543,60 @@ describe('Alibaba Cloud deployment assets', () => {
   // atomic_replace_link uses GNU mv -T. Linux CI executes these tests; Windows
   // keeps static coverage without requiring WSL, and macOS avoids BSD mv.
   describe.runIf(linuxFilesystemTestsEnabled)('Linux release-link helpers', () => {
-    it('accepts both authenticated WebSocket upgrades only after 101 timeouts', () => {
+    it('selects exact release transport markers and rejects unsupported metadata', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+[[ $(release_transport_protocol "$root") == legacy-events-v1 ]]
+printf 'remote-mux-v1\\n' >"$root/.mydsh-transport"
+[[ $(release_transport_protocol "$root") == remote-mux-v1 ]]
+printf 'unknown\\n' >"$root/.mydsh-transport"
+if release_transport_protocol "$root"; then exit 90; fi
+rm "$root/.mydsh-transport"
+ln -s missing "$root/.mydsh-transport"
+if release_transport_protocol "$root"; then exit 91; fi
+DSH_PUBLIC_HOST=dsh.example.test
+curl() { printf '%s\\n' "\${!#}" >>"$root/calls"; printf '101'; return 28; }
+authenticated_websocket_acceptance "$root/cookies" legacy-events-v1
+[[ $(wc -l <"$root/calls") -eq 2 ]]
+grep -Fx 'https://dsh.example.test/api/events.mux' "$root/calls"
+grep -Fx 'https://dsh.example.test/api/events.host' "$root/calls"
+if authenticated_websocket_acceptance "$root/cookies" unknown; then exit 92; fi
+[[ $(wc -l <"$root/calls") -eq 2 ]]
+curl() { if [[ "\${!#}" == */api/events.host ]]; then printf '401'; else printf '101'; fi; return 28; }
+if authenticated_websocket_acceptance "$root/cookies" legacy-events-v1; then exit 93; fi
+`)
+    })
+
+    it('propagates sandbox enforcement probe failure', () => {
+      expectBashSuccess(`
+set -euo pipefail
+systemd-run() { return 0; }
+verify_sandbox_runner
+systemd-run() { return 1; }
+if verify_sandbox_runner; then exit 90; fi
+`, 'bootstrap-host.sh')
+    })
+
+    it('requires invite and official cookies after login', () => {
+      expectBashSuccess(`
+set -euo pipefail
+root=$(mktemp -d)
+trap 'rm -rf -- "$root"' EXIT
+cookie_jar="$root/cookies"
+touch "$cookie_jar"
+if validate_login_cookies "$cookie_jar"; then exit 90; fi
+printf '#HttpOnly_dsh.example.test\\tFALSE\\t/\\tTRUE\\t9999999999\\t__Host-dsh_invite\\tinvite\\n' >"$cookie_jar"
+if validate_login_cookies "$cookie_jar"; then exit 91; fi
+printf '#HttpOnly_dsh.example.test\\tFALSE\\t/\\tTRUE\\t9999999999\\tdsh-auth-test\\tofficial\\n' >>"$cookie_jar"
+validate_login_cookies "$cookie_jar"
+sed '/__Host-dsh_invite/d' "$cookie_jar" >"$root/official-only"
+if validate_login_cookies "$root/official-only"; then exit 92; fi
+`)
+    })
+
+    it('accepts the authenticated Remote upgrade only after a 101 timeout', () => {
       expectBashSuccess(`
 set -euo pipefail
 DSH_PUBLIC_HOST=dsh.example.test
@@ -550,7 +612,7 @@ curl() {
   return 28
 }
 authenticated_websocket_acceptance "$cookie_jar"
-[[ $(grep -Fxc 'CALL' "$curl_log") -eq 2 ]]
+[[ $(grep -Fxc 'CALL' "$curl_log") -eq 1 ]]
 for argument in \
   '--http1.1' \
   '--output' \
@@ -568,11 +630,10 @@ for argument in \
   'Upgrade: websocket' \
   'Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==' \
   'Sec-WebSocket-Version: 13'; do
-  [[ $(grep -Fxc -- "$argument" "$curl_log") -eq 2 ]]
+  [[ $(grep -Fxc -- "$argument" "$curl_log") -eq 1 ]]
 done
-[[ $(grep -Fxc -- '--header' "$curl_log") -eq 10 ]]
-[[ $(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.mux" "$curl_log") -eq 1 ]]
-[[ $(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.host" "$curl_log") -eq 1 ]]
+[[ $(grep -Fxc -- '--header' "$curl_log") -eq 5 ]]
+[[ $(grep -Fxc "https://$DSH_PUBLIC_HOST/api/remote.mux" "$curl_log") -eq 1 ]]
 `)
     })
 
@@ -588,40 +649,27 @@ touch "$cookie_jar"
 curl() {
   local url=\${!#}
   printf 'CALL\n%s\n' "$url" >>"$curl_log"
-  if [[ $url == */api/events.mux ]]; then
+  if [[ $url == */api/remote.mux ]]; then
     printf '%s' "$mux_code"
     return "$mux_exit"
-  fi
-  if [[ $url == */api/events.host ]]; then
-    printf '%s' "$host_code"
-    return "$host_exit"
   fi
   return 99
 }
 expect_rejected() {
   local mux_code=$1
   local mux_exit=$2
-  local host_code=$3
-  local host_exit=$4
-  local expected_mux_calls=$5
-  local expected_host_calls=$6
   local call_count
   local mux_calls
-  local host_calls
   : >"$curl_log"
   if authenticated_websocket_acceptance "$cookie_jar"; then return 90; fi
   call_count=$(grep -Fxc 'CALL' "$curl_log" || true)
-  mux_calls=$(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.mux" "$curl_log" || true)
-  host_calls=$(grep -Fxc "https://$DSH_PUBLIC_HOST/api/events.host" "$curl_log" || true)
-  [[ $call_count -eq $((expected_mux_calls + expected_host_calls)) ]]
-  [[ $mux_calls -eq expected_mux_calls ]]
-  [[ $host_calls -eq expected_host_calls ]]
+  mux_calls=$(grep -Fxc "https://$DSH_PUBLIC_HOST/api/remote.mux" "$curl_log" || true)
+  [[ $call_count -eq 1 && $mux_calls -eq 1 ]]
 }
-expect_rejected 502 28 101 28 1 0
-expect_rejected 101 28 401 28 1 1
-expect_rejected 101 0 101 28 1 0
-expect_rejected 101 28 101 0 1 1
-expect_rejected 101 28 000 7 1 1
+expect_rejected 502 28
+expect_rejected 401 28
+expect_rejected 101 0
+expect_rejected 000 7
 `)
     })
 
@@ -1729,7 +1777,7 @@ wait "$holder"
       const readme = asset(name)
       expect(readme).toContain('home_unauth_status')
       expect(readme).toContain('[[ $home_unauth_status == 303 ]]')
-      expect(readme).toContain('/api/events.mux')
+      expect(readme).toContain('/api/remote.mux')
       expect(readme).toContain('[[ $api_unauth_status == 401 ]]')
       expect(readme).toContain('cookie_expiry')
       expect(readme).toContain('tampered_jar')
@@ -1746,7 +1794,7 @@ wait "$holder"
       expect(readme).toContain('git archive "$DEPLOY_REF"')
       expect(readme).toContain('PACKAGER_STAGE/deploy/alibaba-cloud/package-release.sh')
       expect(readme).toContain('node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975')
-      expect(readme).toMatch(/focused tests and two benchmark passes before building|在构建前运行焦点测试和两次 benchmark/)
+      expect(readme).toMatch(/focused transport and authentication tests before building|在构建前运行传输和认证焦点测试/)
       expect(readme).toContain('/var/lib/mydsh-deploy/uploads')
       expect(readme).toMatch(/1 GiB.*500,000.*512 MiB.*8 GiB|1 GiB.*500,000.*512 MiB.*8 GiB/)
       expect(readme).toMatch(/byte-for-byte identical|逐字节相同/)

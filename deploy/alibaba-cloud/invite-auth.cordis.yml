@@ -2,6 +2,7 @@
     - id: invite-auth
       name: '@deepseek-ai/dsh-host-invite-auth'
       config:
+        bridgeBrowserAuth: true
         inviteCodeEnv: DSH_INVITE_CODE_SECRET
         sessionSecretEnv: DSH_INVITE_SESSION_SECRET
         sessionTtlSeconds: 2592000
@@ -13,22 +14,10 @@
   inject: [webStartup, inviteAuthReadiness]
   config:
     openBrowser: !!js ctx.webStartup.openBrowser
-    printUrl: true
+    printUrl: false
     surfaceContext: true
     trustedHosts: !!js ctx.webStartup.trustedHosts
-- id: api-gateway
-  config:
-    maxEventStreamQueueFrames: 4096
 - id: connection
-  inject: [webRuntime]
+  inject: [webStartup]
   config:
-    trustedHosts: !!js ctx.webRuntime.trustedHosts
-    downlinkBatching: true
-    downlinkBatchMaxFrames: 64
-    downlinkBatchMaxBytes: 262144
-    downlinkBatchFlushMs: 16
-    downlinkCompression: true
-    downlinkCompressionThresholdBytes: 0
-    downlinkCompressionConcurrency: 4
-    downlinkMaxBufferedBytes: 1048576
-    downlinkSendTimeoutMs: 5000
+    trustedHosts: !!js ctx.webStartup.trustedHosts

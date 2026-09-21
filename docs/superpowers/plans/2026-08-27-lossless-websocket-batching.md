@@ -2,6 +2,8 @@
 
 English | [中文](2026-08-27-lossless-websocket-batching.zh.md)
 
+> Historical implementation plan; do not execute against the current version. See the [upstream integration record](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.md) for the current implementation and retired components.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Batch unchanged realtime `ServerRequest` values into bounded WebSocket messages so five browsers can receive lossless compressed streams without overflowing the 4,096-frame source queues.
@@ -20,15 +22,12 @@ English | [中文](2026-08-27-lossless-websocket-batching.zh.md)
 
 - `packages/client/connection/src/` + `downlink-message.ts` — browser-safe `server-batch` type, schema, and atomic decoding.
 - `packages/client/connection/tests/` + `downlink-message.client.spec.ts` — single/batch decoding, bounds, malformed-batch rejection, and atomicity.
-- `packages/client/connection/src/client/web-api-client.ts` — maps one physical WebSocket message to one or more validated stream frames and closes malformed transports.
 
 ### Host accumulator and configuration
 
 - `packages/client/connection/src/` + `downlink-batch.ts` — frame/byte/deadline accumulator with one pending iterator read.
 - `packages/client/connection/tests/` + `downlink-batch.host.spec.ts` — count, bytes, deadline, end, abort, large-frame, order, and pending-read races.
-- `packages/client/connection/src/websocket-downlink.ts` — encodes singles or batches before the existing send fuse.
 - `packages/client/connection/src/index.ts` — validates and passes batching configuration.
-- `packages/client/connection/tests/websocket-downlink.host.spec.ts` — real WebSocket batch delivery, failure, and teardown integration.
 - `packages/client/connection/tests/node-half.host.spec.ts` — batching defaults, ranges, and cross-field validation.
 - `packages/client/connection/README.md`, `README.zh.md`, `README.i18n.yaml` — batching, ordering, timing, and recovery contract.
 - `.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`, `.zh.md`, `.i18n.yaml` — selected batching decision and measured prerequisite.
@@ -51,7 +50,6 @@ English | [中文](2026-08-27-lossless-websocket-batching.zh.md)
 
 - Create under `packages/client/connection/src/`: `downlink-message.ts`
 - Create under `packages/client/connection/tests/`: `downlink-message.client.spec.ts`
-- Modify: `packages/client/connection/src/client/web-api-client.ts`
 
 - [ ] **Step 1: Write failing codec tests**
 
@@ -118,9 +116,7 @@ git commit -m "feat(connection): add lossless downlink batches"
 
 - Create under `packages/client/connection/src/`: `downlink-batch.ts`
 - Create under `packages/client/connection/tests/`: `downlink-batch.host.spec.ts`
-- Modify: `packages/client/connection/src/websocket-downlink.ts`
 - Modify: `packages/client/connection/src/index.ts`
-- Modify: `packages/client/connection/tests/websocket-downlink.host.spec.ts`
 - Modify: `packages/client/connection/tests/node-half.host.spec.ts`
 - Modify: `packages/client/connection/README.md`
 - Modify: `packages/client/connection/README.zh.md`

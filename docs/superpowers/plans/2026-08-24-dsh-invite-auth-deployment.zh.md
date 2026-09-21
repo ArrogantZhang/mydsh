@@ -2,6 +2,8 @@
 
 [English](2026-08-24-dsh-invite-auth-deployment.md) | 中文
 
+> 历史实施计划，不适用于当前版本。当前实现与已退役的组件见[上游集成记录](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.zh.md)。
+
 > **供 agent 执行：** 必须使用子 skill：推荐用 superpowers:subagent-driven-development，或用 superpowers:executing-plans，逐任务实施本计划。步骤使用复选框（`- [ ]`）跟踪。
 
 **目标：** 新增可选启用的 DSH 邀请码鉴权插件，提供强化的阿里云 Ubuntu Caddy/systemd 部署，并验证生产域名，且不提交 Kimi 或鉴权秘密。
@@ -25,7 +27,6 @@
 - `packages/host/invite-auth/src/http.ts`：有界表单解析和 HTTP 响应辅助函数。
 - `packages/host/invite-auth/src/page.ts`：静态中文登录 HTML 与安全 header。
 - `packages/host/invite-auth/src/index.ts`：已校验插件配置、启动秘密解析和 route 分发。
-- `packages/host/invite-auth/src/invariant.ts`：包 invariant 注册及生命周期测试理由。
 - `packages/host/invite-auth/tests/token.spec.ts`：密码学行为。
 - `packages/host/invite-auth/tests/policy.spec.ts`：请求与限流器行为。
 - `packages/host/invite-auth/tests/http.spec.ts`：请求体限制、媒体类型和页面转义。
@@ -440,7 +441,6 @@ git commit -m "feat(invite-auth): add hardened login page"
 **文件：**
 
 - 新建：`packages/host/invite-auth/src/index.ts`
-- 新建：`packages/host/invite-auth/src/invariant.ts`
 - 新建：`packages/host/invite-auth/tests/invite-auth.spec.ts`
 
 - [ ] **步骤 1：编写失败的真实 Loader 组装测试**
@@ -675,7 +675,7 @@ export const apply = (ctx: Context): Promise<() => void> =>
 - [ ] **步骤 7：提交组装后的插件**
 
 ```bash
-git add packages/host/invite-auth/src/index.ts packages/host/invite-auth/src/invariant.ts packages/host/invite-auth/tests/invite-auth.spec.ts
+git add packages/host/invite-auth/src/index.ts packages/host/invite-auth/tests/invite-auth.spec.ts
 git commit -m "feat(invite-auth): protect DSH web access"
 ```
 

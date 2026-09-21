@@ -2,6 +2,8 @@
 
 [English](2026-08-27-lossless-websocket-batching.md) | 中文
 
+> 历史实施计划，不适用于当前版本。当前实现与已退役的组件见[上游集成记录](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.zh.md)。
+
 > **面向智能体执行者：** 必须使用子技能 superpowers:subagent-driven-development（推荐）或 superpowers:executing-plans，逐项实施本计划。各步骤使用复选框（`- [ ]`）跟踪。
 
 **目标：** 把不变的实时 `ServerRequest` 批量封装为有界 WebSocket 消息，使 5 个浏览器能接收无损压缩流而不溢出 4,096 帧来源队列。
@@ -20,15 +22,12 @@
 
 - `packages/client/connection/src/` + `downlink-message.ts` — 浏览器安全的 `server-batch` 类型、schema 与原子解码。
 - `packages/client/connection/tests/` + `downlink-message.client.spec.ts` — 单条/batch 解码、边界、格式错误 batch 拒绝与原子性。
-- `packages/client/connection/src/client/web-api-client.ts` — 把一条物理 WebSocket 消息映射为一条或多条已验证 stream frame，并关闭格式错误的传输。
 
 ### 宿主 accumulator 与配置
 
 - `packages/client/connection/src/` + `downlink-batch.ts` — 帧数/字节/deadline accumulator，最多保留一个未完成 iterator read。
 - `packages/client/connection/tests/` + `downlink-batch.host.spec.ts` — 数量、字节、deadline、end、abort、大帧、顺序与 pending-read 竞争。
-- `packages/client/connection/src/websocket-downlink.ts` — 在既有发送熔断前编码单条或 batch。
 - `packages/client/connection/src/index.ts` — 验证并传入批处理配置。
-- `packages/client/connection/tests/websocket-downlink.host.spec.ts` — 真实 WebSocket batch 交付、失败与 teardown 集成。
 - `packages/client/connection/tests/node-half.host.spec.ts` — 批处理默认值、范围与跨字段验证。
 - `packages/client/connection/README.md`、`README.zh.md`、`README.i18n.yaml` — 批处理、顺序、时序与恢复约定。
 - `.agents/notes/implemented/bug-fix/2026-08-27-web-realtime-backpressure.md`、`.zh.md`、`.i18n.yaml` — 所选批处理决策与测量得到的前提。
@@ -51,7 +50,6 @@
 
 - 在 `packages/client/connection/src/` 下新建：`downlink-message.ts`
 - 在 `packages/client/connection/tests/` 下新建：`downlink-message.client.spec.ts`
-- 修改：`packages/client/connection/src/client/web-api-client.ts`
 
 - [ ] **步骤 1：编写失败的 codec 测试**
 
@@ -118,9 +116,7 @@ git commit -m "feat(connection): add lossless downlink batches"
 
 - 在 `packages/client/connection/src/` 下新建：`downlink-batch.ts`
 - 在 `packages/client/connection/tests/` 下新建：`downlink-batch.host.spec.ts`
-- 修改：`packages/client/connection/src/websocket-downlink.ts`
 - 修改：`packages/client/connection/src/index.ts`
-- 修改：`packages/client/connection/tests/websocket-downlink.host.spec.ts`
 - 修改：`packages/client/connection/tests/node-half.host.spec.ts`
 - 修改：`packages/client/connection/README.md`
 - 修改：`packages/client/connection/README.zh.md`

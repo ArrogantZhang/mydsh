@@ -2,6 +2,8 @@
 
 English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 
+> Historical implementation plan; do not execute against the current version. See the [upstream integration record](../../../.agents/notes/implemented/architecture/2026-09-21-upstream-invite-integration.md) for the current implementation and retired components.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Add an opt-in DSH invite-code authentication plugin, package a hardened Caddy/systemd deployment for Alibaba Cloud Ubuntu, and verify the production domain without committing Kimi or authentication secrets.
@@ -25,7 +27,6 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 - `packages/host/invite-auth/src/http.ts` — bounded form parsing and HTTP response helpers.
 - `packages/host/invite-auth/src/page.ts` — static Chinese login HTML and security headers.
 - `packages/host/invite-auth/src/index.ts` — validated plugin config, launch-secret resolution, and route dispatch.
-- `packages/host/invite-auth/src/invariant.ts` — package invariant registration with the lifecycle-test justification.
 - `packages/host/invite-auth/tests/token.spec.ts` — cryptographic behavior.
 - `packages/host/invite-auth/tests/policy.spec.ts` — request and limiter behavior.
 - `packages/host/invite-auth/tests/http.spec.ts` — body bounds, media type, and page escaping.
@@ -50,7 +51,7 @@ English | [中文](2026-08-24-dsh-invite-auth-deployment.zh.md)
 - `deploy/alibaba-cloud/mydsh.service` — low-privilege DSH runtime.
 - `deploy/alibaba-cloud/caddy-mydsh.conf` — Caddy systemd drop-in for the public host only.
 - `deploy/alibaba-cloud/bootstrap-host.sh` — installs Node/Caddy, creates users and private configuration, and installs units.
-- `deploy/alibaba-cloud/package-release.sh` — self-checks against an exact reviewed ref, runs the digest-pinned Node 24 Linux build, verifies static provenance, and atomically publishes the artifact set.
+- `deploy/alibaba-cloud/package-release.sh` — self-checks against an exact reviewed ref, runs the digest-pinned Node 24 Linux build, verifies static build metadata, and atomically publishes the artifact set.
 - `deploy/alibaba-cloud/deploy-release.sh` — bounds and validates a prebuilt Linux artifact, rejects frozen control-plane drift, switches code atomically, and rolls back failed activation without running candidate code.
 - `deploy/alibaba-cloud/README.md`, `README.zh.md`, `README.i18n.yaml` — initial deploy, upgrade, rollback, and secret retrieval procedure.
 - `.agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.md`, `.zh.md`, `.i18n.yaml` — decision, rejected alternatives, and consequences.
@@ -440,7 +441,6 @@ git commit -m "feat(invite-auth): add hardened login page"
 **Files:**
 
 - Create: `packages/host/invite-auth/src/index.ts`
-- Create: `packages/host/invite-auth/src/invariant.ts`
 - Create: `packages/host/invite-auth/tests/invite-auth.spec.ts`
 
 - [ ] **Step 1: Write a failing real-Loader composition test**
@@ -675,7 +675,7 @@ Expected: PASS with 100% statements, branches, functions, and lines for every `p
 - [ ] **Step 7: Commit the assembled plugin**
 
 ```bash
-git add packages/host/invite-auth/src/index.ts packages/host/invite-auth/src/invariant.ts packages/host/invite-auth/tests/invite-auth.spec.ts
+git add packages/host/invite-auth/src/index.ts packages/host/invite-auth/tests/invite-auth.spec.ts
 git commit -m "feat(invite-auth): protect DSH web access"
 ```
 

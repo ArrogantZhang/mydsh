@@ -6,10 +6,10 @@
   },
   "include": ["src"],
   "references": [
+    { "path": "../../client/connection/tsconfig.host.json" },
     { "path": "../../../vendor/cordis" },
     { "path": "../../../vendor/schemastery" },
     { "path": "../../host/webserver" },
-    { "path": "../../util/launch-environment" },
-    { "path": "../../runtime-diagnostics/invariants" }
+    { "path": "../../util/launch-environment" }
   ]
 }

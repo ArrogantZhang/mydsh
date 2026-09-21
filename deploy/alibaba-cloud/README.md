@@ -8,7 +8,7 @@ This tutorial deploys one invite-protected DeepSeek Harness Web process on an Al
 
 Use a fresh Linux amd64 Ubuntu 22.04 or 24.04 ECS instance with a public address, a sudo-capable SSH account, and a lowercase DNS hostname whose A or AAAA record points to the instance. Bootstrap checks `dpkg --print-architecture` before taking its lock or performing any network or filesystem mutation and rejects anything except `amd64`. In the Alibaba Cloud security group, allow TCP 22 only from administrator addresses and TCP 80 and 443 from intended clients. Never allow TCP 3080: reaching that port bypasses Caddy authentication.
 
-The host bootstrap installs only the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian); it does not install Git. It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Git and Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
+The host bootstrap installs bubblewrap and the Node.js 24 runtime from the [official NodeSource repository](https://github.com/nodesource/distributions) and Caddy from the [official stable Debian repository](https://caddyserver.com/docs/install#debian-ubuntu-raspbian); it does not install Git. It requires NodeSource fingerprint `6F71F525282841EEDAF851B42F59B5F99B1BE0B4` and Caddy fingerprint `65760C51EDEA2017CEA2CA15155B6D79CA56EA34`; signed-repository patch versions may advance. Packaging requires Git and Docker on the development machine and verifies the pinned SHA-512 integrity of pnpm 11.7.0 inside the official Node 24 Linux image. Review both repository procedures before running a root script on a long-lived host.
 
 Run packaging orchestration on Linux or WSL with Bash, Python 3, GNU coreutils (`realpath`, `stat`, `sync`, `timeout`, and `mktemp`), GNU tar, Git, and Docker. Windows PowerShell or macOS alone is unsupported. Docker isolates the build but does not replace the Linux/GNU host tools used to validate and atomically publish the artifact set.
 
@@ -16,7 +16,7 @@ The examples use `dsh.example.com`, `ecs-admin@203.0.113.10`, and a reviewed nam
 
 ## Prepare and upload a release
 
-Run these commands from the repository root on your development machine. The selected ref supplies the packager itself, and the packager reads only Git objects from that ref. It pins `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`, bounds the container to 4 CPUs, 8 GiB of memory, 1,024 processes, and 45 minutes, installs dependencies with fresh state, runs the focused tests and two benchmark passes before building, and then validates the resolved config. Within those focused tests, the artifact builder runs the exact deployment-policy selection; root- and systemd-dependent deployment-helper integration remains in Linux CI rather than the artifact builder. Container network and disk use are not bounded. Docker is mandatory; there is no host-build fallback.
+Run these commands from the repository root on your development machine. The selected ref supplies the packager itself, and the packager reads only Git objects from that ref. It pins `node:24-bookworm@sha256:ffeee58a257b390b80b9b656cba440bbc3116c1bc03139c31318f9d9c29a8975`, bounds the container to 4 CPUs, 8 GiB of memory, 1,024 processes, and 45 minutes, installs dependencies with fresh state, builds the host flock addon and runs the focused transport and authentication tests before building, and then validates the resolved config. The archive has no Git metadata; `DSH_CLIENT_COMMIT_HASH` supplies the reviewed commit to the upstream build metadata resolver. Within those focused tests, the artifact builder runs the exact deployment-policy selection; root- and systemd-dependent deployment-helper integration remains in Linux CI rather than the artifact builder. Container network and disk use are not bounded. Docker is mandatory; there is no host-build fallback.
 
 ```bash
 set -euo pipefail
@@ -57,7 +57,7 @@ Deploy the prebuilt artifact set through the stable root-installed helper. Under
 ssh -t "$REMOTE" "cd '$REMOTE_STAGE' && sudo /usr/local/sbin/mydsh-deploy-release './$ARTIFACT_SET_NAME'; status=\$?; if [[ \$status == 0 ]]; then if rm -rf -- '$REMOTE_STAGE'; then exit 0; else printf 'Deployment passed but staging cleanup failed at %s\\n' '$REMOTE_STAGE' >&2; exit 1; fi; else printf 'Deployment failed; upload retained at %s\\n' '$REMOTE_STAGE' >&2; exit \$status; fi"
 ```
 
-The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. After authenticated login and a successful home request, the helper uses the same root-private cookie jar to require real `101` upgrades for both `/api/events.mux` and `/api/events.host`; each connection must remain open until the two-second probe times out. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
+The remote command removes the upload only after success. Activation changes only the immutable release link and service enablement; the installed unit and Caddy files remain unchanged. After authenticated login and a successful home request, the helper uses the same root-private cookie jar to require real `101` upgrades for `/api/remote.mux`; the connection must remain open until the two-second probe times out. A failed update retains the exact artifact set, restores the previous `current` target and enablement, and restarts it; a failed first deployment retains the upload and failed immutable release, removes only the new validated symlink, disables and stops `mydsh`, and retains any incomplete recovery journal.
 
 ## Verify HTTPS and login
 
@@ -76,7 +76,7 @@ An administrator may retrieve the initial invite code directly over SSH. Run thi
 sudo sed -n 's/^DSH_INVITE_CODE_SECRET=//p' /etc/mydsh/mydsh.env
 ```
 
-Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. Close every browser window, reopen the site, and confirm the 30-day cookie still authenticates the browser; then log out and confirm the login page returns. The following server-side smoke test exercises the same acceptance path without printing secrets, response bodies, headers, or cookie values: unauthenticated HTML receives `303`, unauthenticated API traffic receives `401`, login receives `303`, the authenticated home returns `200`, both realtime endpoints upgrade with `101` and stay open until the probe timeout, a new client process reuses a cookie whose expiry is at least 29 days away, tampering is rejected, and logout denies access again.
+Open `https://dsh.example.com`, enter that code, and confirm the DSH page loads. Close every browser window, reopen the site, and confirm the 30-day cookie still authenticates the browser; then log out and confirm the login page returns. The following server-side smoke test exercises the same acceptance path without printing secrets, response bodies, headers, or cookie values: unauthenticated HTML receives `303`, unauthenticated API traffic receives `401`, login receives `303`, the authenticated home returns `200`, the Remote endpoint upgrades with `101` and stays open until the probe timeout, a new client process reuses a cookie whose expiry is at least 29 days away, tampering is rejected, and logout denies access again.
 
 ```bash
 sudo bash -c '
@@ -97,14 +97,14 @@ websocket_acceptance() {
 }
 home_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --header "Accept: text/html" "$base/")
 [[ $home_unauth_status == 303 ]]
-api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/events.mux")
+api_unauth_status=$(curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" "$base/api/remote.mux")
 [[ $api_unauth_status == 401 ]]
 post_status=$(printf "inviteCode=%s" "$DSH_INVITE_CODE_SECRET" | curl --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie-jar "$cookie_jar" --header "Origin: $base" --header "Content-Type: application/x-www-form-urlencoded" --data-binary @- "$base/__invite/login")
 [[ $post_status == 303 ]]
+awk -F "\t" '\''$6 == "__Host-dsh_invite" { invite=1 } $6 ~ /^dsh-auth-/ { official=1 } END { exit !(invite && official) }'\'' "$cookie_jar"
 get_status=$(curl --fail --silent --show-error --output /dev/null --write-out "%{http_code}" --max-time 10 --resolve "$resolve" --cookie "$cookie_jar" "$base/")
 [[ $get_status == 200 ]]
-websocket_acceptance /api/events.mux
-websocket_acceptance /api/events.host
+websocket_acceptance /api/remote.mux
 cookie_expiry=$(awk -F "\t" '\''$6 == "__Host-dsh_invite" { print $5 }'\'' "$cookie_jar")
 [[ $cookie_expiry =~ ^[0-9]+$ ]]
 (( cookie_expiry >= $(date +%s) + 2505600 ))
@@ -119,11 +119,11 @@ printf "Authenticated smoke passed.\n"
 '
 ```
 
-## WebSocket downlink limits
+## Browser authentication and Remote transport
 
-The production overlay flushes each WebSocket downlink batch at 64 frames, 256 KiB of serialized data, or 16 ms after its first retained frame, whichever occurs first. Compression applies from zero bytes with process-wide concurrency 4; changing that concurrency requires restarting the DSH process.
+The production overlay enables `bridgeBrowserAuth`: invite login issues both the invite cookie and the official authority-bound browser cookie. Caddy checks the invite cookie before forwarding every protected request, including `/api/remote.mux`; Connection checks its own browser cookie and Host/Origin. The deployment disables URL printing to keep the official launch token out of service logs. The frontend waits for invite-auth readiness; Connection reads the explicit startup trusted hosts to avoid a dependency cycle.
 
-Each socket has a 1 MiB buffered-byte fuse and a 5-second send timeout. Crossing either limit closes the connection; the browser enters `reconnecting` and rebuilds durable session state after reconnecting. Repeated disconnects require checking the network, proxy, and slow clients. Do not replace the fuse with an unbounded buffer.
+The deployment uses the upstream Gateway WebSocket transport without extra batching or compression settings. Gateway sends Ping frames every 2 seconds by default and terminates connections after two missed heartbeat replies. The curl probe proves authentication and an open transport, not successful Remote stream delivery; complete the browser conversation check under [Configure Kimi](#configure-kimi) for application acceptance.
 
 ## Configure Kimi
 
@@ -132,6 +132,22 @@ In the Web UI, open **Settings → Models**, add a custom OpenAI-compatible prov
 Keep model keys in the DSH credential store. Never add them to this directory, a release artifact, `/etc/mydsh/public.env`, shell tracing, deployment output, or repository logs.
 
 ## Upgrade and roll back
+
+Before the first upgrade from the legacy `events.mux`/`events.host` deployment, schedule root-controlled maintenance: hold `/run/mydsh-deploy.lock`, stop `mydsh`, retain a root-owned backup of the installed helper, and replace only `/usr/local/sbin/mydsh-deploy-release` with the reviewed helper, mode `0755`, using an adjacent temporary file and atomic rename. Do not re-run bootstrap or copy helper code from an unreviewed release. Verify and retain a known-good legacy release before restarting it with the new helper; leave the unit, Caddy files, and journal formats unchanged. The old helper cannot accept the new Remote transport. The new helper selects probes from the active immutable release's `.mydsh-transport`: `remote-mux-v1` requires both login cookies and `/api/remote.mux`; an absent marker selects both legacy endpoints and the invite cookie. Unknown or aliased markers fail validation. It never retries a failed Remote probe against legacy endpoints, so legacy rollback remains explicit.
+
+Fresh bootstrap installs `bubblewrap` and requires a functional sandbox probe under the service user and hardening settings. Before upgrading an existing host, install `bubblewrap` from the host's signed Ubuntu repository and run the same probe below. A nonzero exit blocks deployment; review kernel/user-namespace restrictions rather than bypassing sandbox enforcement. The artifact's native build supplies the host flock addon, not a Landlock fallback.
+
+```bash
+sudo apt-get update
+sudo apt-get install -y bubblewrap
+sudo systemd-run --quiet --wait --pipe --collect \
+  --property=User=mydsh --property=Group=mydsh \
+  --property=NoNewPrivileges=true --property=PrivateTmp=true \
+  --property=ProtectSystem=strict --property=ProtectHome=true \
+  --property='ReadWritePaths=/var/lib/mydsh /srv/mydsh/workspace' \
+  /usr/bin/bwrap --ro-bind / / --dev /dev --unshare-pid --proc /proc --die-with-parent \
+  --tmpfs /tmp --bind /srv/mydsh/workspace /srv/mydsh/workspace -- /usr/bin/true
+```
 
 For an upgrade, run `package-release.sh` for the new reviewed ref, create a fresh remote staging directory, upload the one atomic artifact-set directory that contains the tarball and checksum, and invoke `/usr/local/sbin/mydsh-deploy-release` with that directory as its single argument. Do not upload or replace bootstrap assets during an upgrade. Each full commit receives one directory under `/opt/mydsh/releases`; the helper refuses to overwrite an existing release, and `/opt/mydsh/current` names the active one. `/var/lib/mydsh` and `/srv/mydsh/workspace` remain outside releases and do not roll back with code.
 

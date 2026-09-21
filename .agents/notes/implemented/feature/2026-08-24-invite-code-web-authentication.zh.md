@@ -6,13 +6,13 @@ Status: implemented
 
 ## 问题
 
-DSH Web server 有意不提供 TLS 或认证。载体级 trusted-host 栅栏可防止 DNS rebinding 和其他浏览器混淆代理人请求，但被接受的 host 不具有用户身份，任何能访问远程公开服务器的人都会获得相同权限。一个小规模可信群体需要远程浏览器访问，同时不能把面向开发环境的 Web server 变成部署安全框架，也不能改变默认的本地 Web 组合。
+DSH Web server 提供浏览器启动令牌认证，并把 TLS 交给代理。受信任的小群体需要共享邀请码入口，同时保留上游浏览器会话和载体层 Host/Origin 检查。
 
 ## 决策
 
 `@deepseek-ai/dsh-host-invite-auth` 是原生 Cordis 函数插件，拥有 `/__invite` 认证 route、共享邀请码比较和无状态签名浏览器会话。它注册一个前缀，而不会拦截无关的 `WebServer` route。本决策补充而不取代[载体级浏览器信任决策](../architecture/2026-07-28-api-browser-trust-boundary.zh.md)：既有 authority 和 origin 检查仍是混淆代理人防御，本插件和部署代理则对访问进行认证。
 
-Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面、API、SSE（Server-Sent Events）或 WebSocket 请求前调用 `/__invite/check`。`forward_auth` 子请求会删除继承的逐跳 `Connection` 与 `Upgrade` header，让 Node 把检查作为普通 HTTP 处理。最终 reverse proxy 不会删除或改写这些 header，因此已认证 WebSocket 请求会保留 upgrade 握手。发布的 Web 组合包默认保持无认证状态。阿里云部署通过显式覆盖层选择启用：该覆盖层插入邀请码认证，并将 `inviteAuthReadiness` 加入既有 `web-runtime` 配置项的依赖。
+Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面、API、SSE（Server-Sent Events）或 WebSocket 请求前调用 `/__invite/check`。`forward_auth` 子请求会删除继承的逐跳 `Connection` 与 `Upgrade` header，让 Node 把检查作为普通 HTTP 处理。最终 reverse proxy 不会删除或改写这些 header，因此已认证 WebSocket 请求会保留 upgrade 握手。部署启用 `bridgeBrowserAuth`，仅在验证邀请码后签发上游浏览器 cookie。Connection 从 `webStartup` 读取受信主机，以避免依赖循环。阿里云部署通过显式覆盖层选择启用：该覆盖层插入邀请码认证，并将 `inviteAuthReadiness` 加入既有 `web-runtime` 配置项的依赖。
 
 鉴权响应使用 `Referrer-Policy: same-origin`。登录文档不会跨源泄露 `Referer`，而其同源导航表单 POST 会携带具体的 `Origin`，用于精确校验公网 host。插件仍会拒绝 `Origin: null`，不会削弱该证明。
 
@@ -22,7 +22,7 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 该认证模型面向共享同一 DSH 实例的小规模可信群体。有效 Cookie 传递实例既有的浏览器权限；它不会创建身份、按用户划分的工作区、会话所有权或命令隔离。
 
-阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。该稳定 helper 拥有 journal 格式 1，并被排除在自动 release 更新之外；更改它需要单独评审的维护流程。root 所有的 systemd unit、Caddyfile 和 Caddy drop-in 也是冻结的控制平面输入：候选必须携带逐字节相同的副本，正常部署绝不会替换或重新加载这些文件。共享的非阻塞宿主锁将 bootstrap、部署、回滚、清理、遗留 staging 清理，以及邀请或会话密钥轮换串行化。轮换会在服务器上生成密钥，原子同步私有环境文件，并在重启或验收失败时恢复它。helper 会在切换代码前于 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` 恢复 journal，其中包含之前的链接和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复并同步该状态，直到恢复成功；接受激活会验证监听、通过公开代理登录、加载已认证主页，并使用同一个 root-private cookie jar 要求两条实时 WebSocket 路径都完成真实的 `101` upgrade。每次探测都必须保持打开，直到两秒 curl 超时；响应正文、header、密钥和 cookie 值均不会输出。随后 helper 会启用服务、同步受影响文件系统，并在清理前记录 `committed`。
+阿里云部署将经过评审的 root 控制流安装在所有 release 之外的 `/usr/local/sbin/mydsh-deploy-release`。该稳定 helper 拥有 journal 格式 1，并被排除在自动 release 更新之外；更改它需要单独评审的维护流程。root 所有的 systemd unit、Caddyfile 和 Caddy drop-in 也是冻结的控制平面输入：候选必须携带逐字节相同的副本，正常部署绝不会替换或重新加载这些文件。共享的非阻塞宿主锁将 bootstrap、部署、回滚、清理、遗留 staging 清理，以及邀请或会话密钥轮换串行化。轮换会在服务器上生成密钥，原子同步私有环境文件，并在重启或验收失败时恢复它。helper 会在切换代码前于 root-only 的同级 `activation.new.*` 目录中构建完整的格式 1 `prepared` 恢复 journal，其中包含之前的链接和服务之前的启用状态，再将其原子发布为 `/var/lib/mydsh-deploy/activation`。失败会恢复并同步该状态，直到恢复成功；接受激活会验证监听、通过公开代理登录、加载已认证主页，并使用同一个 root-private cookie jar 要求 `/api/remote.mux` 完成真实的 `101` upgrade。每次探测都必须保持打开，直到两秒 curl 超时；响应正文、header、密钥和 cookie 值均不会输出。随后 helper 会启用服务、同步受影响文件系统，并在清理前记录 `committed`。
 
 稳定 helper 拥有两个带版本的格式 1 journal：激活与轮换。它拒绝未知格式，并在每项操作前协调两者。`prepared` 轮换恢复并同步旧环境、重启 DSH 并重复验收；`committed` 轮换保留新密钥并清理 journal。恢复失败会保留状态并阻止后续工作，且没有经过验证的活动 release 时，轮换不能发布状态。
 
@@ -58,7 +58,7 @@ Caddy 终止 TLS，直接代理 `/__invite/*`，并在代理其他所有页面�
 
 ## 后果
 
-- Caddy 是必需的安全组件，`3080` 端口必须保持私有；直接访问会绕过认证。
+- Caddy 是必需的安全组件，`3080` 端口必须保持私有；直接访问会绕过邀请码层；上游浏览器认证仍然生效。
 - 30 天 Cookie 以较长的 bearer token 生命周期为代价，减少重复输入邀请码。轮换会话秘密是全局撤销机制；轮换邀请码不会撤销既有 Cookie。
 - 邀请码认证发生 HMR 时，也会拆除并重新挂载依赖就绪状态的 Web runtime 和前端 fallback。
 - 登录限流会在进程重启时重置，且不会跨副本协调，因此该部署只运行一个 DSH 进程。
