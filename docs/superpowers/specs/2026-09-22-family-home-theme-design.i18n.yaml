@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write docs/superpowers/specs/2026-09-22-family-home-theme-design.md
+2026-09-22-family-home-theme-design.md: 108e2b9a4b23133ad81d9b5097541526e8123a22
+2026-09-22-family-home-theme-design.zh.md: bce2dcf90d07fa651f5f96b8959e9d8b89644e28
