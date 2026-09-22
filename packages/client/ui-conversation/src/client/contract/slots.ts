@@ -123,6 +123,8 @@ export type UseConversationViews = SnapshotSelectorHook<readonly ViewTab[]>
 
 declare module '@deepseek-ai/dsh-client-ui-slots' {
   interface SlotMap {
+    /** Empty-conversation presentation only; the real Composer remains outside this seat. */
+    'conversation.hero.content': { kind: 'single'; scope: 'session-maybe' }
     /** Conversation shell beneath its root-scoped main-panel entry. */
     'main.conversation': { kind: 'single'; scope: 'session-maybe' }
     /** Strict per-Session Conversation body. */
@@ -221,6 +223,7 @@ declare module '@deepseek-ai/dsh-client-ui-slots' {
         'conversation.composer.bar': { kind: 'single'; scope: 'session-maybe' }
         'conversation.input.dock': { kind: 'list'; scope: 'session' }
         'conversation.hero.brand.mark': { kind: 'single'; scope: 'root' }
+        'conversation.hero.content': { kind: 'single'; scope: 'session-maybe' }
         'conversation.hero.workspace': { kind: 'single'; scope: 'root' }
         'conversation.hero.agentPreset': { kind: 'single'; scope: 'session-maybe' }
       }

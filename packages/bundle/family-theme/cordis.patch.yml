@@ -1,0 +1,17 @@
+# Opt-in family presentation over the Web profile; authentication stays with Connection.
+- id: ui-brand-official
+  disabled: true
+
+- insert:
+    - id: family-cover
+      name: '@deepseek-ai/dsh-family-cover'
+      config:
+        root: !!js dshHomePath('family-theme')
+
+    - id: ui-family-theme
+      name: '@deepseek-ai/dsh-client-ui-family-theme'
+      config:
+        enabled: true
+        name: 家人小屋
+        greeting: 回来啦，先歇一会儿。
+        palette: morning

@@ -22,6 +22,24 @@ const make = (host = stubSettingsScope<ThemeSettings>()): {
 }
 
 describe('ThemeRuntime', () => {
+  it('temporarily selects a plugin palette without writing shared preferences and restores live Host changes', () => {
+    const { theme, host } = make()
+    const unregister = theme.register({ id: 'family', colorScheme: 'dark', tokens: {} })
+    expect(() => theme.present('absent')).toThrow('not registered')
+    const restore = theme.present('family')
+    expect(theme.getTheme().active.id).toBe('family')
+    expect(theme.getTheme().preference).toBe('system')
+    host.publish({ status: 'ready', value: { preference: 'light', fontSize: 14 }, revision: 1, writable: true })
+    expect(theme.getTheme().active.id).toBe('family')
+    expect(host.set).not.toHaveBeenCalled()
+    restore()
+    restore()
+    expect(theme.getTheme().active.id).toBe('light')
+    const removed = theme.present('family')
+    unregister()
+    expect(theme.getTheme().active.id).toBe('light')
+    removed()
+  })
   it('defaults to the system preference resolved against prefers-color-scheme', () => {
     const { theme } = make()
     const snapshot = theme.getTheme()

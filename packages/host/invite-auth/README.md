@@ -79,6 +79,8 @@ The fixed-window failure limiter is process-local and bounded by `maxTrackedAddr
 
 ### Authorization scope
 
+Trusted plugins may register one reversible `invitePage` presentation for the existing form. Text values are escaped. Only the fixed plugin bootstrap receives a fresh per-response CSP nonce; the default policy still blocks remote resources and embedding. The stock page remains script-free when no presentation is registered. This extension changes neither login validation nor cookie authority.
+
 Invite authentication authorizes a browser to the whole DSH instance. It provides no user identity, per-user workspace, per-session ownership, or command isolation: every authorized person shares the instance's workspaces, sessions, credentials available to the process, and command authority. Deploy it only for a small trusted group. The [deployment design](../../../docs/superpowers/specs/2026-08-24-dsh-invite-auth-deployment-design.md) owns the complete host layout, and the [authentication decision](../../../.agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.md) owns the rationale.
 
 -----
@@ -91,7 +93,7 @@ Invite authentication authorizes a browser to the whole DSH instance. It provide
 
 The [route owner](src/index.ts) validates invite access before calling Connection's token exchange in memory. It passes the forwarded Host unchanged so Connection uses the same authority normalization for cookie issuance and later requests, including explicit ports. [Signed-token primitives](src/token.ts) and [request policy](src/policy.ts) keep cookie verification separate from rate limiting and proxy validation.
 
-This package has no runtime invariant companion: authorization is derived from each signed cookie, with no independently maintained state to compare. Real-composition tests cover route registration and disposal.
+No runtime invariant companion is published. Authorization is derived from each signed cookie, with no independently maintained state to compare. Real-composition tests cover route registration and disposal.
 
 </details>
 

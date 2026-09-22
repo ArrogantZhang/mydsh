@@ -1,0 +1,23 @@
+{
+  "name": "@deepseek-ai/dsh-family-theme",
+  "version": "0.1.6-alpha.2",
+  "description": "Opt-in family UI and authenticated server-shared cover bundle",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/types/index.d.ts",
+  "license": "MIT",
+  "publishConfig": { "access": "public" },
+  "repository": { "type": "git", "url": "git+https://github.com/deepseek-ai/deepseek-harness.git", "directory": "packages/bundle/family-theme" },
+  "exports": {
+    ".": { "types": "./lib/types/index.d.ts", "default": "./lib/index.js" },
+    "./cordis.patch.yml": "./cordis.patch.yml", "./src/*": "./src/*", "./package.json": "./package.json"
+  },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } },
+  "files": ["lib/index.js", "cordis.patch.yml", "lib/types/**/*.d.ts"],
+  "peerDependencies": { "@deepseek-ai/cordis": "workspace:^" },
+  "dependencies": {
+    "@deepseek-ai/dsh-family-cover": "workspace:^",
+    "@deepseek-ai/dsh-client-ui-family-theme": "workspace:^"
+  },
+  "devDependencies": { "@deepseek-ai/cordis": "workspace:^" }
+}

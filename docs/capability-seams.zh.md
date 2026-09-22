@@ -9,6 +9,9 @@
 
 ```mermaid
 flowchart LR
+  pkg_family_cover["family-cover"]
+  svc_familyCover["ctx.familyCover<br/>Private shared family cover"]
+  pkg_client_ui_family_theme["client-ui-family-theme"]
   pkg_hmr["hmr"]
   svc_hmr["ctx.hmr<br/>Serialized module and configuration reloads"]
   pkg_app_boot["app-boot"]
@@ -298,6 +301,7 @@ flowchart LR
   pkg_experimental_computer_use_cua_driver_mcp --> svc_computerUse
   pkg_experimental_computer_use_cua_driver_native --> svc_computerUse
   pkg_experimental_ptc_runtime_python --> svc_ptcRuntime
+  pkg_family_cover --> svc_familyCover
   pkg_file_reference --> svc_fileReferences
   pkg_file_reference_local --> svc_fileReferences
   pkg_fs --> svc_fs
@@ -426,6 +430,7 @@ flowchart LR
   svc_deepseekLlmApiExtensions --> pkg_llm_deepseek
   svc_directoryPicker --> pkg_api_workspace_controller
   svc_dynamicCordisRunner --> pkg_tool_cordis
+  svc_familyCover --> pkg_client_ui_family_theme
   svc_fileReferences --> pkg_api_session_controller
   svc_fileUploads --> pkg_api_session_controller
   svc_fs --> pkg_tool_fs
@@ -539,6 +544,7 @@ flowchart LR
 
 | ctx 键 | 角色 | 所属包 | 实现 | 直接消费方 | 配套插件 | 说明 |
 | --- | --- | --- | --- | --- | --- | --- |
+| `ctx.familyCover` | `core` | [`family-cover`](../packages/host/family-cover) | - | [`client-ui-family-theme`](../packages/client/ui-family-theme) | - | 已授权访问者共享一张带版本校验的标准化照片；展示字节独立于会话附件和模型请求。 |
 | `ctx.hmr` | `core` | [`hmr`](../packages/boot/hmr) | - | [`app-boot`](../packages/boot/app-boot) | - | 负责模块和精确配置监听；应用修改共用其队列，自动重载等待应用文件锁。 |
 | `ctx.pluginManager` | `core` | [`plugin-manager`](../packages/boot/plugin-manager) | - | [`plugin-manager`](../packages/boot/plugin-manager), `ui-settings-plugin-inventory` | - | 与 CLI 共享 profile 包操作，并向 Web 和 Agent 调用方分别报告持久状态与运行状态。 |
 | `ctx.profileContext` | `core` | [`app-boot`](../packages/boot/app-boot) | - | [`plugin-manager`](../packages/boot/plugin-manager) | - | dsh launcher 提供纯数据形式的 profile 位置与组合输入；重载调度由 dsh-hmr 负责。 |

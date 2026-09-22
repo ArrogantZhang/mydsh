@@ -193,6 +193,7 @@ function mount(
       seatOwners.push({ key, owner })
     }
     if (key === 'conversation.hero.workspace') { pickerOwner = owner; return null }
+    if (key === 'conversation.hero.content') return opts?.fallback ?? null
     if (key === 'conversation.session.header.lineage') {
       lineageOwners.push(owner as ConversationHeaderLineageOwnerProps)
       return opts?.fallback ?? null
@@ -659,6 +660,7 @@ describe('ConversationRoot resident composer', () => {
     // The agent-preset chip sits in the same row, for the same reason: both
     // choices are only open before the first message.
     expect(b.slotCalls).toContain('conversation.hero.agentPreset')
+    expect(b.slotCalls).toContain('conversation.hero.content')
   })
 
   it('prompt failure renders the promptError strip (ordinary failure, no transaction UI)', () => {

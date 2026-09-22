@@ -916,6 +916,25 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'familyCover',
+    summary: 'Authenticated Host capability with one plugin-owned storage lifetime.',
+    description: 'Authenticated Host capability with one plugin-owned storage lifetime.',
+    methods: [
+      {
+        signature: '@Remote current(signal: AbortSignal): Promise<CoverSnapshot>',
+        description: 'Read current cover metadata without exposing private storage paths.',
+        parameters: [{ name: 'signal', description: 'Remote caller cancellation.' }],
+        returns: 'the current shared revision and normalized image dimensions.',
+      },
+      {
+        signature: '@Remote(\'removeCover\') remove(revision: CoverRevision, signal: AbortSignal): Promise<CoverSnapshot>',
+        description: 'Remove the shared cover for all authorized visitors.',
+        parameters: [{ name: 'revision', description: 'last observed revision; stale removals fail.' }, { name: 'signal', description: 'Remote caller cancellation before commit.' }],
+        returns: 'a new empty revision.',
+      },
+    ],
+  },
+  {
     key: 'fileReferences',
     summary: 'Host capability for cancellable file-reference discovery.',
     description: 'Host capability for cancellable file-reference discovery.',
@@ -4479,6 +4498,18 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CordisRuntimeTreeReader',
     declaration: 'export interface CordisRuntimeTreeReader {\n    getTree(): Promise<CordisRuntimeTree>;\n}',
+  },
+  {
+    name: 'CoverImage',
+    declaration: 'export interface CoverImage {\n    readonly width: number;\n    readonly height: number;\n    readonly bytes: number;\n    readonly mediaType: \'image/webp\';\n}',
+  },
+  {
+    name: 'CoverRevision',
+    declaration: 'export type CoverRevision = Branded<\'FamilyCoverRevision\'>;',
+  },
+  {
+    name: 'CoverSnapshot',
+    declaration: 'export interface CoverSnapshot {\n    readonly revision: CoverRevision;\n    readonly cover: CoverImage | null;\n}',
   },
   {
     name: 'CreateAgentOptions',

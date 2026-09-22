@@ -36,6 +36,8 @@ target package 通过 declaration merge 扩展 snapshot 与 Location data map，
 <a id="shell-and-standard-props"></a>
 ## Shell 与标准 props
 
+`conversation.hero.content` 是空会话展示使用的 session-maybe 单占位 slot。默认回退内容仍为品牌动画与标题。工作区选择器、agent（智能体）预设、输入 dock 和原生输入框保持在该 slot 之外，因此替换首页展示不会重新挂载编辑器。
+
 共享图片插槽属性将展示选择与持久化引用分开：`thumbnail` 请求完整缩放的附件列表缩略图，`compact` 请求裁剪的图片方块。每张图片可通过可选的 `label` 提供无障碍展示名称；加载和缓存标识仍使用原始附件引用。[ui-attachment](../ui-attachment/README.zh.md) 负责渲染与灯箱。
 
 上下文占用按钮在输入卡片下方、会话统计右侧显示圆环和百分比。点击按钮可在视口内的面板查看 token 构成，没有统计项时面板也不会越界；上下文用量和容量尚不可用时，按钮保持隐藏。

@@ -164,6 +164,7 @@ root
 │     ├─ conversation.input.left
 │     ├─ conversation.input.right
 │     ├─ conversation.hero.brand.mark
+│     ├─ conversation.hero.content
 │     ├─ conversation.hero.workspace
 │     │  └─ conversation.hero.workspace.directoryFlow
 │     └─ conversation.hero.agentPreset
@@ -174,6 +175,7 @@ root
 │     │  └─ sidebar.right.tab.guide.entry
 │     ├─ sidebar.right.pane.tab.title
 │     └─ sidebar.right.tab.menu.item
+├─ shell.document.title
 └─ shell.overlay
 ```
 

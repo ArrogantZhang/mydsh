@@ -1,0 +1,13 @@
+{
+  "extends": "../../../tsconfig.base.client.json",
+  "compilerOptions": { "rootDir": "src", "outDir": "lib/types" },
+  "include": ["src"],
+  "references": [
+    { "path": "../../../vendor/cordis" }, { "path": "../../../vendor/schemastery" },
+    { "path": "../store" }, { "path": "../ui-slots" }, { "path": "../ui-renderer" },
+    { "path": "../ui-theme" }, { "path": "../ui-layout" }, { "path": "../ui-sidebar" },
+    { "path": "../ui-conversation" }, { "path": "../ui-settings" }, { "path": "../ui-primitives" },
+    { "path": "../locale" }, { "path": "../../api/remotes/tsconfig.client.json" },
+    { "path": "../../host/invite-auth" }, { "path": "../../host/family-cover" }
+  ]
+}

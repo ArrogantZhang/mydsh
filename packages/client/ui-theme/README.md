@@ -33,6 +33,8 @@ The plugin registers Appearance preference cubes and a font-size stepper in the 
 
 ### Registering a theme
 
+`ctx.theme.present(id)` temporarily selects a registered palette without writing the Host preference. Its disposer restores the latest underlying preference, including changes received while the presentation is active. Nested presentations resolve newest first and ignore removed theme definitions. Callers own the disposer through their plugin effects.
+
 A composition can register a third-party theme id with alias-token overrides through `ctx.theme`; the override layer folds into the active snapshot's tokens in registration order. Removing one never overwrites the last durable built-in preference. Third-party theme ids remain an in-process extension and do not cross the built-in settings schema.
 
 ### Pre-plugin palette

@@ -38,6 +38,7 @@ The kernel packages boot and serve the page; the UI feature packages present it.
 | [`ui-slots/`](ui-slots/README.md) | Defines typed extension Slots and reusable Component Factories | — |
 | [`ui-session/`](ui-session/README.md) | Adapts Session Controller state into standard Slot sources and hooks | — |
 | [`ui-theme/`](ui-theme/README.md) | Applies the selected color theme | — |
+| [`ui-family-theme/`](ui-family-theme/README.md) | Optional family branding and shared-cover controls | — |
 | [`ui-primitives/`](ui-primitives/README.md) | Provides shared React controls, icons, and content renderers | — |
 | [`ui-attachment/`](ui-attachment/README.md) | Registers composer and message-image attachment presentation | — |
 | [`ui-layout/`](ui-layout/README.md) | Arranges the main application regions | — |

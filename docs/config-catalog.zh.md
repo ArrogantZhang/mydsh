@@ -448,6 +448,29 @@ export interface Config {
 
 来源：[`packages/client/hmr/src/index.ts:30`](../packages/client/hmr/src/index.ts)
 
+<a id="deepseek-aidsh-client-ui-family-theme"></a>
+
+## `@deepseek-ai/dsh-client-ui-family-theme`
+
+```ts config-catalog
+/** Public plugin defaults use the same fields as personal appearance. */
+export type Config = FamilyAppearance
+
+/** Initial appearance; a valid browser preference takes precedence. */
+export interface FamilyAppearance {
+  /** Enable the skin in browsers without a saved choice. */
+  enabled: boolean
+  /** Plain-text family name, at most 16 Unicode characters. */
+  name: string
+  /** Plain-text welcome line, at most 32 Unicode characters. */
+  greeting: string
+  /** Initial family palette. */
+  palette: 'morning' | 'garden' | 'evening'
+}
+```
+
+来源：[`packages/client/ui-family-theme/src/config.ts:17`](../packages/client/ui-family-theme/src/config.ts)
+
 <a id="deepseek-aidsh-client-ui-sidebar-documentpreview"></a>
 
 ## `@deepseek-ai/dsh-client-ui-sidebar-documentpreview`
@@ -845,6 +868,40 @@ export interface Config {
 
 来源：[`packages/experimental/tool-agent-team/src/index.ts:17`](../packages/experimental/tool-agent-team/src/index.ts)
 
+<a id="deepseek-aidsh-family-cover"></a>
+
+## `@deepseek-ai/dsh-family-cover`
+
+Requires: `connection`
+
+```ts config-catalog
+/** Private data location and deployment-specific resource budgets. */
+export interface Config extends CoverLimits {
+  /** Absolute directory outside application releases; include it in backups. */
+  root: string
+}
+
+/** Deployment-resolved admission, normalization, and writer-lock budgets. */
+export interface CoverLimits {
+  /** Maximum streamed source bytes before normalization. */
+  readonly maxInputBytes: number
+  /** Maximum decoded width multiplied by height. */
+  readonly maxInputPixels: number
+  /** Maximum normalized image long edge; smaller sources are not enlarged. */
+  readonly maxOutputDimension: number
+  /** Maximum complete normalized image bytes stored or read. */
+  readonly maxOutputBytes: number
+  /** Maximum admitted mutations per provider lifetime. */
+  readonly maxConcurrentUploads: number
+  /** Native image-processing deadline in seconds. */
+  readonly timeoutSeconds: number
+  /** Maximum milliseconds waiting for the shared writer lock. */
+  readonly lockWaitMs: number
+}
+```
+
+来源：[`packages/host/family-cover/src/index.ts:14`](../packages/host/family-cover/src/index.ts)
+
 <a id="deepseek-aidsh-file-reference-local"></a>
 
 ## `@deepseek-ai/dsh-file-reference-local`
@@ -1085,7 +1142,7 @@ export interface Config {
 }
 ```
 
-来源： [`packages/host/invite-auth/src/index.ts:63`](../packages/host/invite-auth/src/index.ts)
+来源： [`packages/host/invite-auth/src/index.ts:67`](../packages/host/invite-auth/src/index.ts)
 
 <a id="deepseek-aidsh-host-open-in-app"></a>
 
@@ -3940,6 +3997,7 @@ export interface Config {
 - `@deepseek-ai/dsh-experimental-browser-use-runtime` ([`packages/experimental/browser-use-runtime/src/index.ts`](../packages/experimental/browser-use-runtime/src/index.ts))
 - `@deepseek-ai/dsh-experimental-webworker-packer`（[`packages/experimental/webworker-packer/src/index.ts`](../packages/experimental/webworker-packer/src/index.ts)）
 - `@deepseek-ai/dsh-experimental-webworker-runtime`（[`packages/experimental/webworker-runtime/src/index.ts`](../packages/experimental/webworker-runtime/src/index.ts)）
+- `@deepseek-ai/dsh-family-theme`（[`packages/bundle/family-theme/src/index.ts`](../packages/bundle/family-theme/src/index.ts)）
 - `@deepseek-ai/dsh-home-paths`（[`packages/util/home-paths/src/index.ts`](../packages/util/home-paths/src/index.ts)）
 - `@deepseek-ai/dsh-hook-protocol`（[`packages/hooks/hook-protocol/src/index.ts`](../packages/hooks/hook-protocol/src/index.ts)）
 - `@deepseek-ai/dsh-http-proxy`（[`packages/util/http-proxy/src/index.ts`](../packages/util/http-proxy/src/index.ts)）

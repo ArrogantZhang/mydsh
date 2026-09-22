@@ -71,6 +71,30 @@ interface PendingLogin {
 
 const compositions = new Set<Composition>()
 
+it('owns reversible login presentation without relaxing authentication or permitting remote images', async () => {
+  const composition = await loadComposition()
+  const presenter = composition.context.get('invitePage')!
+  const dispose = presenter.register({ title: '<家人小屋>', message: '欢迎回家', submit: '进屋坐坐',
+    style: 'body { background: #fff9f1; }', script: 'document.documentElement.dataset.family = "ready"' })
+  const first = await request(composition, '/__invite/login')
+  expect(first.status).toBe(200)
+  expect(first.body).toContain('&lt;家人小屋&gt;')
+  expect(first.body).toContain('name="inviteCode"')
+  const nonce = /<script nonce="([^"]+)">/.exec(first.body)?.[1]
+  expect(nonce).toBeDefined()
+  expect(first.headers.get('content-security-policy')).toContain(`script-src 'nonce-${nonce}'`)
+  expect(first.headers.get('content-security-policy')).toContain("default-src 'none'")
+  expect(first.headers.get('content-security-policy')).not.toContain('img-src')
+  expect(() => presenter.register({ title: 'Other', message: '', submit: '', style: '', script: '' })).toThrow('already registered')
+  const second = await request(composition, '/__invite/login')
+  expect(second.body).not.toContain(`nonce="${nonce}"`)
+  dispose()
+  const restored = await request(composition, '/__invite/login')
+  expect(restored.body).toContain('<title>访问 DSH</title>')
+  expect(restored.body).not.toContain('<script')
+  expect(restored.headers.get('content-security-policy')).toBe(SECURITY_HEADERS['content-security-policy'])
+})
+
 afterEach(async () => {
   for (const composition of compositions) {
     await composition.context.fiber.dispose()

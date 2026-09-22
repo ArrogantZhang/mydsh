@@ -1,0 +1,6 @@
+# Bilingual-pair consistency record (docs/i18n/README.md): the git blob hash of each
+# side as of the last confirmed-consistent state. Both languages carry equal authority;
+# after editing either side, bring the other along and re-record with:
+#   pnpm run verify-translation-pairing --write .agents/notes/implemented/feature/2026-09-22-family-cover-and-personal-appearance.md
+2026-09-22-family-cover-and-personal-appearance.md: 0b3408d0dd68d4bde40b56051439617943ec1497
+2026-09-22-family-cover-and-personal-appearance.zh.md: 7c334597172d43c95ca23f25766a4725a697a813

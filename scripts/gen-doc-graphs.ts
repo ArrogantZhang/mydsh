@@ -100,6 +100,11 @@ const GROUP_ORDER = [
 
 const SERVICE_ROLES: ServiceRole[] = [
   {
+    key: 'familyCover', pkg: 'family-cover', title: 'Private shared family cover',
+    mode: 'core', consumers: ['client-ui-family-theme'],
+    note: 'Authorized visitors share one revision-checked normalized photo; presentation bytes stay outside Session attachments and model requests.',
+  },
+  {
     key: 'hmr',
     pkg: 'hmr',
     title: 'Serialized module and configuration reloads',

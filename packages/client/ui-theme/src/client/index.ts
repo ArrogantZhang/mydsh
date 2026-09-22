@@ -167,6 +167,7 @@ export class ThemeRuntime {
   /** Override layers by source; seq (monotonic) is the stacking order. */
   private readonly overrides = new Map<string, { seq: number; tokens: ThemeTokenOverrides }>()
   private overrideSeq = 0
+  private readonly presentations: { id: string }[] = []
 
   /**
    * @param ctx - owning context (change events are emitted on it; the
@@ -236,6 +237,25 @@ export class ThemeRuntime {
     this.preference = id as ThemePreference
     if (isThemePreference(id)) void this.host.set(THEME_PREFERENCE_FIELD, id)
     this.publish()
+  }
+
+  /**
+   * Present a registered palette for one plugin lifetime without changing durable preferences.
+   * Later presentations take precedence; removal reveals the current underlying preference.
+   * @param id - concrete registered palette, excluding `system`.
+   * @returns idempotent disposer for exactly this presentation.
+   */
+  present(id: string): () => void {
+    if (!this.themes.some(theme => theme.id === id)) throw new Error(`theme "${id}" is not registered`)
+    const presentation = { id }
+    this.presentations.push(presentation)
+    this.publish()
+    return () => {
+      const index = this.presentations.indexOf(presentation)
+      if (index < 0) return
+      this.presentations.splice(index, 1)
+      this.publish()
+    }
   }
 
   /**
@@ -322,7 +342,8 @@ export class ThemeRuntime {
       : this.preference
     // Both built-ins always exist; a registered preference id resolves or has
     // been reset by its disposer, so the lookup cannot miss.
-    const active = this.themes.find(t => t.id === resolvedId)
+    const presented = this.presentations.findLast(entry => this.themes.some(theme => theme.id === entry.id))
+    const active = this.themes.find(t => t.id === (presented?.id ?? resolvedId))
     /* v8 ignore next 2 -- needs a registry without light/dark, which register()/dispose() cannot produce */
     if (active === undefined) throw new Error(`theme registry lost "${resolvedId}"`)
     return Object.freeze({

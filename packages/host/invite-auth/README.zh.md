@@ -79,6 +79,8 @@ Caddy 必须直接代理 `/__invite/*`，并在向 DSH 转发其他所有 HTTP�
 
 ### 授权范围
 
+受信任的插件可通过 `invitePage` 为现有表单注册一套可撤销的展示内容。文本值会被转义。只有插件固定的启动脚本会获得每次响应新生成的 CSP nonce；默认策略仍阻止远程资源与嵌入。没有注册展示内容时，默认页面仍不含脚本。此扩展不改变登录校验或 Cookie 权限。
+
 邀请码认证会授权浏览器访问整个 DSH 实例。它不提供用户身份、按用户划分的工作区、按会话划分的所有权或命令隔离：所有通过认证的人共享该实例的工作区、会话、进程可用的凭据和命令权限。仅应将它部署给小规模可信群体。[部署设计](../../../docs/superpowers/specs/2026-08-24-dsh-invite-auth-deployment-design.zh.md)负责完整的宿主布局，[认证决策](../../../.agents/notes/implemented/feature/2026-08-24-invite-code-web-authentication.zh.md)负责其理由。
 
 -----
@@ -91,7 +93,7 @@ Caddy 必须直接代理 `/__invite/*`，并在向 DSH 转发其他所有 HTTP�
 
 [路由所有者](src/index.ts)先验证邀请码访问权限，再在内存中调用 Connection 的 token 兑换。它原样传递转发的 Host，让 Connection 在签发 Cookie 和处理后续请求时使用相同的 authority 归一化规则，包括显式端口。[签名 token 原语](src/token.ts)与[请求策略](src/policy.ts)将 Cookie 验证与限流、代理校验分开。
 
-该包没有运行时不变量伴随插件：授权由各个签名 Cookie 推导，没有可用于比较的独立维护状态。真实组合测试覆盖 route 注册与资源释放。
+不发布运行时不变量伴随插件。授权由各个签名 Cookie 推导，没有可用于比较的独立维护状态。真实组合测试覆盖 route 注册与资源释放。
 
 </details>
 

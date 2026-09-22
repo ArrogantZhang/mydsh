@@ -66,6 +66,7 @@ function mountFrame(windowWidth = frameWidth) {
   const slotCalls: { key: string; props: object; options: RenderOpts | undefined }[] = []
   const renderSlot: AppFrameProps['renderSlot'] = (key, owner, options) => {
     slotCalls.push({ key, props: owner, options })
+    if (key === 'shell.document.title') return options?.fallback ?? null
     return <div data-testid={`${key}-content`} data-entry-key={options?.entryKey} />
   }
   const useSessions: AppFrameProps['useSessions'] = sel => sel({

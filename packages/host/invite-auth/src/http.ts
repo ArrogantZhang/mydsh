@@ -77,9 +77,10 @@ export function writeEmpty(res: ServerResponse, status: number, headers: Outgoin
  * @param status HTTP status code to write.
  * @param body Complete HTML response body.
  * @param headers Additional non-security headers.
+ * @param nonce Owner-generated nonce authorizing only the trusted presentation bootstrap.
  */
-export function writeHtml(res: ServerResponse, status: number, body: string, headers: OutgoingHttpHeaders = {}): void {
-  res.writeHead(status, mergeHeaders({ 'content-type': 'text/html; charset=utf-8' }, headers))
+export function writeHtml(res: ServerResponse, status: number, body: string, headers: OutgoingHttpHeaders = {}, nonce?: string): void {
+  res.writeHead(status, { ...mergeHeaders({ 'content-type': 'text/html; charset=utf-8' }, headers), ...securityHeaders(nonce) })
   res.end(body)
 }
 

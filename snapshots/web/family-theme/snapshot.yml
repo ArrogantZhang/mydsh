@@ -1,0 +1,9 @@
+version: 1
+scenario: family-theme
+profile: web
+composition: web-default
+recording: authored
+header:
+  class: web-default
+session:
+  source: ../deepseek-messages-chat/session.v3.jsonl

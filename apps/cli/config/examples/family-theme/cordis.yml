@@ -1,0 +1,7 @@
+# Apply after the optional family-theme bundle to customize first-visit defaults.
+- id: ui-family-theme
+  config:
+    enabled: true
+    name: 家人小屋
+    greeting: 回来啦，先歇一会儿。
+    palette: morning

@@ -1,0 +1,45 @@
+- button "系统提示词":
+  - img
+  - img
+  - text: 系统提示词
+- text: 只回复 MESSAGES_WEB_READY，不调用工具。 {{clock}}
+- button "复制":
+  - img
+- button "已思考":
+  - text: 已思考
+  - img
+- button "思考":
+  - img
+  - img
+  - text: 思考
+- paragraph: MESSAGES_WEB_READY
+- button "复制":
+  - img
+- button "好的回答":
+  - img
+- button "有问题的回答":
+  - img
+- button "在新对话中分支":
+  - img
+- button "用量 8.2K tok":
+  - img
+  - text: 用量 8.2K tok
+- button "用时 {{duration}}":
+  - img
+  - text: 用时 {{duration}}
+- text: {{clock}}
+- textbox "发消息或创建任务, / 调用指令, @ 文件或对话"
+- button "添加文件或调用指令":
+  - img
+- button "访问模式，当前：工作区内修改": 工作区内修改
+- button "选择模型，当前 DeepSeek-V4-Flash，推理等级 high":
+  - text: DeepSeek-V4-Flash high
+  - img
+- button "发送消息" [disabled]
+- button "1 轮 1 步 · {{throughput}} tok/s":
+  - img
+  - text: 1 轮 1 步{{throughput}} tok/s
+- button "8.2K tok · 缓存命中 16%":
+  - img
+  - text: 8.2K tok缓存命中 16%
+- button "上下文已用 1%": 1%

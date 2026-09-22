@@ -222,6 +222,9 @@ importers:
       '@deepseek-ai/dsh-experimental-agent-team-web-profile':
         specifier: workspace:^
         version: link:../../packages/experimental/agent-team-web-profile
+      '@deepseek-ai/dsh-family-theme':
+        specifier: workspace:^
+        version: link:../../packages/bundle/family-theme
       '@deepseek-ai/dsh-fs-local':
         specifier: workspace:^
         version: link:../../packages/fs/fs-local
@@ -1006,6 +1009,9 @@ importers:
       '@deepseek-ai/dsh-credentials':
         specifier: workspace:^
         version: link:../../credentials/credentials
+      '@deepseek-ai/dsh-family-cover':
+        specifier: workspace:^
+        version: link:../../host/family-cover
       '@deepseek-ai/dsh-file-reference':
         specifier: workspace:^
         version: link:../../context/file-reference
@@ -1883,6 +1889,19 @@ importers:
       '@deepseek-ai/dsh-workflow-ptc':
         specifier: workspace:^
         version: link:../../workflow/workflow-ptc
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+
+  packages/bundle/family-theme:
+    dependencies:
+      '@deepseek-ai/dsh-client-ui-family-theme':
+        specifier: workspace:^
+        version: link:../../client/ui-family-theme
+      '@deepseek-ai/dsh-family-cover':
+        specifier: workspace:^
+        version: link:../../host/family-cover
     devDependencies:
       '@deepseek-ai/cordis':
         specifier: workspace:^
@@ -3224,6 +3243,67 @@ importers:
       react-dom:
         specifier: ^18.2.0
         version: 18.3.1(react@18.3.1)
+
+  packages/client/ui-family-theme:
+    dependencies:
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/dsh-api-remotes':
+        specifier: workspace:^
+        version: link:../../api/remotes
+      '@deepseek-ai/dsh-client-connection':
+        specifier: workspace:^
+        version: link:../connection
+      '@deepseek-ai/dsh-client-locale':
+        specifier: workspace:^
+        version: link:../locale
+      '@deepseek-ai/dsh-client-store':
+        specifier: workspace:^
+        version: link:../store
+      '@deepseek-ai/dsh-client-test-runtime':
+        specifier: workspace:^
+        version: link:../../test-support/client-runtime
+      '@deepseek-ai/dsh-client-ui-conversation':
+        specifier: workspace:^
+        version: link:../ui-conversation
+      '@deepseek-ai/dsh-client-ui-layout':
+        specifier: workspace:^
+        version: link:../ui-layout
+      '@deepseek-ai/dsh-client-ui-primitives':
+        specifier: workspace:^
+        version: link:../ui-primitives
+      '@deepseek-ai/dsh-client-ui-renderer':
+        specifier: workspace:^
+        version: link:../ui-renderer
+      '@deepseek-ai/dsh-client-ui-settings':
+        specifier: workspace:^
+        version: link:../ui-settings
+      '@deepseek-ai/dsh-client-ui-sidebar':
+        specifier: workspace:^
+        version: link:../ui-sidebar
+      '@deepseek-ai/dsh-client-ui-slots':
+        specifier: workspace:^
+        version: link:../ui-slots
+      '@deepseek-ai/dsh-client-ui-theme':
+        specifier: workspace:^
+        version: link:../ui-theme
+      '@deepseek-ai/dsh-family-cover':
+        specifier: workspace:^
+        version: link:../../host/family-cover
+      '@deepseek-ai/dsh-host-invite-auth':
+        specifier: workspace:^
+        version: link:../../host/invite-auth
+      '@types/react':
+        specifier: ~18.3.1
+        version: 18.3.31
+      react:
+        specifier: ^18.2.0
+        version: 18.3.1
 
   packages/client/ui-goal:
     devDependencies:
@@ -7782,6 +7862,46 @@ importers:
       tsx:
         specifier: ^4.19.2
         version: 4.22.4
+
+  packages/host/family-cover:
+    dependencies:
+      '@deepseek-ai/dsh-atomic-write':
+        specifier: workspace:^
+        version: link:../../util/atomic-write
+      '@deepseek-ai/dsh-brand':
+        specifier: workspace:^
+        version: link:../../util/brand
+      '@deepseek-ai/dsh-typert-protocol':
+        specifier: workspace:^
+        version: link:../../typert/protocol
+      '@deepseek-ai/schemastery':
+        specifier: link:../../../vendor/schemastery
+        version: link:../../../vendor/schemastery
+      sharp:
+        specifier: ^0.35.3
+        version: 0.35.3(@types/node@22.20.0)
+      zod:
+        specifier: ^4.4.3
+        version: 4.4.3
+    devDependencies:
+      '@deepseek-ai/cordis':
+        specifier: workspace:^
+        version: link:../../../vendor/cordis
+      '@deepseek-ai/cordis-plugin-include':
+        specifier: workspace:^
+        version: link:../../../vendor/include
+      '@deepseek-ai/cordis-plugin-loader':
+        specifier: workspace:^
+        version: link:../../../vendor/loader
+      '@deepseek-ai/dsh-client-connection':
+        specifier: workspace:^
+        version: link:../../client/connection
+      '@deepseek-ai/dsh-credentials-local':
+        specifier: workspace:^
+        version: link:../../credentials/credentials-local
+      '@deepseek-ai/dsh-host-webserver':
+        specifier: workspace:^
+        version: link:../webserver
 
   packages/host/frontend-static:
     dependencies:

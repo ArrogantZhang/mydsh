@@ -12,7 +12,9 @@ import type {} from '@deepseek-ai/dsh-host-webserver'
 import type { HostConnectionHandle } from '@deepseek-ai/dsh-client-connection'
 import { launchEnvironmentOf } from '@deepseek-ai/dsh-launch-environment'
 import { HttpError, readUrlEncodedForm, redirect, writeEmpty, writeHtml } from './http.ts'
-import { renderLoginPage } from './page.ts'
+import { loginDocument } from './page.ts'
+import type { InvitePageAppearance, InvitePageRegistry } from './types.ts'
+export type { InvitePageAppearance, InvitePageRegistry } from './types.ts'
 import {
   cookieValue,
   FailureLimiter,
@@ -34,6 +36,8 @@ declare module '@deepseek-ai/cordis' {
      * that injects this fact is disposed before that prefix is withdrawn.
      */
     inviteAuthReadiness?: InviteAuthReadiness
+    /** Optional presentation registry; invite-auth retains all authentication controls. */
+    invitePage?: InvitePageRegistry
   }
 }
 
@@ -106,6 +110,7 @@ interface ResolvedConfig {
 }
 
 interface Runtime {
+  appearance: () => InvitePageAppearance | undefined
   connection: HostConnectionHandle | undefined
   config: ResolvedConfig
   inviteCode: string
@@ -240,8 +245,8 @@ function respondEmpty(
 }
 
 /** Write one request-aware HTML response. */
-function respondHtml(req: IncomingMessage, res: ServerResponse, status: number, body: string): void {
-  writeHtml(res, status, body, responseHeaders(req))
+function respondHtml(req: IncomingMessage, res: ServerResponse, status: number, page: { body: string; nonce?: string }): void {
+  writeHtml(res, status, page.body, responseHeaders(req), page.nonce)
 }
 
 /** Write one request-aware redirect response. */
@@ -265,7 +270,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
       respondRedirect(req, res, next, { 'set-cookie': browserCookies(req, runtime) })
       return
     }
-    respondHtml(req, res, 200, renderLoginPage(next, false))
+    respondHtml(req, res, 200, loginDocument(next, false, runtime.appearance()))
     return
   }
 
@@ -286,7 +291,7 @@ async function dispatch(req: IncomingMessage, res: ServerResponse, runtime: Runt
     if (candidate === null) throw new HttpError(400, 'missing inviteCode', false)
     if (!inviteCodeMatches(candidate, runtime.inviteCode)) {
       runtime.limiter.recordFailure(address, Date.now())
-      respondHtml(req, res, 401, renderLoginPage(next, true))
+      respondHtml(req, res, 401, loginDocument(next, true, runtime.appearance()))
       return
     }
     runtime.limiter.clear(address)
@@ -372,7 +377,14 @@ export function apply(ctx: Context, config: Config): void {
     32,
     'bytes',
   )
+  let appearance: InvitePageAppearance | undefined
+  ctx.provide('invitePage', { register(next) {
+    if (appearance !== undefined) throw new Error('invite-auth: presentation already registered')
+    appearance = next
+    return () => { if (appearance === next) appearance = undefined }
+  } })
   const runtime: Runtime = {
+    appearance: () => appearance,
     connection: undefined,
     config: resolved,
     inviteCode,

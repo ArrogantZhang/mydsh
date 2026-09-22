@@ -55,6 +55,7 @@
 | [plan.md](plan.zh.md) | 计划模式：仅记日志的 `plan/mode` 状态、待定选择的冲刷、`PlanModeConfig`、`exit_plan_mode` 审阅流程 |
 | [invariants.md](invariants.zh.md) | 运行时不变式注册表：选择配置 `Config`、`InvariantInstaller`/`InvariantFailure`、空配套插件约定 |
 | [web-server.md](web-server.zh.md) | HTTP 载体：`WebRouteKind`/`WebRoute`、匹配顺序、可认领的回退席位、index 渲染挂接点 |
+| [family-cover.md](family-cover.zh.md) | 私密共享封面版本、标准化图片元数据与鉴权传输 |
 | [webhook.md](webhook.zh.md) | 通过身份验证的提供方交付、任意程序化规则，以及发起 Workspace 会话创建后不等待结果 |
 | [storage.md](storage.zh.md) | 存储子系统：后端约定（`StorageBackend`）、`StorageForms`、`DomainSpec`/`Domain`、`domain/changed` |
 | [workspace.md](workspace.zh.md) | 工作区注册表：`Workspace`/`WorkspaceId`、注册与解析、与会话 `cwd` 的关系 |

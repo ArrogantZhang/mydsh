@@ -65,6 +65,7 @@ export const SERVICE_PAGE: Record<string, string> = {
   agents: 'core.md',
   approval: 'approval.md',
   officeToPdf: 'office-to-pdf.md',
+  familyCover: 'family-cover.md',
   attachments: 'attachment.md',
   shell: 'shell.md',
   shellEnv: 'shell.md',
@@ -158,6 +159,7 @@ export const SERVICE_PAGE: Record<string, string> = {
  */
 export const SERVICE_WALK_EXEMPTIONS: Record<string, string> = {
   inviteAuthReadiness: 'not a service: route-ownership readiness fact — packages/host/invite-auth/README.md owns its lifecycle',
+  invitePage: 'Host presentation registration interface — packages/host/invite-auth/README.md owns its lifecycle and trusted inputs',
   webTerminals: 'client-side terminal view models — packages/api/terminal-controller/README.md owns the API',
   appReady: 'not a service: launcher-provided successful-startup signal — packages/boot/cmdline/README.md owns the launcher contract',
   appExit: 'not a service: launcher-provided bounded process-exit callback — packages/boot/cmdline/README.md owns the launcher contract',
@@ -280,6 +282,9 @@ export const LINK_MAP: Readonly<Record<string, string>> = {
   BrowserUseProviderName: 'browser-use.md',
   ComputerUseProviderName: 'computer-use.md',
   RenderedDocumentBytes: 'office-to-pdf.md',
+  CoverRevision: 'family-cover.md',
+  CoverImage: 'family-cover.md',
+  CoverSnapshot: 'family-cover.md',
   OfficeToPdfRequest: 'office-to-pdf.md',
   OfficeToPdfResult: 'office-to-pdf.md',
   OfficeToPdfPriority: 'office-to-pdf.md',

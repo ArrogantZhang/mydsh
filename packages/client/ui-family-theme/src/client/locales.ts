@@ -1,0 +1,58 @@
+/** Family skin copy; technical authentication and model terminology stays unchanged. */
+export const zh = {
+  'title': '家人小屋', 'settings': '布置小屋', 'enabled': '使用家庭主题', 'personal': '这些设置只影响当前浏览器。',
+  'name': '小屋名称', 'greeting': '欢迎语', 'save': '保存设置', 'saved': '设置已保存',
+  'morning': '暖阳清晨', 'garden': '花园午后', 'evening': '炉火夜晚', 'palette': '家的颜色',
+  'welcome': '留一点时间，给生活和家人', 'eyebrow': '我们的日常，有人一起想',
+  'cover': '家庭封面', 'coverAlt': '大家共享的家庭封面', 'illustrationAlt': '阳光照进有沙发、绿植和茶杯的客厅',
+  'sharedBadge': '封面由受邀家人共享',
+  'shared': '这张封面保存在服务器，所有持邀请码进入的人都能看到、替换或移除。不会发送给模型。',
+  'upload': '上传家庭照片', 'replace': '更换照片', 'remove': '移除共享照片', 'working': '正在处理照片…',
+  'formats': '支持静态 JPG、PNG、WebP。服务器会压缩照片并清除拍摄信息。',
+  'deleteTitle': '移除大家的封面？', 'deleteMessage': '移除后，所有家人都会看到默认客厅插画。',
+  'cancel': '先留着', 'confirm': '确认移除', 'close': '关闭', 'retry': '刷新照片',
+  'localWarning': '浏览器未允许保存设置，关闭页面后可能需要重新设置。',
+  'conflictWarning': '已有其他品牌或主题插件正在使用这些位置。请先停用冲突插件，再启用家庭主题。',
+  'invalid': '名称需为 1–16 字，欢迎语需为 1–32 字，且不能包含换行或控制字符。',
+  'error.auth': '登录已失效，请刷新页面重新输入邀请码。',
+  'error.conflict': '另一位家人刚换了照片，请刷新确认后再操作。',
+  'error.too-large': '照片超过服务器的大小或像素限制，请选择较小的照片。',
+  'error.invalid-image': '照片无法读取。请使用未损坏的静态 JPG、PNG 或 WebP。',
+  'error.busy': '现在有人正在处理照片，请稍后重试。',
+  'error.unavailable': '照片暂时不可用，请刷新网页并确认登录后重试。',
+  'starter.meal': '今天吃什么', 'starter.trip': '计划一次出游', 'starter.story': '聊聊今天',
+  'draft.meal': '帮我想一份适合家人一起吃的晚餐菜单。',
+  'draft.trip': '我们想安排一次轻松的家庭出游，请先问我时间和偏好。',
+  'draft.story': '我想聊聊今天发生的事。', 'draftHint': '选择后填入输入框，由你确认发送。',
+} as const
+
+/** Typed family locale keys. */
+export type FamilyKey = keyof typeof zh
+
+/** English family UI. */
+export const en: Record<FamilyKey, string> = {
+  title: 'Family home', settings: 'Make it home', enabled: 'Use family theme', personal: 'These settings affect this browser only.',
+  name: 'Home name', greeting: 'Welcome message', save: 'Save settings', saved: 'Settings saved',
+  morning: 'Morning sunshine', garden: 'Garden afternoon', evening: 'Evening fireside', palette: 'Home colors',
+  welcome: 'A little time for life and family', eyebrow: 'Everyday ideas, together',
+  cover: 'Family cover', coverAlt: 'Shared family cover', illustrationAlt: 'A sunlit living room with a sofa, plants, and cups of tea',
+  sharedBadge: 'Cover shared with invited family',
+  shared: 'Stored on the server. Everyone admitted by an invite can view, replace, or remove this cover. It is never sent to the model.',
+  upload: 'Upload a family photo', replace: 'Change photo', remove: 'Remove shared photo', working: 'Processing photo…',
+  formats: 'Static JPG, PNG, and WebP. The server compresses photos and removes capture metadata.',
+  deleteTitle: 'Remove the shared cover?', deleteMessage: 'Everyone will see the default living-room illustration instead.',
+  cancel: 'Keep photo', confirm: 'Remove photo', close: 'Close', retry: 'Refresh photo',
+  localWarning: 'This browser could not save your settings. You may need to set them again after closing the page.',
+  conflictWarning: 'Another brand or theme plugin occupies these positions. Disable it before enabling the family theme.',
+  invalid: 'Use 1–16 characters for the name and 1–32 for the welcome message, without line breaks or control characters.',
+  'error.auth': 'Your login expired. Refresh the page and enter an invite again.',
+  'error.conflict': 'Someone just changed the photo. Refresh and review it before trying again.',
+  'error.too-large': 'This photo exceeds the server size or pixel limit. Choose a smaller image.',
+  'error.invalid-image': 'This photo cannot be read. Choose a valid static JPG, PNG, or WebP.',
+  'error.busy': 'Photo processing is busy. Try again shortly.',
+  'error.unavailable': 'The photo is unavailable. Refresh the page, check your login, and try again.',
+  'starter.meal': 'Dinner ideas', 'starter.trip': 'Plan a day out', 'starter.story': 'Talk about today',
+  'draft.meal': 'Help me plan a dinner menu for the family.',
+  'draft.trip': 'Help us plan a relaxed family day out. Ask me about our time and preferences first.',
+  'draft.story': 'I would like to talk about my day.', draftHint: 'Adds a draft for you to review and send.',
+}

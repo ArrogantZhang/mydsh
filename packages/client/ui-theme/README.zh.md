@@ -33,6 +33,8 @@ kind: "package-reference"
 
 ### 注册主题
 
+`ctx.theme.present(id)` 临时选择已注册的调色板，不写入 Host 偏好。执行返回的 disposer 后会恢复最新的底层偏好，包括临时展示期间收到的变更。嵌套展示优先使用最后注册的一项，并忽略已移除的主题定义。调用方通过插件 effect 持有 disposer。
+
 组合可以通过 `ctx.theme` 注册带别名 token 覆盖的第三方主题 id；覆盖层按注册顺序折入活动快照的 token 中。移除其中一个绝不会覆盖最后一个持久化的内置偏好。第三方主题 id 仍是进程内扩展，不会跨越内置 settings schema。
 
 ### 插件前调色板
