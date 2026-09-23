@@ -33,11 +33,13 @@ function codeProps(h: ReturnType<typeof harness>): TextPreviewProps {
 
 describe('document toolbar', () => {
   it('offers an explicit original-file download beside the preview controls', async () => {
+    const errors = vi.spyOn(console, 'error').mockImplementation(() => {})
     const h = harness({ 1: page(1, ['preview'], true) })
     const view = render(<TextPreview {...h.props()} />)
     await settle()
     expect(view.getByRole('button', { name: 'download' })).toBeDefined()
     expect(h.bytes).not.toHaveBeenCalled()
+    expect(errors).not.toHaveBeenCalled()
   })
 
   it('downloads original bytes independently of preview pages and explains a refused read', async () => {

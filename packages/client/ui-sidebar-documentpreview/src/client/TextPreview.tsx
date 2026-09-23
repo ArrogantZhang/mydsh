@@ -111,10 +111,12 @@ export function TextPreview({
   const file = useMemo(() => hostFileOf(tab.contentId), [tab.contentId])
   const download = useDownloads(values => values[sessionId]?.[tab.id])
   const downloadButton = <Tooltip label={t('download')} side="bottom" delayMs={500}>
-    <Button variant="toolbar" aria-label={t('download')} aria-busy={download?.phase === 'reading'}
-      disabled={!canRead || download?.phase === 'reading'} onClick={() => { downloadFile(tab.id, file, signal) }}>
-      <IconDownloadOutline16 />
-    </Button>
+    <span>
+      <Button variant="toolbar" aria-label={t('download')} aria-busy={download?.phase === 'reading'}
+        disabled={!canRead || download?.phase === 'reading'} onClick={() => { downloadFile(tab.id, file, signal) }}>
+        <IconDownloadOutline16 />
+      </Button>
+    </span>
   </Tooltip>
   const downloadFeedback = download === undefined ? null : (
     <p className={css.statusLine} role={download.phase === 'failed' ? 'alert' : 'status'}>
