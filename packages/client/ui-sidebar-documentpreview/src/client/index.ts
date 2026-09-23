@@ -25,7 +25,8 @@ import type { TextPreviewInjected } from './TextPreview.tsx'
 import { TextTitle } from './TextTitle.tsx'
 import { TEXTPREVIEW_ID, textDefinition } from './definition.ts'
 import { textFace } from './face.ts'
-import { createReadPage, documentFileBytes } from './rpc.ts'
+import { createReadPage, documentFileBytes, type ReadDocumentBytes } from './rpc.ts'
+import { DocumentDownloadController } from './download.ts'
 import { createTextStore } from './store.ts'
 import { en, zh } from './locales.ts'
 import { DocumentPreviewRegistry } from './document/registry.ts'
@@ -93,13 +94,13 @@ export function apply(ctx: ClientContext): void {
   ctx.effect(() => ctx.locale.register(NS, { zh, en }), 'ui-sidebar-documentpreview: dictionaries')
 
   const store = createTextStore()
-  const face = textFace(
-    createReadPage(ctx.remote),
-    async (file, signal) => {
-      const result = await ctx.remote.workspaceFiles.readAll(file.sessionId, file.path, signal)
-      return result.ok ? { ok: true, value: documentFileBytes(result.value) } : result
-    },
-  )
+  const readAll: ReadDocumentBytes = async (file, signal) => {
+    const result = await ctx.remote.workspaceFiles.readAll(file.sessionId, file.path, signal)
+    return result.ok ? { ok: true, value: documentFileBytes(result.value) } : result
+  }
+  const face = textFace(createReadPage(ctx.remote), readAll)
+  const downloads = new DocumentDownloadController(readAll)
+  ctx.effect(() => () => downloads.dispose())
   const source = { getSnapshot: previews.getSnapshot, subscribe: previews.subscribe }
   ctx.effect(() => ctx.slots.inject('sidebar.right.pane.tab', () => ctx.slots.register(
     {
@@ -108,7 +109,8 @@ export function apply(ctx: ClientContext): void {
         'sidebar.right.tab.document': { kind: 'keyed', scope: 'session', inject: { hooks: { tabInfo: documentTabInfoFactory } } },
       },
       inject: (sessionId, actions): TextPreviewInjected => ({
-        ...face(sessionId, actions), hooks: { documentPreviews: source },
+        ...face(sessionId, actions), hooks: { documentPreviews: source, downloads },
+        downloadFile: (id, file, signal) => { void downloads.download(sessionId, id, file, signal) },
       }),
     },
     TextPreview,

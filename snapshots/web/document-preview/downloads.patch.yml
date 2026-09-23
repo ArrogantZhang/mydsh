@@ -1,0 +1,5 @@
+- id: workspace-files
+  config:
+    maxFileBytes: 4096
+- id: office-to-pdf
+  disabled: true

@@ -13,7 +13,7 @@ import { imageBodyDefinition } from '../src/client/image/index.ts'
 import { htmlBodyDefinition } from '../src/client/html/index.ts'
 import { documentSlots, ABSOLUTE_PATH, FILE, harness, page, settle, TAB_ID } from './fixtures.client.ts'
 
-afterEach(cleanup)
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 const binary: DocumentPreviewDefinition = {
   id: 'complete-document', extensions: ['md'], title: () => 'Complete document', loading: 'bytes-complete',
@@ -32,6 +32,67 @@ function codeProps(h: ReturnType<typeof harness>): TextPreviewProps {
 }
 
 describe('document toolbar', () => {
+  it('offers an explicit original-file download beside the preview controls', async () => {
+    const h = harness({ 1: page(1, ['preview'], true) })
+    const view = render(<TextPreview {...h.props()} />)
+    await settle()
+    expect(view.getByRole('button', { name: 'download' })).toBeDefined()
+    expect(h.bytes).not.toHaveBeenCalled()
+  })
+
+  it('downloads original bytes independently of preview pages and explains a refused read', async () => {
+    const h = harness({ 1: page(1, ['partial preview'], false) })
+    const pending = Promise.withResolvers<Awaited<ReturnType<typeof h.bytes>>>()
+    h.bytes.mockReturnValueOnce(pending.promise)
+    onTestFinished(() => { pending.resolve({ ok: false, error: new RemoteError('workspace-file/not-found', 'Missing', { path: FILE.path }) }) })
+    const view = render(<TextPreview {...h.props()} />)
+    await settle()
+    const button = view.getByRole('button', { name: 'download' })
+    fireEvent.click(button)
+    fireEvent.click(button)
+    await settle()
+    expect(button.getAttribute('aria-busy')).toBe('true')
+    expect((button as HTMLButtonElement).disabled).toBe(true)
+    expect(h.bytes).toHaveBeenCalledExactlyOnceWith(FILE, expect.any(AbortSignal))
+    expect(view.getByRole('status').textContent).toBe('download.reading')
+    await act(async () => {
+      pending.resolve({ ok: false, error: new RemoteError('workspace-file/too-large', 'Limit', { path: FILE.path, limit: 1024 }) })
+      await pending.promise
+    })
+    expect(view.getByRole('alert').textContent).toBe('error.tooLarge(limit=1 KB)')
+    expect(view.container.textContent).toContain('partial preview')
+    expect((button as HTMLButtonElement).disabled).toBe(false)
+    h.bytes.mockRejectedValueOnce(new Error('disconnected'))
+    fireEvent.click(button)
+    await settle()
+    expect(view.getByRole('alert').textContent).toBe('download.failed')
+  })
+
+  it('allows download for an unsupported preview and announces browser handoff', async () => {
+    const h = harness()
+    const props = h.props()
+    const info = props.useTabInfo()
+    h.bytes.mockResolvedValue({ ok: true, value: {
+      absolutePath: '/workspace/原始档案.zip', version: 'v1', offset: 0, data: Uint8Array.of(80, 75), bytes: 2, eof: true,
+    } })
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends URL { static override createObjectURL = () => 'blob:archive'; static override revokeObjectURL = revoke })
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function (this: HTMLAnchorElement) {
+      expect(this.download).toBe('原始档案.zip')
+    })
+    const view = render(<TextPreview {...props}
+      useTabInfo={() => ({ ...info, tab: { ...info.tab, contentId: 'dsh-resource://file/session/s-1/archive.zip' } })} />)
+    expect(view.container.textContent).toContain('unsupportedFile')
+    expect(h.bytes).not.toHaveBeenCalled()
+    fireEvent.click(view.getByRole('button', { name: 'download' }))
+    await settle()
+    expect(click).toHaveBeenCalledOnce()
+    expect(view.getByRole('status').textContent).toBe('download.started')
+    expect(h.read).not.toHaveBeenCalled()
+    act(() => { h.controller.abort() })
+    expect(revoke).toHaveBeenCalledExactlyOnceWith('blob:archive')
+  })
+
   it.each([
     ['report.doc', false], ['sheet.xls', false], ['slides.ppt', false],
     ['report.docx', false], ['sheet.xlsx', false], ['slides.pptx', false],

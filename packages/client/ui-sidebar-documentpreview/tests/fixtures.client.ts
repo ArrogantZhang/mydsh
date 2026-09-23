@@ -21,6 +21,7 @@ import { textFace } from '../src/client/face.ts'
 import type { TextInjected } from '../src/client/face.ts'
 import type { ReadDocumentBytes, ReadWorkspaceFilePage, SessionFile } from '../src/client/rpc.ts'
 import { createTextStore } from '../src/client/store.ts'
+import { DocumentDownloadController } from '../src/client/download.ts'
 import type { TextStore } from '../src/client/store.ts'
 import type { DocumentPreviewProps } from '../src/client/document/contract.ts'
 import { TextBody } from '../src/client/text/TextBody.tsx'
@@ -120,6 +121,8 @@ export function harness(script: Record<number, RemoteResult<WorkspaceFileText>> 
   const read = vi.fn<ReadWorkspaceFilePage>((_session, _path, offset) =>
     Promise.resolve(pages[offset] ?? failure('workspace-file/not-found', { path: PATH })))
   const bytes = vi.fn<ReadDocumentBytes>()
+  const downloads = new DocumentDownloadController(bytes)
+  onTestFinished(() => downloads.dispose())
   const face = textFace(read, bytes)(SESSION, instance.actions)
   const current = { version: 'v1' as string | undefined, failure: undefined as RemoteFailure | undefined, snapshot: meta('v1', undefined) }
   const refresh = (): void => { current.snapshot = meta(current.version, current.failure) }
@@ -151,6 +154,8 @@ export function harness(script: Record<number, RemoteResult<WorkspaceFileText>> 
     prepareRenderer: face.prepareRenderer, loadAll: face.loadAll,
     reloadAll: face.reloadAll,
     useDocumentPreviews: () => definitions,
+    useDownloads: hookOf(downloads),
+    downloadFile: (id: TabId, file: SessionFile, signal: AbortSignal) => { void downloads.download(SESSION, id, file, signal) },
     renderSlot,
     t,
   }) as unknown as TextPreviewProps

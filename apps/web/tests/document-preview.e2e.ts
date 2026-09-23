@@ -1,5 +1,5 @@
 /** Keyless document-preview smoke through a real Session, Files tab, and shipped renderers. */
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, unlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -602,7 +602,7 @@ describe.skipIf(MODE === 'record')('web e2e: document preview through Files', ()
     expect(tripwire.pageErrors).toEqual([])
     expect(tripwire.warnings).toEqual([])
     await compareOrRefreshGolden(EXPECTED, sections.join('\n\n'), MODE)
-    await assertFixtureInventory(SNAPSHOT_DIR, ['document.expected.md', 'paging.patch.yml'])
+    await assertFixtureInventory(SNAPSHOT_DIR, ['document.expected.md', 'paging.patch.yml', 'download.expected.md', 'downloads.patch.yml'])
   })
 })
 
@@ -734,5 +734,98 @@ describe.skipIf(MODE === 'record')('web e2e: Host Office preview', () => {
       expect(convert).toHaveBeenCalledTimes(11)
       expect(tripwire.pageErrors).toEqual([])
     } finally { convert.mockRestore() }
+  })
+})
+
+describe.skipIf(MODE === 'record')('web e2e: original document downloads', () => {
+  it('downloads exact original files and refuses unavailable or oversized sources', async () => {
+    let scaffold: WebScaffold | undefined
+    let browser: Browser | undefined
+    try {
+      scaffold = await launchWebScaffold({ replayFixture: FIXTURE, paceMs: 5, compareReplaySession: false,
+        extraOverlayPath: join(SNAPSHOT_DIR, 'downloads.patch.yml') })
+      browser = await chromium.launch()
+      const page = await newEnglishPage(browser)
+      const tripwire = watchConsole(page)
+      const savedNames: string[] = []
+      page.on('download', (download) => { savedNames.push(download.suggestedFilename()) })
+      await page.goto(scaffold.authenticatedUrl)
+      await connectFreshWorkspace(page, scaffold.workspaceCwd)
+      const settled = scaffold.whenTurnSettled()
+      const input = page.locator('[data-composer-input]').first()
+      await input.fill(PROMPT)
+      await input.press('Enter')
+      const sessionId = await settled
+      await page.getByText('LIGHTHOUSE', { exact: true }).waitFor()
+      const cwd = scaffold.ctx.agents.get(sessionId)?.session.header.cwd
+      if (cwd === undefined) throw new Error('Download Session has no workspace')
+      const originals = new Map<string, Uint8Array>([
+        ['original.docx', realOfficeBytes('docx')], ['original.xlsx', realOfficeBytes('xlsx')],
+        ['original.pdf', pdfFixture()], ['中文原文件.txt', Buffer.from('ORIGINAL\r\n完整内容\r\n')],
+        ['archive.zip', Buffer.from([80, 75, 0, 255])],
+      ])
+      await Promise.all([
+        ...[...originals].map(([name, bytes]) => writeFile(join(cwd, name), bytes)),
+        writeFile(join(cwd, 'too-large.zip'), new Uint8Array(4097)),
+        writeFile(join(cwd, 'deleted.txt'), 'Temporary download fixture'),
+      ])
+      const anonymous = await fetch(new URL('/api/workspaceFiles/readAll', scaffold.authenticatedUrl), {
+        method: 'POST', headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ type: 'client-request', rpcId: 'anonymous-download', method: 'workspaceFiles/readAll',
+          payload: { args: { sessionId, path: 'original.docx' } } }),
+      })
+      expect(anonymous.status).toBe(401)
+      await anonymous.body?.cancel()
+      const column = page.locator('[data-rightbar-col]')
+      await page.locator('[data-sidebar-right-expand]').click()
+      await column.locator('[data-sidebar-right-guide-entry="files"]').click()
+      await column.locator('[data-files-state="tree"]').waitFor()
+      const files = column.locator('[data-dockkit-tab]').filter({ has: page.getByText('Files', { exact: true }) })
+      const preview = column.locator('[data-textpreview-url]')
+      const open = async (name: string): Promise<void> => {
+        await files.click()
+        await column.locator('[data-files-entry="file"]').getByRole('button', { name, exact: true }).click()
+        await expect.poll(async () => (await preview.getAttribute('data-textpreview-url'))?.endsWith(`/${encodeURIComponent(name)}`)).toBe(true)
+      }
+      for (const [name, original] of originals) {
+        await open(name)
+        const [download] = await Promise.all([
+          page.waitForEvent('download'),
+          preview.getByRole('button', { name: 'Download file', exact: true }).click(),
+        ]).catch(async (error: unknown) => {
+          console.log('Original download failure', { name, savedNames, pageErrors: tripwire.pageErrors,
+            preview: await preview.ariaSnapshot() })
+          throw error
+        })
+        expect(download.suggestedFilename()).toBe(name)
+        expect(await download.failure()).toBeNull()
+        const path = await download.path()
+        if (path === null) throw new Error('Browser did not save the original file')
+        expect(await readFile(path)).toEqual(Buffer.from(original))
+        expect(await readFile(join(cwd, name))).toEqual(Buffer.from(original))
+      }
+      await open('too-large.zip')
+      await preview.getByRole('button', { name: 'Download file', exact: true }).click()
+      await preview.getByRole('alert').filter({ hasText: '4 KB' }).waitFor()
+      const oversized = await preview.getByRole('alert').innerText()
+      await open('deleted.txt')
+      await preview.getByText('Temporary download fixture', { exact: true }).waitFor()
+      await unlink(join(cwd, 'deleted.txt'))
+      await preview.getByRole('button', { name: 'Download file', exact: true }).click()
+      await preview.getByRole('alert').filter({ hasText: 'File not found' }).waitFor()
+      expect(savedNames).toEqual([...originals.keys()])
+      await compareOrRefreshGolden(join(SNAPSHOT_DIR, 'download.expected.md'), [
+        '# Original document downloads', '',
+        ...savedNames.map(name => `- ${name}: original filename and bytes preserved`),
+        '- Office conversion service: disabled',
+        `- Anonymous complete-file request: ${anonymous.status}`,
+        `- Oversized source: ${oversized}`,
+        `- Deleted source: ${await preview.getByRole('alert').innerText()}`,
+        '- Refused reads start no download',
+      ].join('\n'), MODE)
+      expect(tripwire.pageErrors).toEqual([])
+    } finally {
+      try { await browser?.close() } finally { await scaffold?.close() }
+    }
   })
 })

@@ -15,13 +15,16 @@ import type { ReactNode, RefObject } from 'react'
 import clsx from 'clsx'
 import type { ObservableSnapshot } from '@deepseek-ai/dsh-client-store'
 import type { InjectFace, PropsLocale, PropsRenderSlots, PropsRuntime, PropsStore } from '@deepseek-ai/dsh-client-ui-slots'
-import { FileTypeIcon, IconRefreshOutline16, Menu, Tooltip, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
+import { Button, FileTypeIcon, IconDownloadOutline16, IconRefreshOutline16, Menu, Tooltip, classifyFileType } from '@deepseek-ai/dsh-client-ui-primitives'
 import { pathPartsOf } from '@deepseek-ai/dsh-util-workspace-path'
 import type { TextInjected } from './face.ts'
 import { failureLine } from './failure-line.ts'
 import { IconNowrapFill16, IconWrapFill16 } from './icons.tsx'
 import { LoadingIndicator } from './LoadingIndicator.tsx'
 import { hostFileOf } from './rpc.ts'
+import type { SessionFile } from './rpc.ts'
+import type { TabId } from '@deepseek-ai/dsh-client-ui-dockkit'
+import type { DocumentDownloads } from './download.ts'
 import type { TextStore } from './store.ts'
 import type { DocumentContent } from './document/contract.ts'
 import { binaryDocumentPath, matchingDocumentPreviews } from './document/registry.ts'
@@ -76,7 +79,12 @@ function HeaderPath({ pathRef, pathTextRef, path }: {
 
 /** Private registration inputs; the framework binds the registry source to useDocumentPreviews. */
 export interface TextPreviewInjected extends TextInjected {
-  readonly hooks: { readonly documentPreviews: ObservableSnapshot<readonly DocumentPreviewDefinition[]> }
+  readonly hooks: {
+    readonly documentPreviews: ObservableSnapshot<readonly DocumentPreviewDefinition[]>
+    readonly downloads: ObservableSnapshot<DocumentDownloads>
+  }
+  /** @param id - preview tab. @param file - addressed Session file. @param signal - tab lifetime. */
+  readonly downloadFile: (id: TabId, file: SessionFile, signal: AbortSignal) => void
 }
 
 /** The body's composed props: the tab, its navigation, the shared store and face, and copy. */
@@ -93,14 +101,28 @@ export type TextPreviewProps =
  * @returns the content read so far with its controls, or a progress line.
  */
 export function TextPreview({
-  useTabInfo, useResource, useStore, actions, loadPage, reloadPages,
-  loadAll, reloadAll, prepareRenderer, useDocumentPreviews, renderSlot, t,
+  sessionId, useTabInfo, useResource, useStore, actions, loadPage, reloadPages,
+  loadAll, reloadAll, prepareRenderer, useDocumentPreviews, useDownloads, downloadFile, renderSlot, t,
 }: TextPreviewProps): ReactNode {
   const { tab } = useTabInfo()
   const { navigation, signal } = tab
   const meta = useResource<'file'>(tab.contentId)
   const canRead = meta.status !== 'none'
   const file = useMemo(() => hostFileOf(tab.contentId), [tab.contentId])
+  const download = useDownloads(values => values[sessionId]?.[tab.id])
+  const downloadButton = <Tooltip label={t('download')} side="bottom" delayMs={500}>
+    <Button variant="toolbar" aria-label={t('download')} aria-busy={download?.phase === 'reading'}
+      disabled={!canRead || download?.phase === 'reading'} onClick={() => { downloadFile(tab.id, file, signal) }}>
+      <IconDownloadOutline16 />
+    </Button>
+  </Tooltip>
+  const downloadFeedback = download === undefined ? null : (
+    <p className={css.statusLine} role={download.phase === 'failed' ? 'alert' : 'status'}>
+      {download.phase === 'failed'
+        ? download.failure === undefined ? t('download.failed') : failureLine(t, download.failure)
+        : t(download.phase === 'reading' ? 'download.reading' : 'download.started')}
+    </p>
+  )
   const state = useStore(s => s.byTab[tab.id])
   const definitions = useDocumentPreviews(value => value)
   const unviewable = useMemo(() => unviewableBinaryPath(file.path), [file.path])
@@ -215,7 +237,9 @@ export function TextPreview({
       <div className={css.preview} data-textpreview-state="unsupported" data-textpreview-url={tab.contentId}>
         <div className={css.header}>
           <HeaderPath pathRef={pathRef} pathTextRef={pathTextRef} path={displayPath} />
+          {downloadButton}
         </div>
+        {downloadFeedback}
         <div className={css.body} data-textpreview-body>
           <div className={css.empty} data-textpreview-unsupported>
             <FileTypeIcon kind={classifyFileType(unsupportedName)} size={36} className={css.emptyIcon} />
@@ -329,7 +353,9 @@ export function TextPreview({
             <IconRefreshOutline16 />
           </button>
         </Tooltip>
+        {downloadButton}
       </div>
+      {downloadFeedback}
       <div
         ref={bindBody}
         className={clsx(css.body, state.wrap && css.wrap)}
